@@ -1,0 +1,56 @@
+# ---- OS / editor ----
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+*.log
+
+# ---- Claude local config (personal, do not commit) ----
+.claude/settings.local.json
+
+# ---- Secrets / env ----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+!**/testdata/*.key
+secrets/
+kubeconfig
+*.kubeconfig
+
+# ---- Go ----
+bin/
+dist/
+/apps/api/bin/
+/apps/api/tmp/
+coverage.out
+coverage.html
+*.test
+
+# ---- Node / Next.js ----
+node_modules/
+.next/
+out/
+.turbo/
+.pnpm-store/
+npm-debug.log*
+yarn-error.log*
+.vercel
+
+# ---- Terraform ----
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+*.tfvars
+!*.tfvars.example
+
+# ---- Misc build ----
+tmp/
+*.tgz
+
+# ---- Local reference: upstream Coolify source (read-only, not part of Viro) ----
+_clone/
+reference/
