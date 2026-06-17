@@ -12,7 +12,6 @@ import {
 } from "react";
 import {
   api,
-  type AuthResponse,
   type LoginInput,
   type OnUnauthorized,
   type Org,
@@ -21,30 +20,21 @@ import {
 } from "@/lib/api";
 
 // ---------------------------------------------------------------------------
-// SECURITY TODO — token storage hardening (needs backend work)
+// Cookie-based sessions.
 //
-// Tokens currently live in localStorage. This is convenient but NOT the
-// long-term-correct place to keep them:
+// Auth tokens are issued by the API as HttpOnly + SameSite (Secure in prod)
+// cookies and are NEVER reachable from JavaScript — so an XSS payload cannot
+// exfiltrate them. The browser attaches them automatically (fetch uses
+// `credentials: "include"`); the client holds NO tokens. The session is derived
+// by calling `/v1/me`, refreshed via the rotating refresh cookie, and ended by
+// `/v1/auth/logout` (which revokes the refresh token server-side).
 //
-//   - localStorage is readable by ANY JavaScript on the origin, so a single
-//     XSS payload (a bad dependency, a reflected string, a compromised CDN)
-//     can exfiltrate both the access AND refresh token.
-//   - The refresh token is valid for up to 30 days and there is no
-//     server-side revocation today (see CLAUDE.md "Known gaps"), so a stolen
-//     refresh token grants a 30-day foothold that we cannot cut off.
-//
-// The real fix is to have the API set HttpOnly + Secure + SameSite cookies on
-// login/refresh so the tokens are never reachable from JS, and to add
-// refresh-token rotation + revocation server-side. That is a backend change;
-// until it lands we keep localStorage but route every read/write through the
-// safeLocalStorage helper below and single-flight the refresh.
-// TODO(backend): issue HttpOnly cookies + add refresh rotation/revocation,
-// then delete the localStorage token paths here.
+// `accessToken` on the context is a presence sentinel ("session" when signed
+// in, null otherwise) kept for the few call sites that use it as a boolean; it
+// is not a real token. Only the active-org preference is persisted locally.
 // ---------------------------------------------------------------------------
 
-const ACCESS_KEY = "viro.accessToken";
-const REFRESH_KEY = "viro.refreshToken";
-const USER_KEY = "viro.user";
+const SESSION = "session"; // non-secret presence sentinel for accessToken
 const ACTIVE_ORG_KEY = "viro.activeOrgId";
 
 /**
@@ -117,16 +107,6 @@ interface AuthContextValue extends AuthState {
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
-function readStored<T>(key: string): T | null {
-  const raw = safeLocalStorage.get(key);
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw) as T;
-  } catch {
-    return null;
-  }
-}
-
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AuthState>({
     user: null,
@@ -137,39 +117,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [orgs, setOrgs] = useState<Org[]>([]);
   const [activeOrgId, setActiveOrgIdState] = useState<string | null>(null);
 
-  // Refs mirror the latest tokens so callbacks don't capture stale closures.
-  const accessRef = useRef<string | null>(null);
-  const refreshRef = useRef<string | null>(null);
-
-  // Single-flight refresh: holds the in-flight api.refresh() promise so that
-  // concurrent 401s await ONE network call instead of stampeding the endpoint
-  // (and racing to overwrite each other's tokens).
+  // Single-flight refresh: concurrent 401s await ONE api.refresh() call (which
+  // rotates the HttpOnly cookies) instead of stampeding the endpoint.
   const refreshInFlight = useRef<Promise<string | null> | null>(null);
-
-  const writeTokens = useCallback(
-    (access: string | null, refresh: string | null) => {
-      accessRef.current = access;
-      refreshRef.current = refresh;
-      if (access) safeLocalStorage.set(ACCESS_KEY, access);
-      else safeLocalStorage.remove(ACCESS_KEY);
-      if (refresh) safeLocalStorage.set(REFRESH_KEY, refresh);
-      else safeLocalStorage.remove(REFRESH_KEY);
-    },
-    [],
-  );
 
   const setActiveOrgId = useCallback((id: string) => {
     setActiveOrgIdState(id);
     safeLocalStorage.set(ACTIVE_ORG_KEY, id);
   }, []);
 
+  // applyUser marks the session as authenticated. accessToken is a non-secret
+  // presence sentinel — the real token lives only in the HttpOnly cookie.
+  const applyUser = useCallback((user: User) => {
+    setState({
+      user,
+      accessToken: SESSION,
+      refreshToken: null,
+      loading: false,
+    });
+  }, []);
+
   const logout = useCallback(() => {
-    // TODO(backend): no server-side revocation today — the refresh token stays
-    // valid for its full 30-day lifetime even after this client-side logout.
-    writeTokens(null, null);
     refreshInFlight.current = null;
-    safeLocalStorage.remove(USER_KEY);
-    safeLocalStorage.remove(ACTIVE_ORG_KEY);
     setOrgs([]);
     setActiveOrgIdState(null);
     setState({
@@ -178,31 +147,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       refreshToken: null,
       loading: false,
     });
-  }, [writeTokens]);
+    // Best-effort server-side revocation + cookie clear.
+    void api.logout().catch(() => {});
+  }, []);
 
-  // Refresh-on-401 hook: exchanges the stored refresh token for new tokens,
-  // persists them, and returns the new access token (or null on failure).
-  // Single-flighted: concurrent callers share one in-flight api.refresh().
+  // Refresh-on-401 hook: rotates the session via the refresh cookie. Returns a
+  // truthy sentinel so the caller retries (the refreshed cookie carries the new
+  // session); null on failure. Single-flighted across concurrent 401s.
   const onUnauthorized = useCallback<OnUnauthorized>(() => {
-    const refreshToken = refreshRef.current;
-    if (!refreshToken) return Promise.resolve(null);
-
     if (refreshInFlight.current) return refreshInFlight.current;
 
     const inFlight = (async () => {
       try {
-        const res = await api.refresh(refreshToken);
-        writeTokens(res.accessToken, res.refreshToken);
-        safeLocalStorage.set(USER_KEY, JSON.stringify(res.user));
-        setState((prev) => ({
-          ...prev,
-          user: res.user,
-          accessToken: res.accessToken,
-          refreshToken: res.refreshToken,
-        }));
-        return res.accessToken;
+        const res = await api.refresh();
+        applyUser(res.user);
+        return SESSION;
       } catch {
-        // Refresh failed: tokens are no longer valid.
         logout();
         return null;
       } finally {
@@ -212,20 +172,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     refreshInFlight.current = inFlight;
     return inFlight;
-  }, [writeTokens, logout]);
+  }, [applyUser, logout]);
 
   const authedCall = useCallback<AuthedCaller>(
-    (fn, signal) => {
-      const token = accessRef.current ?? "";
-      return fn(token, onUnauthorized, signal);
-    },
+    (fn, signal) => fn("", onUnauthorized, signal),
     [onUnauthorized],
   );
 
   // Load the user's orgs and pick a default active org.
   const loadOrgs = useCallback(async () => {
     try {
-      const res = await api.listOrgs(accessRef.current ?? "", onUnauthorized);
+      const res = await api.listOrgs("", onUnauthorized);
       setOrgs(res.data);
       const stored = safeLocalStorage.get(ACTIVE_ORG_KEY);
       const valid =
@@ -236,73 +193,60 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         safeLocalStorage.set(ACTIVE_ORG_KEY, next);
       }
     } catch {
-      // Leave orgs empty; the UI falls back to mock data.
+      // Leave orgs empty; the UI falls back to mock data (demo mode only).
     }
   }, [onUnauthorized]);
 
-  const persist = useCallback(
-    (res: AuthResponse) => {
-      writeTokens(res.accessToken, res.refreshToken);
-      safeLocalStorage.set(USER_KEY, JSON.stringify(res.user));
-      setState({
-        user: res.user,
-        accessToken: res.accessToken,
-        refreshToken: res.refreshToken,
-        loading: false,
-      });
-    },
-    [writeTokens],
-  );
-
-  // Hydrate from localStorage on mount, then load orgs if signed in.
+  // Derive the session from the cookie on mount: try /v1/me; if it 401s, try a
+  // single cookie-based refresh and re-check before giving up.
   useEffect(() => {
-    const accessToken = safeLocalStorage.get(ACCESS_KEY);
-    const refreshToken = safeLocalStorage.get(REFRESH_KEY);
-    const user = readStored<User>(USER_KEY);
-
-    accessRef.current = accessToken;
-    refreshRef.current = refreshToken;
-
-    setState({
-      user,
-      accessToken,
-      refreshToken,
-      loading: false,
-    });
-
-    if (accessToken) {
-      void loadOrgs();
-      // Re-fetch the current user so fields like isAdmin stay fresh and are
-      // available immediately after a hard reload.
-      void api
-        .me(accessToken, onUnauthorized)
-        .then((freshUser) => {
-          safeLocalStorage.set(USER_KEY, JSON.stringify(freshUser));
-          setState((prev) => ({ ...prev, user: freshUser }));
-        })
-        .catch(() => {
-          // Offline/unreachable: keep the hydrated user as-is.
-        });
-    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const user = await api.me("");
+        if (cancelled) return;
+        applyUser(user);
+        await loadOrgs();
+      } catch {
+        try {
+          await api.refresh();
+          const user = await api.me("");
+          if (cancelled) return;
+          applyUser(user);
+          await loadOrgs();
+        } catch {
+          if (cancelled) return;
+          setState({
+            user: null,
+            accessToken: null,
+            refreshToken: null,
+            loading: false,
+          });
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const login = useCallback(
     async (input: LoginInput) => {
       const res = await api.login(input);
-      persist(res);
+      applyUser(res.user);
       await loadOrgs();
     },
-    [persist, loadOrgs],
+    [applyUser, loadOrgs],
   );
 
   const signup = useCallback(
     async (input: SignupInput) => {
       const res = await api.signup(input);
-      persist(res);
+      applyUser(res.user);
       await loadOrgs();
     },
-    [persist, loadOrgs],
+    [applyUser, loadOrgs],
   );
 
   const value = useMemo<AuthContextValue>(

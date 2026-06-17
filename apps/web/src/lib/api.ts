@@ -461,18 +461,23 @@ async function request<T>(
       method,
       headers,
       signal,
+      // Send/receive the HttpOnly auth cookies (vortex_access/vortex_refresh).
+      // The session is cookie-based; the optional Bearer header is only a
+      // fallback for non-browser clients.
+      credentials: "include",
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
   }
 
   let res = await exec(token);
 
-  // Refresh-on-401: if we sent a token, got a 401, and have a refresh hook,
-  // try to refresh once and retry the request a single time.
-  if (res.status === 401 && token && onUnauthorized) {
-    const newToken = await onUnauthorized();
-    if (newToken) {
-      res = await exec(newToken);
+  // Refresh-on-401: on a 401, if a refresh hook is provided, refresh once
+  // (rotating the HttpOnly cookies server-side) and retry the request once.
+  // No JS-held token is required — the refreshed cookie carries the new session.
+  if (res.status === 401 && onUnauthorized) {
+    const refreshed = await onUnauthorized();
+    if (refreshed) {
+      res = await exec(token);
     }
   }
 
@@ -516,10 +521,20 @@ export const api = {
     });
   },
 
-  refresh(refreshToken: string, opts?: CallOpts): Promise<AuthResponse> {
+  // Refresh rotates the session. The refresh token is read from the HttpOnly
+  // cookie; refreshToken is optional and only used by non-browser callers.
+  refresh(refreshToken?: string, opts?: CallOpts): Promise<AuthResponse> {
     return request<AuthResponse>("/v1/auth/refresh", {
       method: "POST",
-      body: { refreshToken },
+      body: refreshToken ? { refreshToken } : {},
+      signal: opts?.signal,
+    });
+  },
+
+  // Logout revokes the refresh token server-side and clears the auth cookies.
+  logout(opts?: CallOpts): Promise<void> {
+    return request<void>("/v1/auth/logout", {
+      method: "POST",
       signal: opts?.signal,
     });
   },
