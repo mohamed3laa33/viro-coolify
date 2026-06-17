@@ -42,7 +42,9 @@ type Store interface {
 
 	// Databases (tenant-scoped).
 	CreateDatabase(ctx context.Context, d *domain.Database) error
+	GetDatabase(ctx context.Context, id string) (*domain.Database, error)
 	ListDatabasesByOrg(ctx context.Context, orgID string) ([]domain.Database, error)
+	DeleteDatabase(ctx context.Context, id string) error
 
 	// Services (one-click catalog instances, tenant-scoped).
 	CreateService(ctx context.Context, svc *domain.Service) error

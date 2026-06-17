@@ -2,6 +2,8 @@
 # Point it at any plain/new cluster and run ONE command — no manual kubectl:
 #
 #   VORTEX_JWT_SECRET=$(openssl rand -hex 32) \
+#   VORTEX_PG_PASSWORD=$(openssl rand -hex 24) \
+#   VORTEX_DATABASE_URL="postgres://vortex:${VORTEX_PG_PASSWORD}@vortex-postgres.vortex.svc.cluster.local:5432/vortex?sslmode=require" \
 #   VORTEX_DO_TOKEN=dop_v1_xxx \
 #     helmfile -f deploy/helmfile.yaml apply
 #
@@ -28,11 +30,16 @@ environments:
         tag: '{{ env "VORTEX_IMAGE_TAG" | default "latest" }}'
         baseDomain: '{{ env "VORTEX_BASE_DOMAIN" | default "vortex.v60ai.com" }}'
         jwtSecret: '{{ requiredEnv "VORTEX_JWT_SECRET" }}'
-        databaseUrl: '{{ env "VORTEX_DATABASE_URL" | default "postgres://vortex:change-me-in-production@vortex-postgres.vortex.svc.cluster.local:5432/vortex?sslmode=disable" }}'
+        # Postgres password and connection string are REQUIRED — no insecure default.
+        # Supply a strong password (e.g. `openssl rand -hex 24`); the database URL must
+        # use sslmode=require. Example:
+        #   VORTEX_PG_PASSWORD=$(openssl rand -hex 24)
+        #   VORTEX_DATABASE_URL="postgres://vortex:${VORTEX_PG_PASSWORD}@vortex-postgres.vortex.svc.cluster.local:5432/vortex?sslmode=require"
+        pgPassword: '{{ requiredEnv "VORTEX_PG_PASSWORD" }}'
+        databaseUrl: '{{ requiredEnv "VORTEX_DATABASE_URL" }}'
         adminEmails: '{{ env "VORTEX_ADMIN_EMAILS" | default "" }}'
         stripeSecretKey: '{{ env "VORTEX_STRIPE_SECRET_KEY" | default "" }}'
         stripeWebhookSecret: '{{ env "VORTEX_STRIPE_WEBHOOK_SECRET" | default "" }}'
-        pgPassword: '{{ env "VORTEX_PG_PASSWORD" | default "change-me-in-production" }}'
         doToken: '{{ env "VORTEX_DO_TOKEN" | default "" }}'
 
 ---

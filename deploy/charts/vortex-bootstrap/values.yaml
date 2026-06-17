@@ -4,7 +4,9 @@ acmeEmail: admin@v60ai.com
 postgres:
   enabled: true
   image: postgres:16-alpine
-  password: change-me-in-production
+  # No insecure default — a strong password MUST be supplied (the helmfile passes
+  # the required VORTEX_PG_PASSWORD here). Rendering fails if left empty.
+  password: ""
   storage: 10Gi
 
 gateway:

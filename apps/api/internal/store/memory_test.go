@@ -68,7 +68,7 @@ func TestMemoryStoreSeededDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get settings: %v", err)
 	}
-	if set.DefaultPlanID != "hobby" || set.DefaultCPU != 0.25 || set.DefaultMemoryMB != 256 || len(set.Regions) != 4 {
+	if set.DefaultPlanID != "hobby" || set.DefaultCPU != 0.1 || set.DefaultMemoryMB != 128 || len(set.Regions) != 4 {
 		t.Fatalf("unexpected settings: %+v", set)
 	}
 }

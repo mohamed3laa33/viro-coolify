@@ -2,9 +2,6 @@ package kube
 
 import "strings"
 
-// wordpressImage is the pinned WordPress image (apache variant), per the volo recipe.
-const wordpressImage = "wordpress:6.8-php8.3-apache"
-
 func isWordPress(w Workload) bool {
 	return strings.EqualFold(w.ServiceTemplateKey, "wordpress")
 }

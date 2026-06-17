@@ -21,10 +21,20 @@ spec:
       imagePullSecrets:
         - name: {{ .Values.image.pullSecret }}
       {{- end }}
+      serviceAccountName: {{ include "viro.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      {{- with .Values.web.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: web
           image: "{{ .Values.image.registry }}/{{ .Values.web.image }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.web.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           ports:
             - containerPort: {{ .Values.web.port }}
           env:
@@ -40,6 +50,18 @@ spec:
             periodSeconds: 10
           resources:
             {{- toYaml .Values.web.resources | nindent 12 }}
+          {{- if and .Values.web.securityContext .Values.web.securityContext.readOnlyRootFilesystem }}
+          # Next.js standalone writes runtime files (cache, etc.) under /tmp; provide
+          # an in-memory writable mount so the rootfs can stay read-only.
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          {{- end }}
+      {{- if and .Values.web.securityContext .Values.web.securityContext.readOnlyRootFilesystem }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- end }}
 ---
 apiVersion: v1
 kind: Service

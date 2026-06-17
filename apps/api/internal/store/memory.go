@@ -105,16 +105,16 @@ func defaultPlans() []domain.Plan {
 // defaultTemplates returns the seeded one-click catalog.
 func defaultTemplates() []domain.ServiceTemplate {
 	return []domain.ServiceTemplate{
-		{Key: "wordpress", Name: "WordPress", Description: "The world's most popular CMS.", Category: "CMS", Kind: "service", Active: true, SortOrder: 1},
-		{Key: "ghost", Name: "Ghost", Description: "Modern publishing platform.", Category: "CMS", Kind: "service", Active: true, SortOrder: 2},
-		{Key: "plausible", Name: "Plausible", Description: "Privacy-friendly web analytics.", Category: "Analytics", Kind: "service", Active: true, SortOrder: 3},
-		{Key: "n8n", Name: "n8n", Description: "Workflow automation.", Category: "Automation", Kind: "service", Active: true, SortOrder: 4},
-		{Key: "postgresql", Name: "PostgreSQL", Description: "Relational database.", Category: "Database", Kind: "database", Active: true, SortOrder: 5},
-		{Key: "mysql", Name: "MySQL", Description: "Relational database.", Category: "Database", Kind: "database", Active: true, SortOrder: 6},
-		{Key: "mariadb", Name: "MariaDB", Description: "MySQL-compatible relational database.", Category: "Database", Kind: "database", Active: true, SortOrder: 7},
-		{Key: "mongodb", Name: "MongoDB", Description: "Document database.", Category: "Database", Kind: "database", Active: true, SortOrder: 8},
-		{Key: "redis", Name: "Redis", Description: "In-memory key-value store.", Category: "Database", Kind: "database", Active: true, SortOrder: 9},
-		{Key: "docker-image", Name: "Docker Image", Description: "Deploy any public Docker image.", Category: "App", Kind: "app", Active: true, SortOrder: 10},
+		{Key: "wordpress", Name: "WordPress", Description: "The world's most popular CMS.", Category: "CMS", Kind: "service", Image: "wordpress:6.8-php8.3-apache", DefaultPort: 80, Active: true, SortOrder: 1},
+		{Key: "ghost", Name: "Ghost", Description: "Modern publishing platform.", Category: "CMS", Kind: "service", Image: "ghost:5-alpine", DefaultPort: 2368, Active: true, SortOrder: 2},
+		{Key: "plausible", Name: "Plausible", Description: "Privacy-friendly web analytics.", Category: "Analytics", Kind: "service", Image: "plausible/analytics:v2.1.0", DefaultPort: 8000, Active: true, SortOrder: 3},
+		{Key: "n8n", Name: "n8n", Description: "Workflow automation.", Category: "Automation", Kind: "service", Image: "n8nio/n8n:1.64.0", DefaultPort: 5678, Active: true, SortOrder: 4},
+		{Key: "postgresql", Name: "PostgreSQL", Description: "Relational database.", Category: "Database", Kind: "database", Image: "postgres:16-alpine", DefaultPort: 5432, Active: true, SortOrder: 5},
+		{Key: "mysql", Name: "MySQL", Description: "Relational database.", Category: "Database", Kind: "database", Image: "mysql:8.4", DefaultPort: 3306, Active: true, SortOrder: 6},
+		{Key: "mariadb", Name: "MariaDB", Description: "MySQL-compatible relational database.", Category: "Database", Kind: "database", Image: "mariadb:11", DefaultPort: 3306, Active: true, SortOrder: 7},
+		{Key: "mongodb", Name: "MongoDB", Description: "Document database.", Category: "Database", Kind: "database", Image: "mongo:7", DefaultPort: 27017, Active: true, SortOrder: 8},
+		{Key: "redis", Name: "Redis", Description: "In-memory key-value store.", Category: "Database", Kind: "database", Image: "redis:7-alpine", DefaultPort: 6379, Active: true, SortOrder: 9},
+		{Key: "docker-image", Name: "Docker Image", Description: "Deploy any public Docker image.", Category: "App", Kind: "app", Image: "", DefaultPort: 80, Active: true, SortOrder: 10},
 	}
 }
 
@@ -125,9 +125,11 @@ func DefaultSettings() domain.PlatformSettings { return defaultSettings() }
 
 // defaultSettings returns the seeded platform settings.
 func defaultSettings() domain.PlatformSettings {
+	// Start minimal: a new workload defaults to a small footprint and grows up to
+	// the plan's Max* ceilings. All of these are admin-editable via /v1/admin/settings.
 	return domain.PlatformSettings{
-		DefaultCPU:             0.25,
-		DefaultMemoryMB:        256,
+		DefaultCPU:             0.1, // 100m
+		DefaultMemoryMB:        128,
 		DefaultPlanID:          "hobby",
 		CPUOvercommitFactor:    0.2,
 		MemoryOvercommitFactor: 0.35,
@@ -318,6 +320,17 @@ func (s *MemoryStore) CreateDatabase(_ context.Context, d *domain.Database) erro
 	return nil
 }
 
+func (s *MemoryStore) GetDatabase(_ context.Context, id string) (*domain.Database, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	d, ok := s.databases[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	cp := d
+	return &cp, nil
+}
+
 func (s *MemoryStore) ListDatabasesByOrg(_ context.Context, orgID string) ([]domain.Database, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -328,6 +341,16 @@ func (s *MemoryStore) ListDatabasesByOrg(_ context.Context, orgID string) ([]dom
 		}
 	}
 	return out, nil
+}
+
+func (s *MemoryStore) DeleteDatabase(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.databases[id]; !ok {
+		return ErrNotFound
+	}
+	delete(s.databases, id)
+	return nil
 }
 
 func (s *MemoryStore) CreateProject(_ context.Context, p *domain.Project) error {

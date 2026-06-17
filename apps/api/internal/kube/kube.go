@@ -120,7 +120,7 @@ func (b *KubeBackend) EnsureTenant(ctx context.Context, orgSlug, projSlug string
 	if err := b.applyResourceQuota(ctx, ns, q); err != nil {
 		return "", err
 	}
-	if err := b.applyLimitRange(ctx, ns); err != nil {
+	if err := b.applyLimitRange(ctx, ns, q); err != nil {
 		return "", err
 	}
 	return ns, nil
@@ -176,20 +176,39 @@ func (b *KubeBackend) applyResourceQuota(ctx context.Context, ns string, q Quota
 }
 
 // applyLimitRange supplies default container requests/limits so pods that omit
-// resources still get sane values within the quota.
-func (b *KubeBackend) applyLimitRange(ctx context.Context, ns string) error {
+// resources still get sane values within the quota. The defaults are the minimal
+// workload size from platform settings (admin/DB-driven), with the overcommit
+// factor applied to the request — never hardcoded policy.
+func (b *KubeBackend) applyLimitRange(ctx context.Context, ns string, q Quota) error {
+	// Minimal built-in fallbacks when settings don't supply a default size.
+	defCPU := q.DefaultCPU
+	if defCPU <= 0 {
+		defCPU = 0.1
+	}
+	defMem := q.DefaultMemoryMB
+	if defMem <= 0 {
+		defMem = 128
+	}
+	cpuFactor := q.CPUOvercommitFactor
+	if cpuFactor <= 0 {
+		cpuFactor = b.cfg.CPUOvercommitFactor
+	}
+	memFactor := q.MemoryOvercommitFactor
+	if memFactor <= 0 {
+		memFactor = b.cfg.MemoryOvercommitFactor
+	}
 	lr := &corev1.LimitRange{
 		ObjectMeta: metav1.ObjectMeta{Name: "vortex-limits", Namespace: ns},
 		Spec: corev1.LimitRangeSpec{
 			Limits: []corev1.LimitRangeItem{{
 				Type: corev1.LimitTypeContainer,
 				Default: corev1.ResourceList{
-					corev1.ResourceCPU:    resource.MustParse("500m"),
-					corev1.ResourceMemory: resource.MustParse("512Mi"),
+					corev1.ResourceCPU:    resource.MustParse(milliCPU(defCPU)),
+					corev1.ResourceMemory: resource.MustParse(mib(defMem)),
 				},
 				DefaultRequest: corev1.ResourceList{
-					corev1.ResourceCPU:    resource.MustParse("50m"),
-					corev1.ResourceMemory: resource.MustParse("64Mi"),
+					corev1.ResourceCPU:    resource.MustParse(milliCPU(defCPU * cpuFactor)),
+					corev1.ResourceMemory: resource.MustParse(mib(int(float64(defMem) * memFactor))),
 				},
 			}},
 		},
@@ -266,18 +285,28 @@ func (b *KubeBackend) Apply(ctx context.Context, w Workload) (string, string, er
 // buildValues maps a Workload to common-chart values.
 func (b *KubeBackend) buildValues(w Workload, h string) map[string]any {
 	stateful := strings.EqualFold(w.Kind, "database")
-	port := defaultPort(w)
-
-	img := w.Image
-	if isWordPress(w) {
-		// Force the pinned WordPress image per the volo recipe, ignoring any
-		// catalog/build override.
-		img = wordpressImage
+	port := w.Port
+	if port <= 0 {
+		port = defaultPort(w)
 	}
-	repo, tag := splitImage(img)
+
+	// Image comes from the catalog template / build (DB/admin-driven), not a
+	// hardcoded constant. The WordPress recipe (probes, wp-config wiring) keys off
+	// ServiceTemplateKey, so it still applies regardless of the image source.
+	repo, tag := splitImage(w.Image)
 	env := mergeEnv(w)
 
-	resources := overcommitResources(w.CPU, w.MemoryMB, b.cfg.CPUOvercommitFactor, b.cfg.MemoryOvercommitFactor)
+	// Overcommit factors are live per-Apply from platform settings; fall back to
+	// the backend's configured defaults when the caller leaves them unset.
+	cpuFactor := w.CPUOvercommitFactor
+	if cpuFactor <= 0 {
+		cpuFactor = b.cfg.CPUOvercommitFactor
+	}
+	memFactor := w.MemoryOvercommitFactor
+	if memFactor <= 0 {
+		memFactor = b.cfg.MemoryOvercommitFactor
+	}
+	resources := overcommitResources(w.CPU, w.MemoryMB, cpuFactor, memFactor)
 
 	deployment := map[string]any{
 		"enabled":      true,

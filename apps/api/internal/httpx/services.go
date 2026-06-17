@@ -24,6 +24,7 @@ func (s *Server) handleListServices(w http.ResponseWriter, r *http.Request) {
 type createServiceRequest struct {
 	TemplateKey string  `json:"templateKey"`
 	Name        string  `json:"name"`
+	Image       string  `json:"image"`
 	CPU         float64 `json:"cpu"`
 	MemoryMB    int     `json:"memoryMb"`
 	ProjectUUID string  `json:"projectUuid"`
@@ -42,6 +43,7 @@ func (s *Server) handleCreateService(w http.ResponseWriter, r *http.Request) {
 	svc, err := s.platform.CreateService(r.Context(), chi.URLParam(r, "orgID"), chi.URLParam(r, "projectID"), platform.CreateServiceInput{
 		TemplateKey: req.TemplateKey,
 		Name:        req.Name,
+		Image:       req.Image,
 		CPU:         req.CPU,
 		MemoryMB:    req.MemoryMB,
 		ProjectUUID: req.ProjectUUID,

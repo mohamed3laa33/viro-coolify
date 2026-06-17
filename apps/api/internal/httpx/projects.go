@@ -91,6 +91,7 @@ func (s *Server) handleCreateAppInProject(w http.ResponseWriter, r *http.Request
 	app, err := s.platform.CreateApp(r.Context(), chi.URLParam(r, "orgID"), platform.CreateAppInput{
 		Name:          req.Name,
 		ProjectID:     chi.URLParam(r, "projectID"),
+		Image:         req.Image,
 		GitRepository: req.GitRepository,
 		GitBranch:     req.GitBranch,
 		BuildPack:     req.BuildPack,

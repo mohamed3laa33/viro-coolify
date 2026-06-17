@@ -1,0 +1,47 @@
+{{- if .Values.networkPolicy.enabled }}
+# Control-plane network isolation for the namespace-per-tenant model.
+#
+# 1) default-deny-ingress: nothing may reach the control-plane pods unless an
+#    explicit policy below allows it. Critically, this keeps tenant namespaces
+#    (and the in-cluster control-plane Postgres) unreachable from arbitrary pods —
+#    tenant apps must NEVER be able to dial the control plane or its database.
+# 2) allow-gateway: only the shared Gateway data plane (Envoy proxy) namespace may
+#    reach the web/api container ports, so user traffic still flows in via the LB.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "viro.fullname" . }}-default-deny-ingress
+  labels:
+    {{- include "viro.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes:
+    - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "viro.fullname" . }}-allow-gateway
+  labels:
+    {{- include "viro.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: ["api", "web"]
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.gatewayNamespace | quote }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.api.port }}
+        - protocol: TCP
+          port: {{ .Values.web.port }}
+{{- end }}

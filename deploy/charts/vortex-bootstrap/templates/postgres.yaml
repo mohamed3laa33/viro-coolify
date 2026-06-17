@@ -7,7 +7,7 @@ metadata:
 type: Opaque
 stringData:
   POSTGRES_USER: vortex
-  POSTGRES_PASSWORD: {{ .Values.postgres.password | quote }}
+  POSTGRES_PASSWORD: {{ required "postgres.password is required — supply a strong value (e.g. via VORTEX_PG_PASSWORD)" .Values.postgres.password | quote }}
   POSTGRES_DB: vortex
 ---
 apiVersion: v1

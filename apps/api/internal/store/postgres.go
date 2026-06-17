@@ -309,22 +309,22 @@ func (s *PostgresStore) ListMemberships(ctx context.Context, orgID string) ([]do
 
 func (s *PostgresStore) CreateApp(ctx context.Context, a *domain.App) error {
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO apps (id, org_id, project_id, coolify_uuid, name, git_repository, git_branch, build_pack, cpu, memory_mb, status, namespace, "release", host, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
-		a.ID, a.OrgID, a.ProjectID, a.CoolifyUUID, a.Name, a.GitRepository, a.GitBranch, a.BuildPack, a.CPU, a.MemoryMB, a.Status, a.Namespace, a.Release, a.Host, a.CreatedAt,
+		`INSERT INTO apps (id, org_id, project_id, coolify_uuid, name, git_repository, git_branch, build_pack, cpu, memory_mb, status, namespace, "release", host, image, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
+		a.ID, a.OrgID, a.ProjectID, a.CoolifyUUID, a.Name, a.GitRepository, a.GitBranch, a.BuildPack, a.CPU, a.MemoryMB, a.Status, a.Namespace, a.Release, a.Host, a.Image, a.CreatedAt,
 	)
 	return mapErr(err)
 }
 
 func (s *PostgresStore) GetApp(ctx context.Context, id string) (*domain.App, error) {
 	return s.scanApp(s.pool.QueryRow(ctx,
-		`SELECT id, org_id, project_id, coolify_uuid, name, git_repository, git_branch, build_pack, cpu, memory_mb, status, namespace, "release", host, created_at
+		`SELECT id, org_id, project_id, coolify_uuid, name, git_repository, git_branch, build_pack, cpu, memory_mb, status, namespace, "release", host, image, created_at
 		 FROM apps WHERE id = $1`, id))
 }
 
 func (s *PostgresStore) scanApp(row pgx.Row) (*domain.App, error) {
 	var a domain.App
-	if err := row.Scan(&a.ID, &a.OrgID, &a.ProjectID, &a.CoolifyUUID, &a.Name, &a.GitRepository, &a.GitBranch, &a.BuildPack, &a.CPU, &a.MemoryMB, &a.Status, &a.Namespace, &a.Release, &a.Host, &a.CreatedAt); err != nil {
+	if err := row.Scan(&a.ID, &a.OrgID, &a.ProjectID, &a.CoolifyUUID, &a.Name, &a.GitRepository, &a.GitBranch, &a.BuildPack, &a.CPU, &a.MemoryMB, &a.Status, &a.Namespace, &a.Release, &a.Host, &a.Image, &a.CreatedAt); err != nil {
 		return nil, mapErr(err)
 	}
 	return &a, nil
@@ -332,7 +332,7 @@ func (s *PostgresStore) scanApp(row pgx.Row) (*domain.App, error) {
 
 func (s *PostgresStore) ListAppsByOrg(ctx context.Context, orgID string) ([]domain.App, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, org_id, project_id, coolify_uuid, name, git_repository, git_branch, build_pack, cpu, memory_mb, status, namespace, "release", host, created_at
+		`SELECT id, org_id, project_id, coolify_uuid, name, git_repository, git_branch, build_pack, cpu, memory_mb, status, namespace, "release", host, image, created_at
 		 FROM apps WHERE org_id = $1`, orgID)
 	if err != nil {
 		return nil, mapErr(err)
@@ -341,7 +341,7 @@ func (s *PostgresStore) ListAppsByOrg(ctx context.Context, orgID string) ([]doma
 	out := make([]domain.App, 0)
 	for rows.Next() {
 		var a domain.App
-		if err := rows.Scan(&a.ID, &a.OrgID, &a.ProjectID, &a.CoolifyUUID, &a.Name, &a.GitRepository, &a.GitBranch, &a.BuildPack, &a.CPU, &a.MemoryMB, &a.Status, &a.Namespace, &a.Release, &a.Host, &a.CreatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.OrgID, &a.ProjectID, &a.CoolifyUUID, &a.Name, &a.GitRepository, &a.GitBranch, &a.BuildPack, &a.CPU, &a.MemoryMB, &a.Status, &a.Namespace, &a.Release, &a.Host, &a.Image, &a.CreatedAt); err != nil {
 			return nil, mapErr(err)
 		}
 		out = append(out, a)
@@ -353,9 +353,9 @@ func (s *PostgresStore) UpdateApp(ctx context.Context, a *domain.App) error {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE apps SET org_id = $2, project_id = $3, coolify_uuid = $4, name = $5, git_repository = $6,
 		 git_branch = $7, build_pack = $8, cpu = $9, memory_mb = $10, status = $11,
-		 namespace = $12, "release" = $13, host = $14, created_at = $15
+		 namespace = $12, "release" = $13, host = $14, image = $15, created_at = $16
 		 WHERE id = $1`,
-		a.ID, a.OrgID, a.ProjectID, a.CoolifyUUID, a.Name, a.GitRepository, a.GitBranch, a.BuildPack, a.CPU, a.MemoryMB, a.Status, a.Namespace, a.Release, a.Host, a.CreatedAt,
+		a.ID, a.OrgID, a.ProjectID, a.CoolifyUUID, a.Name, a.GitRepository, a.GitBranch, a.BuildPack, a.CPU, a.MemoryMB, a.Status, a.Namespace, a.Release, a.Host, a.Image, a.CreatedAt,
 	)
 	if err != nil {
 		return mapErr(err)
@@ -381,29 +381,55 @@ func (s *PostgresStore) DeleteApp(ctx context.Context, id string) error {
 
 func (s *PostgresStore) CreateDatabase(ctx context.Context, d *domain.Database) error {
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO databases (id, org_id, coolify_uuid, name, engine, status, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		d.ID, d.OrgID, d.CoolifyUUID, d.Name, d.Engine, d.Status, d.CreatedAt,
+		`INSERT INTO databases (id, org_id, project_id, coolify_uuid, name, engine, cpu, memory_mb, status, namespace, "release", host, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+		d.ID, d.OrgID, d.ProjectID, d.CoolifyUUID, d.Name, d.Engine, d.CPU, d.MemoryMB, d.Status, d.Namespace, d.Release, d.Host, d.CreatedAt,
 	)
 	return mapErr(err)
 }
 
+func (s *PostgresStore) scanDatabase(row pgx.Row) (*domain.Database, error) {
+	var d domain.Database
+	if err := row.Scan(&d.ID, &d.OrgID, &d.ProjectID, &d.CoolifyUUID, &d.Name, &d.Engine, &d.CPU, &d.MemoryMB, &d.Status, &d.Namespace, &d.Release, &d.Host, &d.CreatedAt); err != nil {
+		return nil, mapErr(err)
+	}
+	return &d, nil
+}
+
+func (s *PostgresStore) GetDatabase(ctx context.Context, id string) (*domain.Database, error) {
+	return s.scanDatabase(s.pool.QueryRow(ctx,
+		`SELECT id, org_id, project_id, coolify_uuid, name, engine, cpu, memory_mb, status, namespace, "release", host, created_at
+		 FROM databases WHERE id = $1`, id))
+}
+
 func (s *PostgresStore) ListDatabasesByOrg(ctx context.Context, orgID string) ([]domain.Database, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, org_id, coolify_uuid, name, engine, status, created_at FROM databases WHERE org_id = $1`, orgID)
+		`SELECT id, org_id, project_id, coolify_uuid, name, engine, cpu, memory_mb, status, namespace, "release", host, created_at
+		 FROM databases WHERE org_id = $1`, orgID)
 	if err != nil {
 		return nil, mapErr(err)
 	}
 	defer rows.Close()
 	out := make([]domain.Database, 0)
 	for rows.Next() {
-		var d domain.Database
-		if err := rows.Scan(&d.ID, &d.OrgID, &d.CoolifyUUID, &d.Name, &d.Engine, &d.Status, &d.CreatedAt); err != nil {
-			return nil, mapErr(err)
+		d, err := s.scanDatabase(rows)
+		if err != nil {
+			return nil, err
 		}
-		out = append(out, d)
+		out = append(out, *d)
 	}
 	return out, mapErr(rows.Err())
+}
+
+func (s *PostgresStore) DeleteDatabase(ctx context.Context, id string) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM databases WHERE id = $1`, id)
+	if err != nil {
+		return mapErr(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // ---- Services ----

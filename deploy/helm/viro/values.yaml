@@ -26,6 +26,23 @@ api:
   resources:
     requests: { cpu: 50m, memory: 64Mi }
     limits: { cpu: 500m, memory: 256Mi }
+  # Hardened defaults. The API image is distroless "nonroot" (uid/gid 65532) and
+  # needs no writable rootfs. Override per-environment if required.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    capabilities:
+      drop: ["ALL"]
+    seccompProfile:
+      type: RuntimeDefault
 
 web:
   name: web
@@ -37,6 +54,40 @@ web:
   resources:
     requests: { cpu: 50m, memory: 128Mi }
     limits: { cpu: 500m, memory: 512Mi }
+  # Hardened defaults. The web image (Next.js standalone) runs as uid/gid 1001 and
+  # needs a writable /tmp; the chart mounts an emptyDir there when readOnlyRootFilesystem
+  # is true. Override per-environment if required.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1001
+    runAsGroup: 1001
+    fsGroup: 1001
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    capabilities:
+      drop: ["ALL"]
+    seccompProfile:
+      type: RuntimeDefault
+
+# Dedicated ServiceAccount for the control plane. Token automounting is disabled
+# because neither the api nor the web pod talks to the Kubernetes API.
+serviceAccount:
+  create: true
+  name: ""                  # defaults to the release fullname when empty
+  annotations: {}
+
+# Control-plane network isolation. Default-deny ingress plus an explicit allow for
+# the Gateway/proxy namespace to reach the web/api ports. Tenant namespaces are NOT
+# allowed in — they must never reach the control-plane Postgres or services.
+networkPolicy:
+  enabled: true
+  # Namespace running the Gateway data plane (Envoy proxy pods) that fronts the
+  # control plane. Allowed to reach the web/api container ports.
+  gatewayNamespace: envoy-gateway-system
 
 # Secrets are read from a Kubernetes Secret (created by the chart from these values,
 # or reference an existing one with existingSecret). NEVER commit real values —
@@ -44,7 +95,9 @@ web:
 secrets:
   existingSecret: ""        # if set, use this Secret instead of creating one
   jwtSecret: "change-me-in-production"
-  databaseUrl: "postgres://viro:viro@viro-postgres:5432/viro?sslmode=require"
+  # No insecure default: a real connection string MUST be supplied (via the helmfile's
+  # required VORTEX_DATABASE_URL, --set, or an out-of-git values file). Use sslmode=require.
+  databaseUrl: ""
   coolifyBaseUrl: ""
   coolifyToken: ""
   stripeSecretKey: ""

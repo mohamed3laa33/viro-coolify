@@ -18,6 +18,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/billing"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/catalog"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/domain"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/kube"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/store"
@@ -132,16 +133,26 @@ func (s *Service) projectSlug(ctx context.Context, projectID string) string {
 	return projectID
 }
 
-// quotaForOrg builds the backend tenant quota from the org's plan limits.
+// quotaForOrg builds the backend tenant quota from the org's plan limits and the
+// admin-configured minimal default size / overcommit factors (used for the
+// namespace LimitRange). All values are live from the store — none are hardcoded.
 func (s *Service) quotaForOrg(ctx context.Context, orgID string) kube.Quota {
 	lim := s.planLimits(ctx, orgID)
-	return kube.Quota{MaxCPU: lim.MaxCPU, MaxMemoryMB: lim.MaxMemoryMB, MaxApps: lim.MaxApps}
+	q := kube.Quota{MaxCPU: lim.MaxCPU, MaxMemoryMB: lim.MaxMemoryMB, MaxApps: lim.MaxApps}
+	if set, err := s.store.GetSettings(ctx); err == nil && set != nil {
+		q.DefaultCPU = set.DefaultCPU
+		q.DefaultMemoryMB = set.DefaultMemoryMB
+		q.CPUOvercommitFactor = set.CPUOvercommitFactor
+		q.MemoryOvercommitFactor = set.MemoryOvercommitFactor
+	}
+	return q
 }
 
 // CreateAppInput describes a new application.
 type CreateAppInput struct {
 	Name          string
-	ProjectID     string // Viro project the app belongs to (Org → Project → App)
+	ProjectID     string // Vortex project the app belongs to (Org → Project → App)
+	Image         string // container image; when set the app deploys directly (no build)
 	GitRepository string
 	GitBranch     string
 	BuildPack     string
@@ -151,13 +162,23 @@ type CreateAppInput struct {
 	ServerUUID    string
 }
 
+// overcommitFactors returns the live CPU/memory overcommit factors from platform
+// settings (admin/DB-driven). Zero values tell the backend to use its configured
+// default, so this never forces a hardcoded factor onto a deploy.
+func (s *Service) overcommitFactors(ctx context.Context) (cpuFactor, memFactor float64) {
+	if set, err := s.store.GetSettings(ctx); err == nil && set != nil {
+		return set.CPUOvercommitFactor, set.MemoryOvercommitFactor
+	}
+	return 0, 0
+}
+
 // CreateApp creates an app for the org. Requested CPU/memory are validated
 // against the org's plan quota, and the per-org-project namespace + quota are
 // ensured on the backend.
 //
-// Apps are Git-based and require an image build before they can be deployed;
-// that builder is not wired yet, so the app is stored as "queued" and the
-// backend Apply is intentionally deferred (no demo success path).
+// When an Image is supplied the app deploys immediately (helm upgrade --install)
+// and is marked "deploying". Git-based apps without an image stay "queued" until
+// the image builder produces an image (no demo success path).
 func (s *Service) CreateApp(ctx context.Context, orgID string, in CreateAppInput) (*domain.App, error) {
 	branch := in.GitBranch
 	if branch == "" {
@@ -188,6 +209,7 @@ func (s *Service) CreateApp(ctx context.Context, orgID string, in CreateAppInput
 		OrgID:         orgID,
 		ProjectID:     in.ProjectID,
 		Name:          strings.TrimSpace(in.Name),
+		Image:         strings.TrimSpace(in.Image),
 		GitRepository: in.GitRepository,
 		GitBranch:     branch,
 		BuildPack:     in.BuildPack,
@@ -197,8 +219,29 @@ func (s *Service) CreateApp(ctx context.Context, orgID string, in CreateAppInput
 		Namespace:     namespace,
 		CreatedAt:     s.now(),
 	}
-	// TODO: build the image from the Git repo, then backend.Apply(...) to deploy
-	// and record Namespace/Release/Host on the app.
+
+	if app.Image != "" {
+		// Image-based app: deploy directly, no build needed.
+		cpuF, memF := s.overcommitFactors(ctx)
+		release, host, err := s.backend.Apply(ctx, kube.Workload{
+			OrgSlug:                orgSlug,
+			ProjectSlug:            projSlug,
+			Name:                   app.Name,
+			Kind:                   "app",
+			Image:                  app.Image,
+			CPU:                    cpu,
+			MemoryMB:               memMB,
+			CPUOvercommitFactor:    cpuF,
+			MemoryOvercommitFactor: memF,
+		})
+		if err != nil {
+			return nil, err
+		}
+		app.Release = release
+		app.Host = host
+		app.Status = "deploying"
+	}
+	// Git-only apps remain "queued" until the image builder produces an image.
 
 	if err := s.store.CreateApp(ctx, app); err != nil {
 		return nil, err
@@ -310,22 +353,76 @@ func (s *Service) ownedApp(ctx context.Context, orgID, appID string) (*domain.Ap
 
 // CreateDatabaseInput describes a new managed database.
 type CreateDatabaseInput struct {
-	Name   string
-	Engine string // postgresql, mysql, mariadb, mongodb, redis, ...
+	Name      string
+	Engine    string // postgresql, mysql, mariadb, mongodb, redis, ...
+	ProjectID string // tenant project; defaults to the org's default project
+	CPU       float64
+	MemoryMB  int
 }
 
-// CreateDatabase creates a managed database record for the org.
+// CreateDatabase provisions a managed database for the org: it resolves the
+// engine to a catalog template (image/port, DB/admin-driven), enforces the
+// plan quota, ensures the tenant namespace, and deploys the engine as a
+// StatefulSet via the backend. The Kubernetes placement is persisted and the
+// database is marked "deploying".
 func (s *Service) CreateDatabase(ctx context.Context, orgID string, in CreateDatabaseInput) (*domain.Database, error) {
 	engine := strings.ToLower(strings.TrimSpace(in.Engine))
 	if engine == "" {
 		engine = "postgresql"
 	}
+	tmpl, ok := s.templateByKey(ctx, engine)
+	if !ok || catalog.Kind(tmpl.Kind) != catalog.KindDatabase {
+		return nil, fmt.Errorf("%w: %q", ErrInvalidTemplate, engine)
+	}
+
+	cpu, memMB := s.normalizeResources(ctx, in.CPU, in.MemoryMB)
+	count, err := s.workloadCount(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.checkQuota(ctx, orgID, cpu, memMB, count); err != nil {
+		return nil, err
+	}
+
+	name := strings.TrimSpace(in.Name)
+	orgSlug := s.orgSlug(ctx, orgID)
+	projSlug := s.projectSlug(ctx, in.ProjectID)
+
+	namespace, err := s.backend.EnsureTenant(ctx, orgSlug, projSlug, s.quotaForOrg(ctx, orgID))
+	if err != nil {
+		return nil, err
+	}
+
+	cpuF, memF := s.overcommitFactors(ctx)
+	release, host, err := s.backend.Apply(ctx, kube.Workload{
+		OrgSlug:                orgSlug,
+		ProjectSlug:            projSlug,
+		Name:                   name,
+		Kind:                   "database",
+		Image:                  tmpl.Image,
+		Port:                   tmpl.DefaultPort,
+		CPU:                    cpu,
+		MemoryMB:               memMB,
+		ServiceTemplateKey:     tmpl.Key,
+		CPUOvercommitFactor:    cpuF,
+		MemoryOvercommitFactor: memF,
+	})
+	if err != nil {
+		return nil, err
+	}
+
 	db := &domain.Database{
 		ID:        s.idgen(),
 		OrgID:     orgID,
-		Name:      strings.TrimSpace(in.Name),
+		ProjectID: in.ProjectID,
+		Name:      name,
 		Engine:    engine,
-		Status:    "created",
+		CPU:       cpu,
+		MemoryMB:  memMB,
+		Status:    "deploying",
+		Namespace: namespace,
+		Release:   release,
+		Host:      host,
 		CreatedAt: s.now(),
 	}
 	if err := s.store.CreateDatabase(ctx, db); err != nil {
@@ -337,4 +434,38 @@ func (s *Service) CreateDatabase(ctx context.Context, orgID string, in CreateDat
 // ListDatabases returns the databases belonging to the org.
 func (s *Service) ListDatabases(ctx context.Context, orgID string) ([]domain.Database, error) {
 	return s.store.ListDatabasesByOrg(ctx, orgID)
+}
+
+// GetDatabase returns one database scoped to the org.
+func (s *Service) GetDatabase(ctx context.Context, orgID, dbID string) (*domain.Database, error) {
+	return s.ownedDatabase(ctx, orgID, dbID)
+}
+
+// DeleteDatabase uninstalls the database's release from the backend (when
+// deployed) and removes the store record.
+func (s *Service) DeleteDatabase(ctx context.Context, orgID, dbID string) error {
+	db, err := s.ownedDatabase(ctx, orgID, dbID)
+	if err != nil {
+		return err
+	}
+	if db.Release != "" {
+		if err := s.backend.Delete(ctx, db.Namespace, db.Release); err != nil {
+			return err
+		}
+	}
+	return s.store.DeleteDatabase(ctx, db.ID)
+}
+
+func (s *Service) ownedDatabase(ctx context.Context, orgID, dbID string) (*domain.Database, error) {
+	db, err := s.store.GetDatabase(ctx, dbID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if db.OrgID != orgID {
+		return nil, ErrNotFound
+	}
+	return db, nil
 }

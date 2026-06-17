@@ -182,9 +182,12 @@ func TestApplyWordPress(t *testing.T) {
 	mh := &mockHelm{}
 	b := NewWithClient(testConfig(), cs, mh)
 
+	// The image now comes from the (DB/admin-driven) catalog template, not a
+	// hardcoded constant. The WordPress recipe (probes + wp-config wiring) still
+	// applies because it keys off ServiceTemplateKey.
 	_, _, err := b.Apply(context.Background(), Workload{
 		OrgSlug: "acme", ProjectSlug: "web", Name: "blog", Kind: "service",
-		ServiceTemplateKey: "wordpress", Image: "ignored:tag", CPU: 1, MemoryMB: 2048,
+		ServiceTemplateKey: "wordpress", Image: "wordpress:6.8-php8.3-apache", CPU: 1, MemoryMB: 2048,
 		Env: map[string]string{
 			"WORDPRESS_DB_HOST":     "db:3306",
 			"WORDPRESS_DB_NAME":     "blog",

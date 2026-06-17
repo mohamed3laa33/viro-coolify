@@ -124,7 +124,7 @@ func TestAdminSettingsGetAndPatch(t *testing.T) {
 		DefaultPlanID string  `json:"defaultPlanId"`
 	}
 	_ = json.NewDecoder(rec.Body).Decode(&set)
-	if set.DefaultPlanID != "hobby" || set.DefaultCPU != 0.25 {
+	if set.DefaultPlanID != "hobby" || set.DefaultCPU != 0.1 {
 		t.Fatalf("unexpected seeded settings: %+v", set)
 	}
 

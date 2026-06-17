@@ -242,6 +242,7 @@ func (s *Server) routes() chi.Router {
 					r.Route("/databases", func(r chi.Router) {
 						r.With(s.orgAuthz(domain.RoleMember)).Get("/", s.handleListDatabases)
 						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/", s.handleCreateDatabase)
+						r.With(s.orgAuthz(domain.RoleAdmin)).Delete("/{databaseID}", s.handleDeleteDatabase)
 					})
 
 					r.With(s.orgAuthz(domain.RoleMember)).Get("/billing", s.handleGetBilling)

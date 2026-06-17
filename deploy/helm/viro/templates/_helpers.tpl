@@ -20,6 +20,14 @@ app.kubernetes.io/part-of: viro
 helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
 {{- end -}}
 
+{{- define "viro.serviceAccountName" -}}
+{{- if .Values.serviceAccount.create -}}
+{{- default (include "viro.fullname" .) .Values.serviceAccount.name -}}
+{{- else -}}
+{{- default "default" .Values.serviceAccount.name -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "viro.secretName" -}}
 {{- if .Values.secrets.existingSecret -}}
 {{- .Values.secrets.existingSecret -}}

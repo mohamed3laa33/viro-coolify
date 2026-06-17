@@ -104,17 +104,18 @@ type Invitation struct {
 // It mirrors a Coolify application (CoolifyUUID) but is the tenant-scoped record
 // Viro authorizes against.
 type App struct {
-	ID            string    `json:"id"`
-	OrgID         string    `json:"orgId"`
-	ProjectID     string    `json:"projectId"`
-	CoolifyUUID   string    `json:"coolifyUuid,omitempty"`
-	Name          string    `json:"name"`
-	GitRepository string    `json:"gitRepository,omitempty"`
-	GitBranch     string    `json:"gitBranch,omitempty"`
-	BuildPack     string    `json:"buildPack,omitempty"`
-	CPU           float64   `json:"cpu"`      // requested vCPU
-	MemoryMB      int       `json:"memoryMb"` // requested memory in MB
-	Status        string    `json:"status"`
+	ID            string  `json:"id"`
+	OrgID         string  `json:"orgId"`
+	ProjectID     string  `json:"projectId"`
+	CoolifyUUID   string  `json:"coolifyUuid,omitempty"`
+	Name          string  `json:"name"`
+	Image         string  `json:"image,omitempty"` // container image; when set the app deploys directly (no build)
+	GitRepository string  `json:"gitRepository,omitempty"`
+	GitBranch     string  `json:"gitBranch,omitempty"`
+	BuildPack     string  `json:"buildPack,omitempty"`
+	CPU           float64 `json:"cpu"`      // requested vCPU
+	MemoryMB      int     `json:"memoryMb"` // requested memory in MB
+	Status        string  `json:"status"`
 	// Kubernetes placement returned by the deploy backend (kube.Backend).
 	Namespace string    `json:"namespace,omitempty"` // per-org-project namespace
 	Release   string    `json:"release,omitempty"`   // Helm release name
@@ -126,15 +127,15 @@ type App struct {
 // an organization and grouped under a project. Provisioned via Coolify when
 // configured; managed as a store record in demo mode.
 type Service struct {
-	ID          string    `json:"id"`
-	OrgID       string    `json:"orgId"`
-	ProjectID   string    `json:"projectId"`
-	Template    string    `json:"template"` // catalog template key
-	Name        string    `json:"name"`
-	CoolifyUUID string    `json:"coolifyUuid,omitempty"`
-	CPU         float64   `json:"cpu"`
-	MemoryMB    int       `json:"memoryMb"`
-	Status      string    `json:"status"`
+	ID          string  `json:"id"`
+	OrgID       string  `json:"orgId"`
+	ProjectID   string  `json:"projectId"`
+	Template    string  `json:"template"` // catalog template key
+	Name        string  `json:"name"`
+	CoolifyUUID string  `json:"coolifyUuid,omitempty"`
+	CPU         float64 `json:"cpu"`
+	MemoryMB    int     `json:"memoryMb"`
+	Status      string  `json:"status"`
 	// Kubernetes placement returned by the deploy backend (kube.Backend).
 	Namespace string    `json:"namespace,omitempty"` // per-org-project namespace
 	Release   string    `json:"release,omitempty"`   // Helm release name
@@ -152,16 +153,23 @@ type Domain struct {
 	CreatedAt time.Time `json:"createdAt"`
 }
 
-// Database is a Viro managed database owned by an organization, mirroring a
-// Coolify standalone database.
+// Database is a Vortex managed database owned by an organization. It is deployed
+// as a StatefulSet (one-click engine image) into the org's tenant namespace.
 type Database struct {
-	ID          string    `json:"id"`
-	OrgID       string    `json:"orgId"`
-	CoolifyUUID string    `json:"coolifyUuid,omitempty"`
-	Name        string    `json:"name"`
-	Engine      string    `json:"engine"`
-	Status      string    `json:"status"`
-	CreatedAt   time.Time `json:"createdAt"`
+	ID          string  `json:"id"`
+	OrgID       string  `json:"orgId"`
+	ProjectID   string  `json:"projectId,omitempty"`
+	CoolifyUUID string  `json:"coolifyUuid,omitempty"`
+	Name        string  `json:"name"`
+	Engine      string  `json:"engine"`
+	CPU         float64 `json:"cpu"`      // requested vCPU
+	MemoryMB    int     `json:"memoryMb"` // requested memory in MB
+	Status      string  `json:"status"`
+	// Kubernetes placement returned by the deploy backend (kube.Backend).
+	Namespace string    `json:"namespace,omitempty"` // per-org-project namespace
+	Release   string    `json:"release,omitempty"`   // Helm release name
+	Host      string    `json:"host,omitempty"`      // in-cluster service host (internal)
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 // Plan is a billing plan in the Viro catalog (fly.io-style usage-based pricing).

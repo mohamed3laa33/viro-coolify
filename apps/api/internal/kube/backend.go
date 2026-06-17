@@ -16,6 +16,14 @@ type Quota struct {
 	MaxCPU      float64 // total schedulable vCPU across the namespace (limits ceiling)
 	MaxMemoryMB int     // total memory (MB) across the namespace
 	MaxApps     int     // max workloads (pods/deployments) in the namespace
+
+	// Per-container LimitRange defaults (admin/DB-driven via platform settings).
+	// The default LIMIT is the minimal workload size; the default REQUEST applies
+	// the overcommit factor to it. Zero values fall back to minimal built-ins.
+	DefaultCPU             float64
+	DefaultMemoryMB        int
+	CPUOvercommitFactor    float64
+	MemoryOvercommitFactor float64
 }
 
 // Workload is one tenant deployable (an app, a one-click service, or a database).
@@ -28,9 +36,16 @@ type Workload struct {
 	Kind        string // app | service | database
 
 	Image    string // resolved image ref from the catalog template / build
+	Port     int    // container/service port; 0 falls back to the engine default
 	CPU      float64
 	MemoryMB int
 	Env      map[string]string
+
+	// Overcommit factors, sourced live from admin/DB platform settings per Apply.
+	// Zero means "use the backend's configured default" (so callers that don't set
+	// them keep working).
+	CPUOvercommitFactor    float64
+	MemoryOvercommitFactor float64
 
 	ServiceTemplateKey string   // e.g. wordpress, redis, postgresql
 	Domains            []string // extra custom hostnames in addition to the generated host

@@ -53,6 +53,7 @@ func (s *Server) writePlatformError(w http.ResponseWriter, action string, err er
 type createAppRequest struct {
 	Name          string  `json:"name"`
 	ProjectID     string  `json:"projectId"`
+	Image         string  `json:"image"`
 	GitRepository string  `json:"gitRepository"`
 	GitBranch     string  `json:"gitBranch"`
 	BuildPack     string  `json:"buildPack"`
@@ -91,6 +92,7 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	app, err := s.platform.CreateApp(r.Context(), orgID, platform.CreateAppInput{
 		Name:          req.Name,
 		ProjectID:     projectID,
+		Image:         req.Image,
 		GitRepository: req.GitRepository,
 		GitBranch:     req.GitBranch,
 		BuildPack:     req.BuildPack,
@@ -160,8 +162,11 @@ func (s *Server) handleAppLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 type createDatabaseRequest struct {
-	Name   string `json:"name"`
-	Engine string `json:"engine"`
+	Name      string  `json:"name"`
+	Engine    string  `json:"engine"`
+	ProjectID string  `json:"projectId"`
+	CPU       float64 `json:"cpu"`
+	MemoryMB  int     `json:"memoryMb"`
 }
 
 func (s *Server) handleListDatabases(w http.ResponseWriter, r *http.Request) {
@@ -182,13 +187,31 @@ func (s *Server) handleCreateDatabase(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
-	db, err := s.platform.CreateDatabase(r.Context(), chi.URLParam(r, "orgID"), platform.CreateDatabaseInput{
-		Name:   req.Name,
-		Engine: req.Engine,
+	orgID := chi.URLParam(r, "orgID")
+	projectID := req.ProjectID
+	if projectID == "" {
+		if p, err := s.identity.DefaultProject(r.Context(), orgID); err == nil {
+			projectID = p.ID
+		}
+	}
+	db, err := s.platform.CreateDatabase(r.Context(), orgID, platform.CreateDatabaseInput{
+		Name:      req.Name,
+		Engine:    req.Engine,
+		ProjectID: projectID,
+		CPU:       req.CPU,
+		MemoryMB:  req.MemoryMB,
 	})
 	if err != nil {
 		s.writePlatformError(w, "create database", err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, db)
+}
+
+func (s *Server) handleDeleteDatabase(w http.ResponseWriter, r *http.Request) {
+	if err := s.platform.DeleteDatabase(r.Context(), chi.URLParam(r, "orgID"), chi.URLParam(r, "databaseID")); err != nil {
+		s.writePlatformError(w, "delete database", err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

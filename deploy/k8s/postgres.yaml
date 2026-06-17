@@ -2,7 +2,11 @@
 # For production, prefer DigitalOcean Managed Postgres (deploy/terraform) and point
 # the control plane at it via secrets.databaseUrl — then skip this file.
 # Uses the official postgres image (no deprecated Bitnami dependency).
-#   kubectl apply -f deploy/k8s/postgres.yaml
+#
+# No plaintext password ships in this repo. Supply a strong password via the
+# VORTEX_PG_PASSWORD env var and substitute it at apply time:
+#   export VORTEX_PG_PASSWORD=$(openssl rand -hex 24)
+#   envsubst < deploy/k8s/postgres.yaml | kubectl apply -f -
 ---
 apiVersion: v1
 kind: Namespace
@@ -17,7 +21,8 @@ metadata:
 type: Opaque
 stringData:
   POSTGRES_USER: vortex
-  POSTGRES_PASSWORD: "change-me-in-production"
+  # No default: substituted from $VORTEX_PG_PASSWORD via envsubst at apply time.
+  POSTGRES_PASSWORD: "${VORTEX_PG_PASSWORD}"
   POSTGRES_DB: vortex
 ---
 apiVersion: v1

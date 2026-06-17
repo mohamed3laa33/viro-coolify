@@ -42,6 +42,7 @@ func (s *Service) templateByKey(ctx context.Context, key string) (domain.Service
 type CreateServiceInput struct {
 	TemplateKey string
 	Name        string
+	Image       string // overrides the template image (e.g. for the docker-image app template)
 	CPU         float64
 	MemoryMB    int
 	ProjectUUID string // Coolify project placement (optional)
@@ -86,15 +87,27 @@ func (s *Service) CreateService(ctx context.Context, orgID, projectID string, in
 		kind = "database"
 	}
 
+	// The image comes from the catalog template (DB/admin-driven). The caller may
+	// override it — required for the "docker-image" app template, which carries no
+	// image of its own.
+	image := strings.TrimSpace(in.Image)
+	if image == "" {
+		image = tmpl.Image
+	}
+
+	cpuF, memF := s.overcommitFactors(ctx)
 	release, host, err := s.backend.Apply(ctx, kube.Workload{
-		OrgSlug:            orgSlug,
-		ProjectSlug:        projSlug,
-		Name:               name,
-		Kind:               kind,
-		Image:              tmpl.Image,
-		CPU:                cpu,
-		MemoryMB:           memMB,
-		ServiceTemplateKey: tmpl.Key,
+		OrgSlug:                orgSlug,
+		ProjectSlug:            projSlug,
+		Name:                   name,
+		Kind:                   kind,
+		Image:                  image,
+		Port:                   tmpl.DefaultPort,
+		CPU:                    cpu,
+		MemoryMB:               memMB,
+		ServiceTemplateKey:     tmpl.Key,
+		CPUOvercommitFactor:    cpuF,
+		MemoryOvercommitFactor: memF,
 	})
 	if err != nil {
 		return nil, err
