@@ -75,7 +75,7 @@ func buildStore(ctx context.Context, cfg *config.Config, logger *slog.Logger) (s
 		return store.NewMemoryStore(), nil
 	}
 	logger.Info("store: postgres")
-	pg, err := store.NewPostgresStore(ctx, cfg.DatabaseURL)
+	pg, err := store.NewPostgresStore(ctx, cfg.DatabaseURL, cfg.DBMaxConns, cfg.DBMinConns)
 	if err != nil {
 		return nil, err
 	}

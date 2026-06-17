@@ -3,6 +3,7 @@ package httpx
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -59,6 +60,41 @@ func TestHealthz(t *testing.T) {
 	}
 	if body["status"] != "ok" {
 		t.Fatalf("status field = %q", body["status"])
+	}
+}
+
+func TestReadyzMemoryStoreOK(t *testing.T) {
+	// The in-memory store is not a Pinger, so readiness is always ok.
+	s := newTestServer(t, "http://unused")
+	rec := httptest.NewRecorder()
+	s.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d %s", rec.Code, rec.Body.String())
+	}
+	if rid := rec.Header().Get("X-Request-Id"); rid == "" {
+		t.Fatalf("expected X-Request-Id response header")
+	}
+}
+
+// failingPingStore embeds the memory store but reports an unhealthy dependency.
+type failingPingStore struct {
+	store.Store
+}
+
+func (failingPingStore) Ping(context.Context) error {
+	return errors.New("db down")
+}
+
+func TestReadyzPingFailureReturns503(t *testing.T) {
+	s := newTestServer(t, "http://unused")
+	s.store = failingPingStore{Store: store.NewMemoryStore()}
+	// Rebuild routes so the readiness handler closes over the swapped store.
+	s.router = s.routes()
+
+	rec := httptest.NewRecorder()
+	s.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
 	}
 }
 

@@ -310,7 +310,7 @@ func (s *Server) handleAdminOverview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load overview")
 		return
 	}
-	usage, err := s.store.ListAllUsage(ctx)
+	usageTotals, err := s.store.SumUsageByMetric(ctx)
 	if err != nil {
 		s.logger.Error("admin overview", "err", err)
 		writeError(w, http.StatusInternalServerError, "failed to load overview")
@@ -321,13 +321,10 @@ func (s *Server) handleAdminOverview(w http.ResponseWriter, r *http.Request) {
 		OrgCount:            len(orgs),
 		UserCount:           userCount,
 		SubscriptionsByPlan: map[string]int{},
-		UsageTotals:         map[string]int64{},
+		UsageTotals:         usageTotals,
 	}
 	for _, sub := range subs {
 		out.SubscriptionsByPlan[sub.PlanID]++
-	}
-	for _, u := range usage {
-		out.UsageTotals[u.Metric] += u.Quantity
 	}
 	writeJSON(w, http.StatusOK, out)
 }

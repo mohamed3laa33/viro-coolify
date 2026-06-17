@@ -112,4 +112,7 @@ type Store interface {
 	CountUsers(ctx context.Context) (int, error)
 	ListAllSubscriptions(ctx context.Context) ([]domain.Subscription, error)
 	ListAllUsage(ctx context.Context) ([]domain.UsageRecord, error)
+	// SumUsageByMetric aggregates total usage per metric in the store (SQL-side
+	// for Postgres) so the admin overview never scans-and-sums in Go.
+	SumUsageByMetric(ctx context.Context) (map[string]int64, error)
 }

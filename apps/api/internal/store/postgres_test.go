@@ -196,3 +196,26 @@ func TestAddMembership_Conflict(t *testing.T) {
 		t.Fatalf("expectations: %v", err)
 	}
 }
+
+func TestSumUsageByMetric(t *testing.T) {
+	s, mock := newMockStore(t)
+	defer mock.Close()
+
+	rows := pgxmock.NewRows([]string{"metric", "sum"}).
+		AddRow("compute_hours", int64(42)).
+		AddRow("egress_gb", int64(7))
+
+	mock.ExpectQuery("SELECT metric, sum\\(quantity\\) FROM usage_records GROUP BY metric").
+		WillReturnRows(rows)
+
+	got, err := s.SumUsageByMetric(context.Background())
+	if err != nil {
+		t.Fatalf("SumUsageByMetric: %v", err)
+	}
+	if got["compute_hours"] != 42 || got["egress_gb"] != 7 {
+		t.Fatalf("unexpected totals: %+v", got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+}

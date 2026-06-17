@@ -7,12 +7,21 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/domain"
+)
+
+// Connection-pool lifetime bounds. Recycling connections caps the blast radius
+// of a half-dead connection and lets the pool shrink back toward MinConns when
+// idle.
+const (
+	dbMaxConnLifetime = time.Hour
+	dbMaxConnIdleTime = 30 * time.Minute
 )
 
 //go:embed migrations/*.sql
@@ -33,9 +42,29 @@ type PostgresStore struct {
 	pool pgxPool
 }
 
-// NewPostgresStore opens a pgx connection pool against dsn and verifies it.
-func NewPostgresStore(ctx context.Context, dsn string) (*PostgresStore, error) {
-	pool, err := pgxpool.New(ctx, dsn)
+// NewPostgresStore opens a tuned pgx connection pool against dsn and verifies
+// it. maxConns/minConns bound the pool size; non-positive values fall back to
+// sane defaults so callers can pass zero to accept the defaults.
+func NewPostgresStore(ctx context.Context, dsn string, maxConns, minConns int) (*PostgresStore, error) {
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("store: parse dsn: %w", err)
+	}
+	if maxConns <= 0 {
+		maxConns = 10
+	}
+	if minConns < 0 {
+		minConns = 0
+	}
+	if minConns > maxConns {
+		minConns = maxConns
+	}
+	cfg.MaxConns = int32(maxConns)
+	cfg.MinConns = int32(minConns)
+	cfg.MaxConnLifetime = dbMaxConnLifetime
+	cfg.MaxConnIdleTime = dbMaxConnIdleTime
+
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("store: connect: %w", err)
 	}
@@ -49,6 +78,15 @@ func NewPostgresStore(ctx context.Context, dsn string) (*PostgresStore, error) {
 // newPostgresStoreWithPool builds a store around an injected pool (used in tests).
 func newPostgresStoreWithPool(pool pgxPool) *PostgresStore {
 	return &PostgresStore{pool: pool}
+}
+
+// Ping verifies the database connection is alive (used by readiness probes).
+func (s *PostgresStore) Ping(ctx context.Context) error {
+	if p, ok := s.pool.(*pgxpool.Pool); ok {
+		return p.Ping(ctx)
+	}
+	// Injected (mock) pools have no Ping; treat them as healthy.
+	return nil
 }
 
 // Close releases the underlying pool when it owns one.
@@ -1069,6 +1107,27 @@ func (s *PostgresStore) ListAllSubscriptions(ctx context.Context) ([]domain.Subs
 		}
 		sub.Status = domain.SubscriptionStatus(status)
 		out = append(out, sub)
+	}
+	return out, mapErr(rows.Err())
+}
+
+// SumUsageByMetric aggregates total quantity per metric in SQL, avoiding an
+// unbounded full-table scan-and-sum in Go.
+func (s *PostgresStore) SumUsageByMetric(ctx context.Context) (map[string]int64, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT metric, sum(quantity) FROM usage_records GROUP BY metric`)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+	out := make(map[string]int64)
+	for rows.Next() {
+		var metric string
+		var total int64
+		if err := rows.Scan(&metric, &total); err != nil {
+			return nil, mapErr(err)
+		}
+		out[metric] = total
 	}
 	return out, mapErr(rows.Err())
 }

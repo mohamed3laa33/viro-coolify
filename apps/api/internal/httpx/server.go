@@ -165,21 +165,25 @@ func (s *Server) routes() chi.Router {
 	r.Use(corsMiddleware(s.cfg.CORSAllowedOrigins))
 
 	r.Get("/healthz", s.handleHealth)
-	r.Get("/readyz", s.handleHealth)
+	r.Get("/readyz", s.handleReady)
+
+	// Per-IP rate limiter shared across the public auth + webhook endpoints,
+	// which are the most abuse-prone (credential stuffing, webhook floods).
+	authLimiter := rateLimit(authRateLimit, authRateWindow)
 
 	r.Route("/v1", func(r chi.Router) {
 		r.Get("/version", s.handleVersion)
 
-		// Public auth endpoints.
-		r.Post("/auth/signup", s.handleSignup)
-		r.Post("/auth/login", s.handleLogin)
-		r.Post("/auth/refresh", s.handleRefresh)
+		// Public auth endpoints (rate-limited per IP).
+		r.With(authLimiter).Post("/auth/signup", s.handleSignup)
+		r.With(authLimiter).Post("/auth/login", s.handleLogin)
+		r.With(authLimiter).Post("/auth/refresh", s.handleRefresh)
 
 		// Public billing: the plan catalog, hourly price list, and the Stripe
-		// webhook (signature-verified).
+		// webhook (signature-verified, rate-limited per IP).
 		r.Get("/billing/plans", s.handlePlans)
 		r.Get("/billing/pricing", s.handlePricing)
-		r.Post("/billing/webhook", s.handleStripeWebhook)
+		r.With(authLimiter).Post("/billing/webhook", s.handleStripeWebhook)
 
 		// Public one-click services catalog.
 		r.Get("/services/catalog", s.handleServiceCatalog)

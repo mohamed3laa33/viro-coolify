@@ -98,3 +98,27 @@ func TestMemoryStoreMemberships(t *testing.T) {
 		t.Fatalf("expected 1 member, got %d", len(members))
 	}
 }
+
+func TestMemoryStoreSumUsageByMetric(t *testing.T) {
+	s := NewMemoryStore()
+	ctx := context.Background()
+
+	recs := []domain.UsageRecord{
+		{ID: "1", OrgID: "o1", Metric: "compute_hours", Quantity: 10},
+		{ID: "2", OrgID: "o1", Metric: "compute_hours", Quantity: 5},
+		{ID: "3", OrgID: "o2", Metric: "egress_gb", Quantity: 3},
+	}
+	for i := range recs {
+		if err := s.AddUsage(ctx, &recs[i]); err != nil {
+			t.Fatalf("add usage: %v", err)
+		}
+	}
+
+	totals, err := s.SumUsageByMetric(ctx)
+	if err != nil {
+		t.Fatalf("SumUsageByMetric: %v", err)
+	}
+	if totals["compute_hours"] != 15 || totals["egress_gb"] != 3 {
+		t.Fatalf("unexpected totals: %+v", totals)
+	}
+}

@@ -799,3 +799,17 @@ func (s *MemoryStore) ListAllUsage(_ context.Context) ([]domain.UsageRecord, err
 	}
 	return out, nil
 }
+
+// SumUsageByMetric aggregates total quantity per metric, mirroring the
+// SQL GROUP BY done by the Postgres store.
+func (s *MemoryStore) SumUsageByMetric(_ context.Context) (map[string]int64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]int64)
+	for _, recs := range s.usage {
+		for _, u := range recs {
+			out[u.Metric] += u.Quantity
+		}
+	}
+	return out, nil
+}
