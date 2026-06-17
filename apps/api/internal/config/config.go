@@ -2,10 +2,14 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"strconv"
 	"strings"
 )
+
+// defaultDevJWTSecret is the insecure development fallback; it must never be used in production.
+const defaultDevJWTSecret = "dev-insecure-secret-change-me"
 
 // Config holds all runtime configuration for the Viro control-plane API.
 type Config struct {
@@ -38,7 +42,7 @@ func Load() (*Config, error) {
 		Env:                 getenv("VIRO_ENV", "development"),
 		HTTPAddr:            getenv("VIRO_HTTP_ADDR", ":8080"),
 		DatabaseURL:         getenv("VIRO_DATABASE_URL", ""),
-		JWTSecret:           getenv("VIRO_JWT_SECRET", "dev-insecure-secret-change-me"),
+		JWTSecret:           getenv("VIRO_JWT_SECRET", defaultDevJWTSecret),
 		JWTAccessTTL:        getenvInt("VIRO_JWT_ACCESS_TTL_MIN", 15),
 		JWTRefreshTTL:       getenvInt("VIRO_JWT_REFRESH_TTL_HOURS", 24*30),
 		CoolifyBaseURL:      getenv("VIRO_COOLIFY_BASE_URL", "http://localhost:8000"),
@@ -47,6 +51,9 @@ func Load() (*Config, error) {
 		StripeWebhookSecret: getenv("VIRO_STRIPE_WEBHOOK_SECRET", ""),
 		BillingEnabled:      getenvBool("VIRO_BILLING_ENABLED", false),
 		CORSAllowedOrigins:  splitAndTrim(getenv("VIRO_CORS_ORIGINS", "http://localhost:3000")),
+	}
+	if cfg.IsProduction() && (cfg.JWTSecret == "" || cfg.JWTSecret == defaultDevJWTSecret) {
+		return nil, errors.New("VIRO_JWT_SECRET must be set to a strong value in production")
 	}
 	return cfg, nil
 }

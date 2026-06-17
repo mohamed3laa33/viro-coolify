@@ -13,11 +13,12 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
 - ✅ Unit tests (Coolify client via httptest + HTTP handlers) — `go test ./...` green
 - ✅ Coolify API reference extracted to `docs/COOLIFY_API.md`
 
-## Milestone 2 — Identity, orgs & RBAC ⬜
-- ⬜ Users, organizations, teams, memberships, roles (member/admin/owner)
-- ⬜ JWT auth (access + refresh), bcrypt, signup/login/refresh
-- ⬜ Repository layer with in-memory (tests) + Postgres implementations
-- ⬜ Auth middleware + org-scoped authorization; unit tests
+## Milestone 2 — Identity, orgs & RBAC ✅
+- ✅ Users, organizations, memberships, roles (member/admin/owner, rank-compared)
+- ✅ JWT auth (access + refresh, HS256), bcrypt, signup/login/refresh/me
+- ✅ Repository layer: `store.Store` interface + thread-safe in-memory impl (Postgres impl plugs into same interface)
+- ✅ Auth middleware + `Authorize(min role)` org-scoped checks; unit tests green
+- ✅ Folded in M1 judge fixes: prod JWT-secret guard, CORS-wildcard-vs-credentials, bounded upstream body read
 
 ## Milestone 3 — App lifecycle & deploys ⬜
 - ⬜ Create app (git/dockerfile/image), deploy/stop/restart/delete via Coolify

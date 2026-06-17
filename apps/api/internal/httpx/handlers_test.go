@@ -23,6 +23,21 @@ func newTestServer(t *testing.T, coolifyURL string) *Server {
 	return NewServer(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
+// signup registers a user and returns their access token (for authenticated requests).
+func signup(t *testing.T, s *Server, email string) string {
+	t.Helper()
+	rec := doJSON(t, s, http.MethodPost, "/v1/auth/signup",
+		`{"email":"`+email+`","name":"T","password":"supersecret"}`, "")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("signup helper: %d %s", rec.Code, rec.Body.String())
+	}
+	var a authResponse
+	if err := json.NewDecoder(rec.Body).Decode(&a); err != nil {
+		t.Fatalf("signup helper decode: %v", err)
+	}
+	return a.AccessToken
+}
+
 func TestHealthz(t *testing.T) {
 	s := newTestServer(t, "http://unused")
 	rec := httptest.NewRecorder()
@@ -68,8 +83,8 @@ func TestListAppsProxiesCoolify(t *testing.T) {
 	defer upstream.Close()
 
 	s := newTestServer(t, upstream.URL)
-	rec := httptest.NewRecorder()
-	s.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/apps/", nil))
+	token := signup(t, s, "apps-list@example.com")
+	rec := doJSON(t, s, http.MethodGet, "/v1/apps/", "", token)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
@@ -95,8 +110,8 @@ func TestListAppsUpstreamErrorReturns502(t *testing.T) {
 	defer upstream.Close()
 
 	s := newTestServer(t, upstream.URL)
-	rec := httptest.NewRecorder()
-	s.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/apps/", nil))
+	token := signup(t, s, "apps-err@example.com")
+	rec := doJSON(t, s, http.MethodGet, "/v1/apps/", "", token)
 
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502", rec.Code)

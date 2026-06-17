@@ -17,7 +17,18 @@ import (
 	"time"
 )
 
-const apiPrefix = "/api/v1"
+const (
+	apiPrefix = "/api/v1"
+	// maxResponseBytes caps how much of an upstream response we buffer (8 MiB).
+	maxResponseBytes = 8 << 20
+)
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…(truncated)"
+}
 
 // Client is a Coolify API client. It is safe for concurrent use.
 type Client struct {
@@ -89,9 +100,10 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	}
 	defer resp.Body.Close()
 
-	data, _ := io.ReadAll(resp.Body)
+	// Bound the response we buffer so a misbehaving upstream cannot OOM the process.
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &APIError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(data))}
+		return &APIError{StatusCode: resp.StatusCode, Body: truncate(strings.TrimSpace(string(data)), 512)}
 	}
 	if out != nil && len(data) > 0 {
 		if err := json.Unmarshal(data, out); err != nil {
