@@ -154,6 +154,19 @@ func (s *PostgresStore) Seed(ctx context.Context) error {
 		}
 	}
 
+	var pricingCount int
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM pricing_components`).Scan(&pricingCount); err != nil {
+		return mapErr(err)
+	}
+	if pricingCount == 0 {
+		for _, p := range defaultPricing() {
+			p := p
+			if err := s.UpsertPricingComponent(ctx, &p); err != nil {
+				return err
+			}
+		}
+	}
+
 	var settingsCount int
 	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM platform_settings`).Scan(&settingsCount); err != nil {
 		return mapErr(err)
@@ -842,6 +855,68 @@ func (s *PostgresStore) UpsertPlan(ctx context.Context, p *domain.Plan) error {
 
 func (s *PostgresStore) DeletePlan(ctx context.Context, id string) error {
 	tag, err := s.pool.Exec(ctx, `DELETE FROM plans WHERE id = $1`, id)
+	if err != nil {
+		return mapErr(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ---- Pricing components ----
+
+func scanPricingRow(row scanDest) (domain.PricingComponent, error) {
+	var p domain.PricingComponent
+	err := row.Scan(&p.Key, &p.Name, &p.Unit, &p.PricePerHour, &p.Currency, &p.Active, &p.SortOrder)
+	return p, err
+}
+
+func (s *PostgresStore) ListPricingComponents(ctx context.Context) ([]domain.PricingComponent, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT key, name, unit, price_per_hour, currency, active, sort_order FROM pricing_components`)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+	out := make([]domain.PricingComponent, 0)
+	for rows.Next() {
+		p, err := scanPricingRow(rows)
+		if err != nil {
+			return nil, mapErr(err)
+		}
+		out = append(out, p)
+	}
+	return out, mapErr(rows.Err())
+}
+
+func (s *PostgresStore) GetPricingComponent(ctx context.Context, key string) (*domain.PricingComponent, error) {
+	p, err := scanPricingRow(s.pool.QueryRow(ctx,
+		`SELECT key, name, unit, price_per_hour, currency, active, sort_order FROM pricing_components WHERE key = $1`, key))
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return &p, nil
+}
+
+func (s *PostgresStore) UpsertPricingComponent(ctx context.Context, p *domain.PricingComponent) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO pricing_components (key, name, unit, price_per_hour, currency, active, sort_order)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)
+		 ON CONFLICT (key) DO UPDATE SET
+		   name = EXCLUDED.name,
+		   unit = EXCLUDED.unit,
+		   price_per_hour = EXCLUDED.price_per_hour,
+		   currency = EXCLUDED.currency,
+		   active = EXCLUDED.active,
+		   sort_order = EXCLUDED.sort_order`,
+		p.Key, p.Name, p.Unit, p.PricePerHour, p.Currency, p.Active, p.SortOrder,
+	)
+	return mapErr(err)
+}
+
+func (s *PostgresStore) DeletePricingComponent(ctx context.Context, key string) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM pricing_components WHERE key = $1`, key)
 	if err != nil {
 		return mapErr(err)
 	}

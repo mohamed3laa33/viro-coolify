@@ -42,6 +42,12 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// Meter hourly compute cost for all orgs at the live admin price list.
+	srv.StartMetering(ctx, time.Hour)
+
 	go func() {
 		logger.Info("vortex-api starting",
 			"addr", cfg.HTTPAddr, "env", cfg.Env, "version", version.Version)
@@ -51,8 +57,6 @@ func main() {
 		}
 	}()
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	<-ctx.Done()
 
 	logger.Info("vortex-api shutting down")

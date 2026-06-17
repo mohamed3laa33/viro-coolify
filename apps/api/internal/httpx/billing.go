@@ -19,6 +19,13 @@ func (s *Server) handlePlans(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
+// handlePricing returns the public hourly price list (active components).
+func (s *Server) handlePricing(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"data": s.billing.PricingComponents(r.Context()),
+	})
+}
+
 // handleGetBilling returns an org's subscription + usage summary.
 func (s *Server) handleGetBilling(w http.ResponseWriter, r *http.Request) {
 	sum, err := s.billing.GetBilling(r.Context(), chi.URLParam(r, "orgID"))

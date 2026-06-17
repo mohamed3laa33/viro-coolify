@@ -1,0 +1,102 @@
+package billing
+
+import (
+	"context"
+	"math"
+	"testing"
+
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/domain"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/store"
+)
+
+// setPrices sets admin cpu/memory hourly prices on the store.
+func setPrices(t *testing.T, st store.Store, cpu, mem float64) {
+	t.Helper()
+	ctx := context.Background()
+	if err := st.UpsertPricingComponent(ctx, &domain.PricingComponent{Key: "cpu", Name: "vCPU", Unit: "vCPU-hour", PricePerHour: cpu, Currency: "usd", Active: true, SortOrder: 1}); err != nil {
+		t.Fatalf("set cpu price: %v", err)
+	}
+	if err := st.UpsertPricingComponent(ctx, &domain.PricingComponent{Key: "memory", Name: "Memory", Unit: "GB-hour", PricePerHour: mem, Currency: "usd", Active: true, SortOrder: 2}); err != nil {
+		t.Fatalf("set memory price: %v", err)
+	}
+}
+
+func TestSeededPricesAreZero(t *testing.T) {
+	svc := NewService(store.NewMemoryStore(), nil)
+	// The platform never invents prices: seeded components exist but cost nothing
+	// until an admin sets a price.
+	if got := svc.HourlyCost(context.Background(), 4, 8192); got != 0 {
+		t.Fatalf("expected zero cost before admin sets prices, got %v", got)
+	}
+	comps := svc.PricingComponents(context.Background())
+	if len(comps) == 0 {
+		t.Fatal("expected seeded pricing components (cpu/memory/storage)")
+	}
+}
+
+func TestHourlyAndMonthlyCost(t *testing.T) {
+	st := store.NewMemoryStore()
+	svc := NewService(st, nil)
+	setPrices(t, st, 0.01, 0.001) // $0.01/vCPU-hr, $0.001/GB-hr
+	ctx := context.Background()
+
+	// 1 vCPU + 1024MB (1 GB) -> 0.01 + 0.001 = 0.011 / hour.
+	if got := svc.HourlyCost(ctx, 1, 1024); math.Abs(got-0.011) > 1e-9 {
+		t.Fatalf("hourly cost = %v, want 0.011", got)
+	}
+	// Monthly = 0.011 * 730 * 100 = 803 cents.
+	if got := svc.MonthlyCostCents(ctx, 1, 1024); got != 803 {
+		t.Fatalf("monthly cents = %d, want 803", got)
+	}
+}
+
+func TestOrgEstimateAndMetering(t *testing.T) {
+	st := store.NewMemoryStore()
+	svc := NewService(st, nil)
+	setPrices(t, st, 0.01, 0.001)
+	ctx := context.Background()
+
+	if err := st.CreateOrganization(ctx, &domain.Organization{ID: "o1", Name: "Acme", Slug: "acme"}); err != nil {
+		t.Fatalf("create org: %v", err)
+	}
+	// A deployed (billable) app and a stopped one (not billed) + a queued one.
+	mustApp(t, st, &domain.App{ID: "a1", OrgID: "o1", Name: "web", CPU: 1, MemoryMB: 1024, Status: "deploying", Release: "rel-a1"})
+	mustApp(t, st, &domain.App{ID: "a2", OrgID: "o1", Name: "stopped", CPU: 4, MemoryMB: 4096, Status: "stopped", Release: "rel-a2"})
+	mustApp(t, st, &domain.App{ID: "a3", OrgID: "o1", Name: "queued", CPU: 4, MemoryMB: 4096, Status: "queued"})
+
+	// Only a1 is billable: 0.011/hr -> 803 cents/month.
+	est, err := svc.OrgMonthlyEstimateCents(ctx, "o1")
+	if err != nil {
+		t.Fatalf("estimate: %v", err)
+	}
+	if est != 803 {
+		t.Fatalf("org monthly estimate = %d, want 803", est)
+	}
+
+	// Metering records one hour of cost (in micro-cents) for the org.
+	n, err := svc.MeterUsage(ctx)
+	if err != nil {
+		t.Fatalf("meter: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("metered orgs = %d, want 1", n)
+	}
+	recs, _ := st.ListUsageByOrg(ctx, "o1")
+	var micro int64
+	for _, r := range recs {
+		if r.Metric == MeterMetric {
+			micro += r.Quantity
+		}
+	}
+	// 0.011 currency/hr -> 0.011*100*1000 = 1100 micro-cents.
+	if micro != 1100 {
+		t.Fatalf("metered micro-cents = %d, want 1100", micro)
+	}
+}
+
+func mustApp(t *testing.T, st store.Store, a *domain.App) {
+	t.Helper()
+	if err := st.CreateApp(context.Background(), a); err != nil {
+		t.Fatalf("create app %s: %v", a.ID, err)
+	}
+}

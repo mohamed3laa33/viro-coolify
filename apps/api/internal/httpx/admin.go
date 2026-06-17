@@ -88,6 +88,91 @@ func (s *Server) handleAdminDeletePlan(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// ---- Pricing components (hourly prices, admin-set) ----
+
+func (s *Server) handleAdminListPricing(w http.ResponseWriter, r *http.Request) {
+	comps, err := s.store.ListPricingComponents(r.Context())
+	if err != nil {
+		s.logger.Error("admin list pricing", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to list pricing")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": comps})
+}
+
+func (s *Server) handleAdminCreatePricing(w http.ResponseWriter, r *http.Request) {
+	var p domain.PricingComponent
+	if !decodeJSON(w, r, &p) {
+		return
+	}
+	p.Key = strings.TrimSpace(p.Key)
+	if p.Key == "" {
+		writeError(w, http.StatusBadRequest, "key is required")
+		return
+	}
+	if p.PricePerHour < 0 {
+		writeError(w, http.StatusBadRequest, "pricePerHour must not be negative")
+		return
+	}
+	if _, err := s.store.GetPricingComponent(r.Context(), p.Key); err == nil {
+		writeError(w, http.StatusConflict, "pricing component already exists")
+		return
+	} else if !errors.Is(err, store.ErrNotFound) {
+		s.logger.Error("admin create pricing", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to create pricing")
+		return
+	}
+	if err := s.store.UpsertPricingComponent(r.Context(), &p); err != nil {
+		s.logger.Error("admin create pricing", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to create pricing")
+		return
+	}
+	writeJSON(w, http.StatusCreated, p)
+}
+
+func (s *Server) handleAdminUpdatePricing(w http.ResponseWriter, r *http.Request) {
+	key := chi.URLParam(r, "key")
+	existing, err := s.store.GetPricingComponent(r.Context(), key)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "pricing component not found")
+		return
+	}
+	if err != nil {
+		s.logger.Error("admin update pricing", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to load pricing")
+		return
+	}
+	comp := *existing
+	if !decodeJSON(w, r, &comp) {
+		return
+	}
+	comp.Key = key // key is immutable
+	if comp.PricePerHour < 0 {
+		writeError(w, http.StatusBadRequest, "pricePerHour must not be negative")
+		return
+	}
+	if err := s.store.UpsertPricingComponent(r.Context(), &comp); err != nil {
+		s.logger.Error("admin update pricing", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to update pricing")
+		return
+	}
+	writeJSON(w, http.StatusOK, comp)
+}
+
+func (s *Server) handleAdminDeletePricing(w http.ResponseWriter, r *http.Request) {
+	err := s.store.DeletePricingComponent(r.Context(), chi.URLParam(r, "key"))
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "pricing component not found")
+		return
+	}
+	if err != nil {
+		s.logger.Error("admin delete pricing", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to delete pricing")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // ---- Service templates ----
 
 func (s *Server) handleAdminListTemplates(w http.ResponseWriter, r *http.Request) {

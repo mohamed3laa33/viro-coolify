@@ -27,6 +27,7 @@ type MemoryStore struct {
 	domains        map[string]domain.Domain            // by id
 	plans          map[string]domain.Plan              // by id
 	templates      map[string]domain.ServiceTemplate   // by key
+	pricing        map[string]domain.PricingComponent  // by key
 	settings       domain.PlatformSettings             // singleton
 }
 
@@ -50,6 +51,7 @@ func NewMemoryStore() *MemoryStore {
 		domains:        make(map[string]domain.Domain),
 		plans:          make(map[string]domain.Plan),
 		templates:      make(map[string]domain.ServiceTemplate),
+		pricing:        make(map[string]domain.PricingComponent),
 	}
 	s.seed()
 	return s
@@ -67,8 +69,25 @@ func (s *MemoryStore) seed() {
 			s.templates[t.Key] = t
 		}
 	}
+	if len(s.pricing) == 0 {
+		for _, p := range defaultPricing() {
+			s.pricing[p.Key] = p
+		}
+	}
 	if s.settings.DefaultPlanID == "" {
 		s.settings = defaultSettings()
+	}
+}
+
+// defaultPricing seeds the billable component CATALOG only — which resources are
+// metered (cpu/memory/storage) and their units. Prices are seeded at 0 on
+// purpose: the platform never invents prices. The admin sets the real
+// PricePerHour via the super-admin pricing API; until then a component is free.
+func defaultPricing() []domain.PricingComponent {
+	return []domain.PricingComponent{
+		{Key: "cpu", Name: "vCPU", Unit: "vCPU-hour", PricePerHour: 0, Currency: "usd", Active: true, SortOrder: 1},
+		{Key: "memory", Name: "Memory", Unit: "GB-hour", PricePerHour: 0, Currency: "usd", Active: true, SortOrder: 2},
+		{Key: "storage", Name: "Storage", Unit: "GB-hour", PricePerHour: 0, Currency: "usd", Active: true, SortOrder: 3},
 	}
 }
 
@@ -642,6 +661,45 @@ func (s *MemoryStore) DeletePlan(_ context.Context, id string) error {
 		return ErrNotFound
 	}
 	delete(s.plans, id)
+	return nil
+}
+
+// ---- Pricing components ----
+
+func (s *MemoryStore) ListPricingComponents(_ context.Context) ([]domain.PricingComponent, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]domain.PricingComponent, 0, len(s.pricing))
+	for _, p := range s.pricing {
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) GetPricingComponent(_ context.Context, key string) (*domain.PricingComponent, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	p, ok := s.pricing[key]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return &p, nil
+}
+
+func (s *MemoryStore) UpsertPricingComponent(_ context.Context, p *domain.PricingComponent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pricing[p.Key] = *p
+	return nil
+}
+
+func (s *MemoryStore) DeletePricingComponent(_ context.Context, key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.pricing[key]; !ok {
+		return ErrNotFound
+	}
+	delete(s.pricing, key)
 	return nil
 }
 

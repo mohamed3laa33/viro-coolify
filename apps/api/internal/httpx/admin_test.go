@@ -182,6 +182,57 @@ func TestAdminTemplateCRUDReflectedInCatalog(t *testing.T) {
 	}
 }
 
+func TestAdminPricingCRUDReflectedInPublicCatalog(t *testing.T) {
+	s := newAdminTestServer(t, "boss@example.com")
+	admin := signup(t, s, "boss@example.com")
+
+	// The seeded cpu component exists at price 0; the admin sets its hourly price.
+	if rec := doJSON(t, s, http.MethodPatch, "/v1/admin/pricing/cpu", `{"pricePerHour":0.01}`, admin); rec.Code != http.StatusOK {
+		t.Fatalf("patch cpu price = %d %s", rec.Code, rec.Body.String())
+	}
+
+	// It is reflected in the public price list.
+	rec := doJSON(t, s, http.MethodGet, "/v1/billing/pricing", "", "")
+	var resp struct {
+		Data []struct {
+			Key          string  `json:"key"`
+			PricePerHour float64 `json:"pricePerHour"`
+		} `json:"data"`
+	}
+	_ = json.NewDecoder(rec.Body).Decode(&resp)
+	var price float64
+	for _, c := range resp.Data {
+		if c.Key == "cpu" {
+			price = c.PricePerHour
+		}
+	}
+	if price != 0.01 {
+		t.Fatalf("cpu price not reflected: %+v", resp.Data)
+	}
+
+	// Negative prices are rejected.
+	if rec := doJSON(t, s, http.MethodPatch, "/v1/admin/pricing/cpu", `{"pricePerHour":-1}`, admin); rec.Code != http.StatusBadRequest {
+		t.Fatalf("negative price patch = %d, want 400", rec.Code)
+	}
+
+	// Admin can add a new billable component.
+	gpu := `{"key":"gpu","name":"GPU","unit":"GPU-hour","pricePerHour":0.5,"currency":"usd","active":true,"sortOrder":4}`
+	if rec := doJSON(t, s, http.MethodPost, "/v1/admin/pricing", gpu, admin); rec.Code != http.StatusCreated {
+		t.Fatalf("create pricing = %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Non-admin cannot edit pricing.
+	member := signup(t, s, "peon@example.com")
+	if rec := doJSON(t, s, http.MethodPost, "/v1/admin/pricing", gpu, member); rec.Code != http.StatusForbidden {
+		t.Fatalf("non-admin create pricing = %d, want 403", rec.Code)
+	}
+
+	// Delete the custom component.
+	if rec := doJSON(t, s, http.MethodDelete, "/v1/admin/pricing/gpu", "", admin); rec.Code != http.StatusNoContent {
+		t.Fatalf("delete pricing = %d", rec.Code)
+	}
+}
+
 func TestAdminOverview(t *testing.T) {
 	s := newAdminTestServer(t, "boss@example.com")
 	admin := signup(t, s, "boss@example.com")

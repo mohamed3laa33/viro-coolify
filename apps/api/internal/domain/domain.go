@@ -205,6 +205,24 @@ type ServiceTemplate struct {
 	SortOrder   int    `json:"sortOrder"`
 }
 
+// PricingComponent is an admin-managed billable resource priced per hour. The
+// platform meters every running workload against these components to compute
+// cost. Like all business values, prices live in the store and are edited via
+// the super-admin API — never hardcoded.
+//
+// Canonical components: "cpu" (priced per vCPU-hour) and "memory" (per GB-hour);
+// admins may add more (e.g. "storage"). The cost of a workload of size
+// (cpu vCPU, mem GB) per hour is cpu*price[cpu] + mem*price[memory] + …
+type PricingComponent struct {
+	Key          string  `json:"key"` // cpu | memory | storage | <custom>
+	Name         string  `json:"name"`
+	Unit         string  `json:"unit"`         // e.g. "vCPU-hour", "GB-hour"
+	PricePerHour float64 `json:"pricePerHour"` // price (in Currency) per unit, per hour
+	Currency     string  `json:"currency"`     // e.g. "usd"
+	Active       bool    `json:"active"`
+	SortOrder    int     `json:"sortOrder"`
+}
+
 // PlatformSettings holds platform-wide defaults managed via the super-admin API.
 // It is a singleton.
 type PlatformSettings struct {

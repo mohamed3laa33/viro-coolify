@@ -37,6 +37,10 @@ type Summary struct {
 	Subscription *domain.Subscription `json:"subscription"`
 	Plan         *domain.Plan         `json:"plan"`
 	Usage        map[string]int64     `json:"usage"`
+	// Estimated cost of the org's currently-running workloads at the live admin
+	// price list (hourly pricing). Currency matches the price list.
+	EstimatedMonthlyCents int64  `json:"estimatedMonthlyCents"`
+	Currency              string `json:"currency"`
 }
 
 // GetBilling returns the billing summary for an org.
@@ -62,6 +66,14 @@ func (s *Service) GetBilling(ctx context.Context, orgID string) (*Summary, error
 	for _, r := range records {
 		out.Usage[r.Metric] += r.Quantity
 	}
+
+	// Estimated cost of currently-running workloads at the live price list.
+	est, err := s.OrgMonthlyEstimateCents(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	out.EstimatedMonthlyCents = est
+	out.Currency = s.pricingCurrency(ctx)
 	return out, nil
 }
 

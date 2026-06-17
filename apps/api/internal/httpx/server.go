@@ -2,6 +2,7 @@
 package httpx
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"time"
@@ -129,6 +130,32 @@ func newKubeBackend(cfg *config.Config, logger *slog.Logger) kube.Backend {
 // Router returns the composed HTTP handler.
 func (s *Server) Router() http.Handler { return s.router }
 
+// StartMetering launches a background ticker that records one interval of compute
+// cost for every org at the live admin price list (hourly pricing). It returns
+// immediately and stops when ctx is cancelled. interval<=0 defaults to one hour.
+func (s *Server) StartMetering(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = time.Hour
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				n, err := s.billing.MeterUsage(ctx)
+				if err != nil {
+					s.logger.Error("metering tick", "err", err)
+					continue
+				}
+				s.logger.Info("metered usage", "orgs", n)
+			}
+		}
+	}()
+}
+
 func (s *Server) routes() chi.Router {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -148,8 +175,10 @@ func (s *Server) routes() chi.Router {
 		r.Post("/auth/login", s.handleLogin)
 		r.Post("/auth/refresh", s.handleRefresh)
 
-		// Public billing: the plan catalog and the Stripe webhook (signature-verified).
+		// Public billing: the plan catalog, hourly price list, and the Stripe
+		// webhook (signature-verified).
 		r.Get("/billing/plans", s.handlePlans)
+		r.Get("/billing/pricing", s.handlePricing)
 		r.Post("/billing/webhook", s.handleStripeWebhook)
 
 		// Public one-click services catalog.
@@ -174,6 +203,11 @@ func (s *Server) routes() chi.Router {
 				r.Post("/plans", s.handleAdminCreatePlan)
 				r.Patch("/plans/{id}", s.handleAdminUpdatePlan)
 				r.Delete("/plans/{id}", s.handleAdminDeletePlan)
+
+				r.Get("/pricing", s.handleAdminListPricing)
+				r.Post("/pricing", s.handleAdminCreatePricing)
+				r.Patch("/pricing/{key}", s.handleAdminUpdatePricing)
+				r.Delete("/pricing/{key}", s.handleAdminDeletePricing)
 
 				r.Get("/templates", s.handleAdminListTemplates)
 				r.Post("/templates", s.handleAdminCreateTemplate)

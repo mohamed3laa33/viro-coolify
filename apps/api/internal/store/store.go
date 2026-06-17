@@ -91,6 +91,12 @@ type Store interface {
 	UpsertPlan(ctx context.Context, p *domain.Plan) error
 	DeletePlan(ctx context.Context, id string) error
 
+	// Pricing components (hourly resource prices, super-admin managed).
+	ListPricingComponents(ctx context.Context) ([]domain.PricingComponent, error)
+	GetPricingComponent(ctx context.Context, key string) (*domain.PricingComponent, error)
+	UpsertPricingComponent(ctx context.Context, p *domain.PricingComponent) error
+	DeletePricingComponent(ctx context.Context, key string) error
+
 	// Service templates (one-click catalog, super-admin managed).
 	ListServiceTemplates(ctx context.Context) ([]domain.ServiceTemplate, error)
 	GetServiceTemplate(ctx context.Context, key string) (*domain.ServiceTemplate, error)
