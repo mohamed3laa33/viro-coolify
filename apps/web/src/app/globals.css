@@ -13,6 +13,10 @@
     --muted-foreground: 240 5% 65%;
     --primary: 262 83% 58%;
     --primary-foreground: 0 0% 100%;
+    /* Brand violet (#9D4EDD) — first stop of the balloon gradient. */
+    --brand-violet: 270 66% 59%;
+    /* Deep violet (#5B21B6) — the logo basket / seams accent. */
+    --brand-violet-deep: 265 69% 42%;
     /* Brand magenta (#e0218a) — second stop of the balloon gradient. */
     --brand-magenta: 327 75% 50%;
     --ring: 262 83% 58%;
@@ -34,7 +38,9 @@
   body {
     background-color: hsl(var(--background));
     color: hsl(var(--foreground));
-    font-feature-settings: "rlig" 1, "calt" 1;
+    font-feature-settings:
+      "rlig" 1,
+      "calt" 1;
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
   }
@@ -64,7 +70,8 @@
   }
 
   .glow-violet {
-    box-shadow: 0 0 0 1px hsl(var(--primary) / 0.25),
+    box-shadow:
+      0 0 0 1px hsl(var(--primary) / 0.25),
       0 8px 40px -8px hsl(var(--primary) / 0.45);
   }
 

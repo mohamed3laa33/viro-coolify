@@ -12,8 +12,8 @@ import {
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { api, type App, type Project } from "@/lib/api";
-import { mockApps, mockProjects } from "@/lib/mock";
 import { isDemoMode } from "@/lib/demo";
+import { useDemoData } from "@/lib/demo-data";
 import { useResource } from "@/lib/use-resource";
 import { PageHeader } from "@/components/page-header";
 import { EmptyState } from "@/components/empty-state";
@@ -29,12 +29,16 @@ export default function ProjectsPage() {
   const { activeOrgId, authedCall } = useAuth();
   const demo = isDemoMode();
 
+  // Demo fallback loads lazily (demo mode only); never shipped to prod.
+  const demoProjects = useDemoData((m) => m.mockProjects, [] as Project[]);
+
   const { data, error, refetch } = useResource(
     activeOrgId
-      ? () => authedCall((token, on) => api.listProjects(activeOrgId, token, on))
+      ? () =>
+          authedCall((token, on) => api.listProjects(activeOrgId, token, on))
       : null,
-    { data: demo ? mockProjects : [] },
-    [activeOrgId],
+    { data: demoProjects },
+    [activeOrgId, demoProjects],
   );
 
   const projects = data.data;
@@ -84,10 +88,7 @@ export default function ProjectsPage() {
       {notice && <Notice>{notice}</Notice>}
 
       {error && !demo && (
-        <Notice
-          variant="error"
-          className="items-center justify-between gap-4"
-        >
+        <Notice variant="error" className="items-center justify-between gap-4">
           <span>Couldn’t load projects — the API is unreachable.</span>
           <Button size="sm" variant="secondary" onClick={refetch}>
             Retry
@@ -161,7 +162,8 @@ function ProjectRow({ project }: { project: Project }) {
   const [open, setOpen] = useState(false);
 
   // Fallback: in demo mode, use a stand-in slice of mock apps; otherwise empty.
-  const fallbackApps = isDemoMode() ? mockApps.slice(0, 3) : [];
+  // Loaded lazily so mock data is never shipped to / shown in production.
+  const fallbackApps = useDemoData((m) => m.mockApps.slice(0, 3), [] as App[]);
 
   const { data, loading } = useResource(
     open && activeOrgId
@@ -171,7 +173,7 @@ function ProjectRow({ project }: { project: Project }) {
           )
       : null,
     { data: fallbackApps },
-    [open, activeOrgId, project.id],
+    [open, activeOrgId, project.id, fallbackApps],
   );
 
   const apps: App[] = open ? data.data : [];

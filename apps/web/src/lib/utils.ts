@@ -28,6 +28,18 @@ export function initials(name: string): string {
  */
 export const BRAND_MAGENTA = "hsl(var(--brand-magenta))";
 
+/**
+ * Brand violet as a CSS color for inline SVG strokes/fills, backed by the
+ * `--brand-violet` design token (see globals.css / tailwind theme).
+ */
+export const BRAND_VIOLET = "hsl(var(--brand-violet))";
+
+/**
+ * Deep brand violet (logo basket / seam accent), backed by the
+ * `--brand-violet-deep` design token.
+ */
+export const BRAND_VIOLET_DEEP = "hsl(var(--brand-violet-deep))";
+
 /** Base domain for platform-issued app hostnames. */
 export const VORTEX_BASE_DOMAIN = "vortex.v60ai.com";
 

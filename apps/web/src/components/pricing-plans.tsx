@@ -3,8 +3,7 @@
 import Link from "next/link";
 import { Check } from "lucide-react";
 import { api, type Plan } from "@/lib/api";
-import { mockPlans } from "@/lib/mock";
-import { isDemoMode } from "@/lib/demo";
+import { useDemoData } from "@/lib/demo-data";
 import { useResource } from "@/lib/use-resource";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -24,7 +23,9 @@ function priceLabel(plan: Plan): { price: string; period: string } {
 
 function planFeatures(plan: Plan): string[] {
   const features: string[] = [];
-  features.push(`${plan.includedHours.toLocaleString()} included machine-hours`);
+  features.push(
+    `${plan.includedHours.toLocaleString()} included machine-hours`,
+  );
   if (typeof plan.maxApps === "number") {
     // A non-positive maxApps (0 or negative) is the "unlimited" sentinel;
     // any positive value is the real per-org app cap to display.
@@ -49,12 +50,15 @@ function planFeatures(plan: Plan): string[] {
 }
 
 export function PricingPlans() {
+  // Demo fallback loads lazily (demo mode only); prod shows a real empty state.
+  // Plans always come from the API — never hardcoded (invariant #1).
+  const demoPlans = useDemoData((m) => m.mockPlans, [] as Plan[]);
+
   const { data, loading } = useResource(
     () => api.getPlans(),
-    // Only fall back to mock plans in demo mode; otherwise show a real empty
-    // state. Plans always come from the API — never hardcoded (invariant #1).
-    { data: isDemoMode() ? mockPlans : [], provider: "stripe" },
-    [],
+    { data: demoPlans, provider: "stripe" },
+    [demoPlans],
+    { cacheKey: "plans" },
   );
 
   // Show active plans (when the flag is present) sorted by sortOrder.
@@ -132,7 +136,9 @@ export function PricingPlans() {
                 variant={featured ? "primary" : "secondary"}
                 className="w-full"
               >
-                {plan.priceCents <= 0 ? "Start free" : `Start with ${plan.name}`}
+                {plan.priceCents <= 0
+                  ? "Start free"
+                  : `Start with ${plan.name}`}
               </Button>
             </Link>
           </Card>

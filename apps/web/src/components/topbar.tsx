@@ -49,7 +49,9 @@ export function Topbar() {
   // inside the menu rather than on the trigger.
   useEffect(() => {
     if (orgOpen) {
-      orgMenuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
+      orgMenuRef.current
+        ?.querySelector<HTMLElement>('[role="menuitem"]')
+        ?.focus();
     }
   }, [orgOpen]);
 
@@ -115,7 +117,7 @@ export function Topbar() {
           onClick={toggleMobileNav}
           aria-label="Open navigation"
           aria-expanded={false}
-          className="flex h-9 w-9 items-center justify-center rounded-md border border-border bg-surface-2 text-foreground hover:bg-muted md:hidden"
+          className="flex h-9 w-9 items-center justify-center rounded-md border border-border bg-surface-2 text-foreground hover:bg-muted md:hidden pointer-coarse:min-h-11 pointer-coarse:min-w-11"
         >
           <Menu className="h-5 w-5" />
         </button>
@@ -128,7 +130,7 @@ export function Topbar() {
             onClick={() => setOrgOpen((o) => !o)}
             aria-haspopup="menu"
             aria-expanded={orgOpen}
-            className="flex items-center gap-2 rounded-md border border-border bg-surface-2 px-3 py-1.5 text-sm font-medium text-foreground hover:bg-muted"
+            className="flex items-center gap-2 rounded-md border border-border bg-surface-2 px-3 py-1.5 text-sm font-medium text-foreground hover:bg-muted pointer-coarse:min-h-11"
           >
             <span className="flex h-5 w-5 items-center justify-center rounded bg-brand-balloon text-[10px] font-bold text-white">
               {orgInitial}
@@ -165,7 +167,7 @@ export function Topbar() {
                     setOrgOpen(false);
                     orgTriggerRef.current?.focus();
                   }}
-                  className="flex w-full items-center justify-between rounded-md px-2 py-2 text-sm text-foreground hover:bg-muted"
+                  className="flex w-full items-center justify-between rounded-md px-2 py-2 text-sm text-foreground hover:bg-muted pointer-coarse:min-h-11"
                 >
                   <span className="flex items-center gap-2">
                     <span className="flex h-5 w-5 items-center justify-center rounded bg-brand-balloon text-[10px] font-bold text-white">
@@ -192,7 +194,7 @@ export function Topbar() {
           aria-label="Account menu"
           aria-haspopup="menu"
           aria-expanded={userOpen}
-          className="flex items-center gap-2 rounded-full p-1 pr-2 hover:bg-muted"
+          className="flex items-center gap-2 rounded-full p-1 pr-2 hover:bg-muted pointer-coarse:min-h-11 pointer-coarse:min-w-11"
         >
           <span className="flex h-8 w-8 items-center justify-center rounded-full bg-brand-balloon text-xs font-semibold text-white">
             {userInitials}
@@ -226,7 +228,7 @@ export function Topbar() {
               role="menuitem"
               onClick={handleLogout}
               className={cn(
-                "flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-foreground hover:bg-muted",
+                "flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-foreground hover:bg-muted pointer-coarse:min-h-11",
               )}
             >
               <LogOut className="h-4 w-4 text-muted-foreground" />

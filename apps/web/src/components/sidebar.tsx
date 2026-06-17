@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   Boxes,
+  CircleDollarSign,
   Database,
   FolderGit2,
   Globe,
@@ -21,9 +22,8 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/lib/auth";
-import { api } from "@/lib/api";
-import { mockApps, mockBilling } from "@/lib/mock";
-import { isDemoMode } from "@/lib/demo";
+import { api, type App, type BillingResponse } from "@/lib/api";
+import { useDemoData } from "@/lib/demo-data";
 import { useResource } from "@/lib/use-resource";
 import { Logo } from "@/components/logo";
 
@@ -93,6 +93,12 @@ export const ADMIN_NAV: NavItem[] = [
     match: (p) => p.startsWith("/dashboard/admin/plans"),
   },
   {
+    label: "Pricing",
+    href: "/dashboard/admin/pricing",
+    icon: CircleDollarSign,
+    match: (p) => p.startsWith("/dashboard/admin/pricing"),
+  },
+  {
     label: "Catalog",
     href: "/dashboard/admin/catalog",
     icon: PackageSearch,
@@ -123,7 +129,7 @@ function NavLink({
       aria-current={active ? "page" : undefined}
       onClick={onNavigate}
       className={cn(
-        "group flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+        "group flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors pointer-coarse:min-h-11",
         active
           ? "bg-primary/15 text-foreground"
           : "text-muted-foreground hover:bg-muted hover:text-foreground",
@@ -162,21 +168,30 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   const pathname = usePathname() ?? "";
   const { user, activeOrgId, authedCall } = useAuth();
 
+  // Demo fallbacks load lazily (demo mode only) so mock data never ships to prod.
+  const demoBilling = useDemoData<BillingResponse | null>(
+    (m) => m.mockBilling,
+    null,
+  );
+  const demoApps = useDemoData((m) => m.mockApps, [] as App[]);
+
   // Plan + quota usage are sourced from the billing endpoint and the live app
   // count — never hardcoded. Falls back to mock data when the API is offline.
   const { data: billing } = useResource(
     activeOrgId
       ? () => authedCall((token, on) => api.getBilling(activeOrgId, token, on))
       : null,
-    isDemoMode() ? mockBilling : null,
-    [activeOrgId],
+    demoBilling,
+    [activeOrgId, demoBilling],
+    { cacheKey: activeOrgId ? `billing:${activeOrgId}` : undefined },
   );
   const { data: appsData } = useResource(
     activeOrgId
       ? () => authedCall((token, on) => api.listApps(activeOrgId, token, on))
       : null,
-    { data: isDemoMode() ? mockApps : [] },
-    [activeOrgId],
+    { data: demoApps },
+    [activeOrgId, demoApps],
+    { cacheKey: activeOrgId ? `apps:${activeOrgId}` : undefined },
   );
 
   const planName = billing?.plan?.name ?? null;
@@ -375,7 +390,7 @@ export function MobileSidebar() {
             type="button"
             onClick={close}
             aria-label="Close navigation"
-            className="rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+            className="flex items-center justify-center rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground pointer-coarse:min-h-11 pointer-coarse:min-w-11"
           >
             <X className="h-5 w-5" />
           </button>

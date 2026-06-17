@@ -34,12 +34,12 @@ standalone — useful for design work and demos.
 
 ## Scripts
 
-| Script          | Description                          |
-| --------------- | ------------------------------------ |
-| `npm run dev`   | Start the dev server                 |
-| `npm run build` | Production build                     |
-| `npm run start` | Serve the production build           |
-| `npm run test`  | Run the Vitest suite (no network)    |
+| Script          | Description                       |
+| --------------- | --------------------------------- |
+| `npm run dev`   | Start the dev server              |
+| `npm run build` | Production build                  |
+| `npm run start` | Serve the production build        |
+| `npm run test`  | Run the Vitest suite (no network) |
 
 ## Project layout
 
@@ -71,18 +71,18 @@ Typed in `src/lib/api.ts`. Base URL from `NEXT_PUBLIC_VORTEX_API_URL`. All
 authenticated calls attach `Authorization: Bearer <token>`. Resource endpoints
 are org-scoped under `/v1/orgs/{orgId}/...`; admin endpoints under `/v1/admin/*`.
 
-| Method | Path                                                  | Notes                       |
-| ------ | ----------------------------------------------------- | --------------------------- |
-| POST   | `/v1/auth/signup`                                     | `{email,name,password}`     |
-| POST   | `/v1/auth/login`                                      | `{email,password}`          |
-| POST   | `/v1/auth/refresh`                                    | `{refreshToken}`            |
-| GET    | `/v1/me`                                              | `{id,email,name,isAdmin}`   |
-| GET    | `/v1/orgs` · POST `/v1/orgs`                          | bearer                      |
-| GET    | `/v1/orgs/{orgId}/apps` · `/{appId}`                  | bearer                      |
-| POST   | `/v1/orgs/{orgId}/apps/{appId}/{deploy\|stop\|restart}` | bearer, returns the App  |
-| GET    | `/v1/orgs/{orgId}/databases`                          | bearer                      |
-| GET    | `/v1/services/catalog`                                | public catalog              |
-| GET    | `/v1/billing/plans`                                   | public plan catalog         |
+| Method | Path                                                    | Notes                     |
+| ------ | ------------------------------------------------------- | ------------------------- |
+| POST   | `/v1/auth/signup`                                       | `{email,name,password}`   |
+| POST   | `/v1/auth/login`                                        | `{email,password}`        |
+| POST   | `/v1/auth/refresh`                                      | `{refreshToken}`          |
+| GET    | `/v1/me`                                                | `{id,email,name,isAdmin}` |
+| GET    | `/v1/orgs` · POST `/v1/orgs`                            | bearer                    |
+| GET    | `/v1/orgs/{orgId}/apps` · `/{appId}`                    | bearer                    |
+| POST   | `/v1/orgs/{orgId}/apps/{appId}/{deploy\|stop\|restart}` | bearer, returns the App   |
+| GET    | `/v1/orgs/{orgId}/databases`                            | bearer                    |
+| GET    | `/v1/services/catalog`                                  | public catalog            |
+| GET    | `/v1/billing/plans`                                     | public plan catalog       |
 
 ## Notes
 
@@ -90,4 +90,7 @@ are org-scoped under `/v1/orgs/{orgId}/...`; admin endpoints under `/v1/admin/*`
 - Stripe billing is shown in **test mode** in Settings → Billing.
 - Auth tokens are stored in `localStorage` via the `AuthProvider` in
   `src/lib/auth.tsx`.
+
+```
+
 ```

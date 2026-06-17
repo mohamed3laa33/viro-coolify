@@ -4,8 +4,7 @@ import { statusVariant, type StatusVariant } from "@/lib/api";
 const kindClasses: Record<StatusVariant, string> = {
   success: "bg-success shadow-[0_0_0_3px_hsl(var(--success)/0.2)]",
   muted: "bg-muted-foreground shadow-[0_0_0_3px_hsl(var(--muted)/0.5)]",
-  destructive:
-    "bg-destructive shadow-[0_0_0_3px_hsl(var(--destructive)/0.2)]",
+  destructive: "bg-destructive shadow-[0_0_0_3px_hsl(var(--destructive)/0.2)]",
   warning: "bg-warning shadow-[0_0_0_3px_hsl(var(--warning)/0.2)]",
   info: "bg-info shadow-[0_0_0_3px_hsl(var(--info)/0.2)]",
 };

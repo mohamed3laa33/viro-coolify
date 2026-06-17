@@ -13,6 +13,7 @@ import type {
   Invitation,
   Member,
   Org,
+  PricingComponent,
   Project,
   Settings,
   Template,
@@ -210,7 +211,48 @@ export const mockBilling: BillingResponse = {
   usage: {
     compute_hours: 412,
   },
+  estimatedMonthlyCents: 4120,
+  currency: "usd",
 };
+
+export const mockPricing: PricingComponent[] = [
+  {
+    key: "cpu",
+    name: "CPU",
+    unit: "core-hour",
+    pricePerHour: 2,
+    currency: "usd",
+    active: true,
+    sortOrder: 0,
+  },
+  {
+    key: "memory",
+    name: "Memory",
+    unit: "GB-hour",
+    pricePerHour: 0.5,
+    currency: "usd",
+    active: true,
+    sortOrder: 1,
+  },
+  {
+    key: "egress",
+    name: "Egress",
+    unit: "GB",
+    pricePerHour: 9,
+    currency: "usd",
+    active: true,
+    sortOrder: 2,
+  },
+  {
+    key: "storage",
+    name: "Block storage",
+    unit: "GB-hour",
+    pricePerHour: 0.02,
+    currency: "usd",
+    active: false,
+    sortOrder: 3,
+  },
+];
 
 export const mockTemplates: Template[] = [
   {
@@ -318,14 +360,7 @@ export const mockAdminOverview: AdminOverview = {
   },
 };
 
-export const mockRegions = [
-  "iad",
-  "lhr",
-  "fra",
-  "sin",
-  "syd",
-  "gru",
-] as const;
+export const mockRegions = ["iad", "lhr", "fra", "sin", "syd", "gru"] as const;
 
 export const mockProjects: Project[] = [
   {
@@ -404,9 +439,9 @@ export const mockEnv: EnvVar[] = [
   { key: "PORT", value: "8080" },
   {
     key: "DATABASE_URL",
-    value: "postgres://app:s3cr3t@primary-postgres.internal:5432/app",
+    value: "postgres://demo:demo@db.demo.local:5432/demo",
   },
-  { key: "REDIS_URL", value: "redis://app:s3cr3t@session-cache.internal:6379" },
+  { key: "REDIS_URL", value: "redis://demo:demo@cache.demo.local:6379" },
   { key: "LOG_LEVEL", value: "info" },
 ];
 
@@ -416,7 +451,11 @@ export const mockDomains: Domain[] = [
   { id: "dom_03", domain: "staging.acme.com", verified: false },
 ];
 
-function metricSeries(seed: number, base: number, n = 24): { t: string; v: number }[] {
+function metricSeries(
+  seed: number,
+  base: number,
+  n = 24,
+): { t: string; v: number }[] {
   const out: { t: string; v: number }[] = [];
   const now = Date.now();
   let v = base + (seed % 17);

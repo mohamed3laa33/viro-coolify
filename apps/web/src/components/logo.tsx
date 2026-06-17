@@ -1,4 +1,4 @@
-import { cn } from "@/lib/utils";
+import { cn, BRAND_VIOLET, BRAND_VIOLET_DEEP } from "@/lib/utils";
 
 export interface LogoProps {
   className?: string;
@@ -10,7 +10,11 @@ export interface LogoProps {
  * Vortex brand mark — a hot-air balloon with a violet→magenta gradient,
  * a nod to fly.io's balloon iconography.
  */
-export function Logo({ className, size = 28, withWordmark = false }: LogoProps) {
+export function Logo({
+  className,
+  size = 28,
+  withWordmark = false,
+}: LogoProps) {
   return (
     <span className={cn("inline-flex items-center gap-2", className)}>
       <svg
@@ -30,9 +34,9 @@ export function Logo({ className, size = 28, withWordmark = false }: LogoProps) 
             y2="26"
             gradientUnits="userSpaceOnUse"
           >
-            {/* brand tokens: violet has no CSS var yet (see tailwind brand.violet);
-                magenta tracks the --brand-magenta token in globals.css. */}
-            <stop stopColor="#9D4EDD" />
+            {/* brand tokens: violet tracks --brand-violet, magenta tracks
+                --brand-magenta (both in globals.css). */}
+            <stop stopColor={BRAND_VIOLET} />
             <stop offset="1" stopColor="hsl(var(--brand-magenta))" />
           </linearGradient>
         </defs>
@@ -48,10 +52,17 @@ export function Logo({ className, size = 28, withWordmark = false }: LogoProps) 
           fillOpacity="0.18"
         />
         {/* Basket */}
-        <rect x="13.7" y="26.4" width="4.6" height="3.6" rx="1" fill="#5B21B6" />
+        <rect
+          x="13.7"
+          y="26.4"
+          width="4.6"
+          height="3.6"
+          rx="1"
+          fill={BRAND_VIOLET_DEEP}
+        />
         <path
           d="M13.8 25.8 13 27m6.2-1.2L20 27"
-          stroke="#5B21B6"
+          stroke={BRAND_VIOLET_DEEP}
           strokeWidth="1"
           strokeLinecap="round"
         />

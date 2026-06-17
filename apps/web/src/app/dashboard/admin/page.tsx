@@ -2,8 +2,8 @@
 
 import { Building2, Users } from "lucide-react";
 import { useAuth } from "@/lib/auth";
-import { api } from "@/lib/api";
-import { mockAdminOverview, mockPlans } from "@/lib/mock";
+import { api, type AdminOverview, type AdminPlan } from "@/lib/api";
+import { useDemoData } from "@/lib/demo-data";
 import { useResource } from "@/lib/use-resource";
 import { PageHeader } from "@/components/page-header";
 import { StatCard } from "@/components/stat-card";
@@ -24,19 +24,30 @@ function humanizeMetric(metric: string): string {
     .replace(/^\w/, (c) => c.toUpperCase());
 }
 
+const EMPTY_OVERVIEW: AdminOverview = {
+  orgCount: 0,
+  userCount: 0,
+  subscriptionsByPlan: {},
+  usageTotals: {},
+};
+
 export default function AdminOverviewPage() {
   const { authedCall } = useAuth();
 
+  // Demo fallbacks load lazily (demo mode only); prod shows real empty states.
+  const demoOverview = useDemoData((m) => m.mockAdminOverview, EMPTY_OVERVIEW);
+  const demoPlans = useDemoData((m) => m.mockPlans, [] as AdminPlan[]);
+
   const { data: overview, usingFallback } = useResource(
     () => authedCall((token, on) => api.getAdminOverview(token, on)),
-    mockAdminOverview,
-    [],
+    demoOverview,
+    [demoOverview],
   );
 
   const { data: plansData } = useResource(
     () => authedCall((token, on) => api.listAdminPlans(token, on)),
-    { data: mockPlans },
-    [],
+    { data: demoPlans },
+    [demoPlans],
   );
   const plans = plansData.data;
 
@@ -136,7 +147,9 @@ export default function AdminOverviewPage() {
                   <thead>
                     <tr className="border-b border-border text-left text-xs uppercase tracking-wide text-muted-foreground">
                       <th className="px-6 py-3 font-medium">Metric</th>
-                      <th className="px-6 py-3 text-right font-medium">Total</th>
+                      <th className="px-6 py-3 text-right font-medium">
+                        Total
+                      </th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-border">

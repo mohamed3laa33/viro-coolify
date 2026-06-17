@@ -5,9 +5,15 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Plus, Search, GitBranch, Package, X, Rocket } from "lucide-react";
 import { useAuth } from "@/lib/auth";
-import { api, ApiError, statusVariant, type CreateAppInput } from "@/lib/api";
-import { mockApps } from "@/lib/mock";
+import {
+  api,
+  ApiError,
+  statusVariant,
+  type App,
+  type CreateAppInput,
+} from "@/lib/api";
 import { isDemoMode } from "@/lib/demo";
+import { useDemoData } from "@/lib/demo-data";
 import { useResource } from "@/lib/use-resource";
 import { PageHeader } from "@/components/page-header";
 import { EmptyState } from "@/components/empty-state";
@@ -47,6 +53,9 @@ export default function AppsPage() {
   // so we can show the real ApiError message instead of a misleading empty state.
   const fetchErrorRef = useRef<string | null>(null);
 
+  // Demo fallback loads lazily (demo mode only); never shipped to prod.
+  const demoApps = useDemoData((m) => m.mockApps, [] as App[]);
+
   const { data, error, refetch } = useResource(
     activeOrgId
       ? (signal) =>
@@ -68,8 +77,8 @@ export default function AppsPage() {
             signal,
           )
       : null,
-    { data: isDemoMode() ? mockApps : [] },
-    [activeOrgId],
+    { data: demoApps },
+    [activeOrgId, demoApps],
   );
 
   const showError = error && !isDemoMode();
@@ -103,9 +112,7 @@ export default function AppsPage() {
       {showError && (
         <Notice variant="error">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <span>
-              {fetchErrorRef.current ?? "Failed to load apps."}
-            </span>
+            <span>{fetchErrorRef.current ?? "Failed to load apps."}</span>
             <Button size="sm" variant="secondary" onClick={refetch}>
               Retry
             </Button>
@@ -149,7 +156,10 @@ export default function AppsPage() {
               </div>
 
               <div className="mt-4">
-                <Badge variant={statusBadgeVariant(app.status)} className="capitalize">
+                <Badge
+                  variant={statusBadgeVariant(app.status)}
+                  className="capitalize"
+                >
                   {app.status}
                 </Badge>
               </div>
@@ -244,7 +254,12 @@ function CreateAppForm({
     <Card>
       <CardHeader className="flex-row items-center justify-between space-y-0">
         <CardTitle>New app</CardTitle>
-        <Button variant="ghost" size="icon" onClick={onClose} aria-label="Close">
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={onClose}
+          aria-label="Close"
+        >
           <X className="h-4 w-4" />
         </Button>
       </CardHeader>

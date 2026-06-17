@@ -6,18 +6,16 @@ import { useAuth } from "@/lib/auth";
 import {
   api,
   computeHoursUsed,
+  formatCents,
+  type BillingResponse,
+  type Invitation,
+  type Member,
   type MemberRole,
   type Plan,
   type Project,
+  type Settings,
 } from "@/lib/api";
-import {
-  mockBilling,
-  mockInvitations,
-  mockMembers,
-  mockPlans,
-  mockProjects,
-  mockSettings,
-} from "@/lib/mock";
+import { useDemoData } from "@/lib/demo-data";
 import { useResource } from "@/lib/use-resource";
 import { cn } from "@/lib/utils";
 import { PageHeader } from "@/components/page-header";
@@ -71,7 +69,7 @@ export default function SettingsPage() {
               type="button"
               onClick={() => setTab(t)}
               className={cn(
-                "border-b-2 px-1 pb-3 text-sm font-medium transition-colors",
+                "inline-flex items-center border-b-2 px-1 pb-3 pt-1 text-sm font-medium transition-colors pointer-coarse:min-h-11",
                 tab === t
                   ? "border-primary text-foreground"
                   : "border-transparent text-muted-foreground hover:text-foreground",
@@ -92,10 +90,25 @@ export default function SettingsPage() {
   );
 }
 
+// Neutral, non-demo default so the General tab always has a Settings shape to
+// read (the region field stays blank in production until the API responds).
+const EMPTY_SETTINGS: Settings = {
+  defaultCpu: 0,
+  defaultMemoryMb: 0,
+  defaultPlanId: "",
+  cpuOvercommitFactor: 0,
+  memoryOvercommitFactor: 0,
+  defaultRegion: "",
+  regions: [],
+};
+
 function GeneralTab() {
   const { user, orgs, activeOrgId, authedCall } = useAuth();
 
   const activeOrg = orgs.find((o) => o.id === activeOrgId) ?? orgs[0] ?? null;
+
+  // Demo fallback loads lazily (demo mode only); prod shows EMPTY_SETTINGS.
+  const demoSettings = useDemoData((m) => m.mockSettings, EMPTY_SETTINGS);
 
   // The default region is platform config; show it but only let admins edit it
   // on the admin settings page. Falls back to mock settings when unreachable.
@@ -103,8 +116,8 @@ function GeneralTab() {
     user?.isAdmin
       ? () => authedCall((token, on) => api.getSettings(token, on))
       : null,
-    mockSettings,
-    [user?.isAdmin],
+    demoSettings,
+    [user?.isAdmin, demoSettings],
   );
 
   // TODO(backend): add org update route (PATCH /v1/orgs/:id). Until it exists,
@@ -173,8 +186,14 @@ function GeneralTab() {
           </div>
         </div>
         <div className="flex items-center justify-end gap-3">
-          <p className="text-xs text-muted-foreground">{editingDisabledNote}.</p>
-          <Button disabled title={editingDisabledNote} aria-label={editingDisabledNote}>
+          <p className="text-xs text-muted-foreground">
+            {editingDisabledNote}.
+          </p>
+          <Button
+            disabled
+            title={editingDisabledNote}
+            aria-label={editingDisabledNote}
+          >
             Save changes
           </Button>
         </div>
@@ -183,10 +202,7 @@ function GeneralTab() {
   );
 }
 
-function projectLabel(
-  projectId: string | null,
-  projects: Project[],
-): string {
+function projectLabel(projectId: string | null, projects: Project[]): string {
   if (!projectId) return "Organization-wide";
   return projects.find((p) => p.id === projectId)?.name ?? projectId;
 }
@@ -194,12 +210,20 @@ function projectLabel(
 function TeamTab() {
   const { activeOrgId, authedCall } = useAuth();
 
+  // Demo fallbacks load lazily (demo mode only); never shipped to prod.
+  const demoMembers = useDemoData((m) => m.mockMembers, [] as Member[]);
+  const demoInvitations = useDemoData(
+    (m) => m.mockInvitations,
+    [] as Invitation[],
+  );
+  const demoProjects = useDemoData((m) => m.mockProjects, [] as Project[]);
+
   const { data: membersData, error: membersError } = useResource(
     activeOrgId
       ? () => authedCall((token, on) => api.listMembers(activeOrgId, token, on))
       : null,
-    { data: mockMembers },
-    [activeOrgId],
+    { data: demoMembers },
+    [activeOrgId, demoMembers],
   );
 
   const {
@@ -209,20 +233,19 @@ function TeamTab() {
   } = useResource(
     activeOrgId
       ? () =>
-          authedCall((token, on) =>
-            api.listInvitations(activeOrgId, token, on),
-          )
+          authedCall((token, on) => api.listInvitations(activeOrgId, token, on))
       : null,
-    { data: mockInvitations },
-    [activeOrgId],
+    { data: demoInvitations },
+    [activeOrgId, demoInvitations],
   );
 
   const { data: projectsData } = useResource(
     activeOrgId
-      ? () => authedCall((token, on) => api.listProjects(activeOrgId, token, on))
+      ? () =>
+          authedCall((token, on) => api.listProjects(activeOrgId, token, on))
       : null,
-    { data: mockProjects },
-    [activeOrgId],
+    { data: demoProjects },
+    [activeOrgId, demoProjects],
   );
 
   const members = membersData.data;
@@ -469,15 +492,27 @@ function formatPrice(plan: Plan): string {
   return `${amount} / month`;
 }
 
+// Neutral, non-demo default so the Billing tab always has a shape to read.
+const EMPTY_BILLING: BillingResponse = {
+  subscription: null,
+  plan: null,
+  usage: {},
+};
+
 function BillingTab() {
   const { activeOrgId, authedCall } = useAuth();
   const [pendingPlan, setPendingPlan] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
+  // Demo fallbacks load lazily (demo mode only); prod shows real empty states.
+  const demoPlans = useDemoData((m) => m.mockPlans, [] as Plan[]);
+  const demoBilling = useDemoData((m) => m.mockBilling, EMPTY_BILLING);
+
   const { data: plansData, error: plansError } = useResource(
     () => api.getPlans(),
-    { data: mockPlans, provider: "stripe" },
-    [],
+    { data: demoPlans, provider: "stripe" },
+    [demoPlans],
+    { cacheKey: "plans" },
   );
   const plans = plansData.data;
 
@@ -489,16 +524,20 @@ function BillingTab() {
     activeOrgId
       ? () => authedCall((token, on) => api.getBilling(activeOrgId, token, on))
       : null,
-    mockBilling,
-    [activeOrgId],
+    demoBilling,
+    [activeOrgId, demoBilling],
+    { cacheKey: activeOrgId ? `billing:${activeOrgId}` : undefined },
   );
 
-  const currentPlanId = billing.plan?.id ?? billing.subscription?.planId ?? null;
+  const currentPlanId =
+    billing.plan?.id ?? billing.subscription?.planId ?? null;
   const usedHours = computeHoursUsed(billing.usage);
   const totalHours = billing.plan?.includedHours ?? 0;
   const overageHours = Math.max(0, usedHours - totalHours);
   const usagePct =
-    totalHours > 0 ? Math.min(100, Math.round((usedHours / totalHours) * 100)) : 0;
+    totalHours > 0
+      ? Math.min(100, Math.round((usedHours / totalHours) * 100))
+      : 0;
 
   async function subscribe(planId: string) {
     if (!activeOrgId) {
@@ -564,6 +603,17 @@ function BillingTab() {
               {overageHours}h over your included hours this period.
             </p>
           )}
+          {typeof billing.estimatedMonthlyCents === "number" && (
+            <div className="flex items-center justify-between border-t border-border pt-3 text-sm">
+              <span className="text-foreground">Estimated monthly cost</span>
+              <span className="font-medium tabular-nums">
+                {formatCents(
+                  billing.estimatedMonthlyCents,
+                  billing.currency ?? billing.plan?.currency,
+                )}
+              </span>
+            </div>
+          )}
         </CardContent>
       </Card>
 
@@ -593,15 +643,20 @@ function BillingTab() {
                   <li className="flex items-center gap-2">
                     <Check className="h-4 w-4 text-success" />
                     <span className="text-muted-foreground">
-                      {(plan.overagePerHourCents / 100).toLocaleString(undefined, {
-                        style: "currency",
-                        currency: (plan.currency || "usd").toUpperCase(),
-                      })}{" "}
+                      {(plan.overagePerHourCents / 100).toLocaleString(
+                        undefined,
+                        {
+                          style: "currency",
+                          currency: (plan.currency || "usd").toUpperCase(),
+                        },
+                      )}{" "}
                       / overage hour
                     </span>
                   </li>
                   {plan.description && (
-                    <li className="text-muted-foreground">{plan.description}</li>
+                    <li className="text-muted-foreground">
+                      {plan.description}
+                    </li>
                   )}
                 </ul>
                 <Button

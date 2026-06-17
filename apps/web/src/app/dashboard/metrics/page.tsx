@@ -57,7 +57,11 @@ export default function MetricsPage() {
       />
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <StatCard label="Avg CPU" value={`${cpu[cpu.length - 1]}%`} icon={Cpu} />
+        <StatCard
+          label="Avg CPU"
+          value={`${cpu[cpu.length - 1]}%`}
+          icon={Cpu}
+        />
         <StatCard
           label="Avg Memory"
           value={`${mem[mem.length - 1]}%`}
@@ -76,8 +80,16 @@ export default function MetricsPage() {
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <ChartCard title="CPU utilization" data={cpu} color="hsl(var(--primary))" />
-        <ChartCard title="Memory utilization" data={mem} color={BRAND_MAGENTA} />
+        <ChartCard
+          title="CPU utilization"
+          data={cpu}
+          color="hsl(var(--primary))"
+        />
+        <ChartCard
+          title="Memory utilization"
+          data={mem}
+          color={BRAND_MAGENTA}
+        />
         <ChartCard title="Network egress" data={net} color="hsl(var(--info))" />
         <ChartCard
           title="Requests per second"

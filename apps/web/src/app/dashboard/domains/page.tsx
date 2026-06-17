@@ -4,8 +4,7 @@ import { useState } from "react";
 import { Globe, Plus, ShieldCheck, ShieldAlert } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { api, type App, type Domain } from "@/lib/api";
-import { mockApps, mockDomains } from "@/lib/mock";
-import { isDemoMode } from "@/lib/demo";
+import { useDemoData } from "@/lib/demo-data";
 import { useResource } from "@/lib/use-resource";
 import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
@@ -23,14 +22,23 @@ interface DomainRow extends Domain {
 export default function DomainsPage() {
   const { activeOrgId, authedCall } = useAuth();
 
+  // Demo fallbacks load lazily (demo mode only); never shipped to prod.
+  const demoApps = useDemoData((m) => m.mockApps, [] as App[]);
+  const demoDomainRows = useDemoData<DomainRow[]>(
+    (m) =>
+      m.mockDomains.map((d) => ({ ...d, app: m.mockApps[0]?.name ?? "—" })),
+    [],
+  );
+
   // Load the org's apps, then fan out to each app's domains. Falls back to mock
   // data when the API is unreachable or no org is active.
   const { data: appsData } = useResource(
     activeOrgId
       ? () => authedCall((token, on) => api.listApps(activeOrgId, token, on))
       : null,
-    { data: isDemoMode() ? mockApps : [] },
-    [activeOrgId],
+    { data: demoApps },
+    [activeOrgId, demoApps],
+    { cacheKey: activeOrgId ? `apps:${activeOrgId}` : undefined },
   );
   const apps = appsData.data;
 
@@ -56,10 +64,8 @@ export default function DomainsPage() {
             return lists.flat();
           })
       : null,
-    isDemoMode()
-      ? mockDomains.map((d) => ({ ...d, app: mockApps[0]?.name ?? "—" }))
-      : [],
-    [activeOrgId, apps.map((a) => a.id).join(",")],
+    demoDomainRows,
+    [activeOrgId, apps.map((a) => a.id).join(","), demoDomainRows],
   );
 
   const domains = rows ?? [];
@@ -98,7 +104,9 @@ export default function DomainsPage() {
       setFormOpen(false);
       refetch();
     } catch (err) {
-      setFormError(err instanceof Error ? err.message : "Failed to add domain.");
+      setFormError(
+        err instanceof Error ? err.message : "Failed to add domain.",
+      );
     } finally {
       setSubmitting(false);
     }

@@ -40,13 +40,8 @@ import {
   type Domain,
   type EnvVar,
 } from "@/lib/api";
-import {
-  mockApps,
-  mockDomains,
-  mockEnv,
-  mockMetrics,
-} from "@/lib/mock";
 import { isDemoMode } from "@/lib/demo";
+import { useDemoData } from "@/lib/demo-data";
 import { useResource } from "@/lib/use-resource";
 import { cn, buildAppFqdn, slugify, BRAND_MAGENTA } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -89,20 +84,18 @@ const DEMO_LOGS = [
 export default function AppDetailPage({
   params,
 }: {
-  params: Promise<{ uuid: string }>;
+  params: Promise<{ appId: string }>;
 }) {
-  // The route folder is named [uuid] for historical reasons; the param is the
-  // app id.
-  const { uuid: appId } = use(params);
+  const { appId } = use(params);
   const router = useRouter();
   const { activeOrgId, authedCall } = useAuth();
 
   // In demo mode show a mock app as the fallback; in production there is no
   // fabricated app, so a failed/absent fetch renders an explicit empty state.
-  const fallback = useMemo<App | null>(
-    () =>
-      isDemoMode() ? mockApps.find((a) => a.id === appId) ?? mockApps[0] : null,
-    [appId],
+  // The mock module loads lazily (demo mode only) so it never ships to prod.
+  const fallback = useDemoData<App | null>(
+    (m) => m.mockApps.find((a) => a.id === appId) ?? m.mockApps[0] ?? null,
+    null,
   );
 
   const {
@@ -111,17 +104,19 @@ export default function AppDetailPage({
     refetch,
   } = useResource<App | null>(
     activeOrgId
-      ? () => authedCall((token, on) => api.getApp(activeOrgId, appId, token, on))
+      ? () =>
+          authedCall((token, on) => api.getApp(activeOrgId, appId, token, on))
       : null,
     fallback,
-    [activeOrgId, appId],
+    [activeOrgId, appId, fallback],
   );
 
   // Brief optimistic status while an action is in flight; once the action
   // resolves we refetch() so the displayed status reflects the backend rather
   // than an optimistic guess that can desync.
-  const [optimisticStatus, setOptimisticStatus] =
-    useState<App["status"] | null>(null);
+  const [optimisticStatus, setOptimisticStatus] = useState<
+    App["status"] | null
+  >(null);
   const app = useMemo<App | null>(
     () =>
       fetched && optimisticStatus
@@ -274,9 +269,7 @@ export default function AppDetailPage({
       {/* Tabs */}
       <Tabs tabs={TABS} active={tab} onChange={setTab} />
 
-      {loading && (
-        <p className="text-sm text-muted-foreground">Loading app…</p>
-      )}
+      {loading && <p className="text-sm text-muted-foreground">Loading app…</p>}
 
       {/* Tab content */}
       {app && tab === "Overview" && (
@@ -358,49 +351,49 @@ export default function AppDetailPage({
 
       {app && tab === "Settings" && (
         <TabPanel tab="Settings">
-        <Card>
-          <CardHeader>
-            <CardTitle>Danger zone</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="flex items-center justify-between rounded-lg border border-border p-4">
-              <div>
-                <p className="text-sm font-medium">Transfer app</p>
-                <p className="text-sm text-muted-foreground">
-                  Move this app to another organization.
-                </p>
-              </div>
-              {/* TODO(backend): no app-transfer endpoint exists yet; disabled
+          <Card>
+            <CardHeader>
+              <CardTitle>Danger zone</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex items-center justify-between rounded-lg border border-border p-4">
+                <div>
+                  <p className="text-sm font-medium">Transfer app</p>
+                  <p className="text-sm text-muted-foreground">
+                    Move this app to another organization.
+                  </p>
+                </div>
+                {/* TODO(backend): no app-transfer endpoint exists yet; disabled
                   until the API exposes one. */}
-              <Button
-                variant="secondary"
-                size="sm"
-                disabled
-                title="App transfer is not available yet"
-              >
-                Transfer
-              </Button>
-            </div>
-            <div className="flex items-center justify-between rounded-lg border border-destructive/40 p-4">
-              <div>
-                <p className="text-sm font-medium text-destructive">
-                  Delete app
-                </p>
-                <p className="text-sm text-muted-foreground">
-                  Permanently remove this app and all of its machines.
-                </p>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled
+                  title="App transfer is not available yet"
+                >
+                  Transfer
+                </Button>
               </div>
-              <Button
-                variant="destructive"
-                size="sm"
-                onClick={() => setConfirmOpen(true)}
-                loading={deleting}
-              >
-                Delete
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
+              <div className="flex items-center justify-between rounded-lg border border-destructive/40 p-4">
+                <div>
+                  <p className="text-sm font-medium text-destructive">
+                    Delete app
+                  </p>
+                  <p className="text-sm text-muted-foreground">
+                    Permanently remove this app and all of its machines.
+                  </p>
+                </div>
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  onClick={() => setConfirmOpen(true)}
+                  loading={deleting}
+                >
+                  Delete
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
         </TabPanel>
       )}
 
@@ -533,7 +526,8 @@ function LogsTab({ appId, appName }: { appId: string; appName: string }) {
 
   const { data, loading, error, refetch } = useResource<string>(
     activeOrgId
-      ? () => authedCall((token, on) => api.getLogs(activeOrgId, appId, token, on))
+      ? () =>
+          authedCall((token, on) => api.getLogs(activeOrgId, appId, token, on))
       : null,
     demo ? DEMO_LOGS.join("\n") : "",
     [activeOrgId, appId],
@@ -602,6 +596,9 @@ function MetricsTab({ appId }: { appId: string }) {
   const demo = isDemoMode();
   const empty: AppMetrics = { cpu: [], memory: [], requests: [] };
 
+  // Demo fallback loads lazily (demo mode only); never shipped to prod.
+  const demoMetrics = useDemoData((m) => m.mockMetrics, empty);
+
   const { data } = useResource<AppMetrics>(
     activeOrgId
       ? () =>
@@ -609,17 +606,17 @@ function MetricsTab({ appId }: { appId: string }) {
             api.getMetrics(activeOrgId, appId, token, on),
           )
       : null,
-    demo ? mockMetrics : empty,
-    [activeOrgId, appId],
+    demoMetrics,
+    [activeOrgId, appId, demoMetrics],
   );
 
   // In demo mode, synthesize any empty series so the charts render; in
   // production, empty series stay empty (no invented data).
   const metrics: AppMetrics = demo
     ? {
-        cpu: data.cpu.length ? data.cpu : mockMetrics.cpu,
-        memory: data.memory.length ? data.memory : mockMetrics.memory,
-        requests: data.requests.length ? data.requests : mockMetrics.requests,
+        cpu: data.cpu.length ? data.cpu : demoMetrics.cpu,
+        memory: data.memory.length ? data.memory : demoMetrics.memory,
+        requests: data.requests.length ? data.requests : demoMetrics.requests,
       }
     : data;
 
@@ -668,12 +665,16 @@ function MetricsTab({ appId }: { appId: string }) {
 function EnvironmentTab({ appId }: { appId: string }) {
   const { activeOrgId, authedCall } = useAuth();
 
+  // Demo fallback loads lazily (demo mode only); never shipped to prod.
+  const demoEnv = useDemoData((m) => m.mockEnv, [] as EnvVar[]);
+
   const { data, refetch } = useResource(
     activeOrgId
-      ? () => authedCall((token, on) => api.listEnv(activeOrgId, appId, token, on))
+      ? () =>
+          authedCall((token, on) => api.listEnv(activeOrgId, appId, token, on))
       : null,
-    { data: isDemoMode() ? mockEnv : [] },
-    [activeOrgId, appId],
+    { data: demoEnv },
+    [activeOrgId, appId, demoEnv],
   );
 
   const vars = data.data;
@@ -746,15 +747,14 @@ function EnvironmentTab({ appId }: { appId: string }) {
               {vars.map((v: EnvVar) => {
                 const show = revealed[v.key];
                 return (
-                  <li
-                    key={v.key}
-                    className="flex items-center gap-4 px-6 py-3"
-                  >
+                  <li key={v.key} className="flex items-center gap-4 px-6 py-3">
                     <span className="w-[200px] shrink-0 truncate font-mono text-sm text-foreground">
                       {v.key}
                     </span>
                     <span className="min-w-0 flex-1 truncate font-mono text-sm text-muted-foreground">
-                      {show ? v.value : "•".repeat(Math.min(24, v.value.length || 8))}
+                      {show
+                        ? v.value
+                        : "•".repeat(Math.min(24, v.value.length || 8))}
                     </span>
                     <Button
                       variant="ghost"
@@ -849,6 +849,9 @@ function DomainsTab({ appId, appName }: { appId: string; appName: string }) {
     orgs.find((o) => o.id === activeOrgId)?.slug ?? "personal",
   );
 
+  // Demo fallback loads lazily (demo mode only); never shipped to prod.
+  const demoDomains = useDemoData((m) => m.mockDomains, [] as Domain[]);
+
   const { data, refetch } = useResource(
     activeOrgId
       ? () =>
@@ -856,8 +859,8 @@ function DomainsTab({ appId, appName }: { appId: string; appName: string }) {
             api.listDomains(activeOrgId, appId, token, on),
           )
       : null,
-    { data: isDemoMode() ? mockDomains : [] },
-    [activeOrgId, appId],
+    { data: demoDomains },
+    [activeOrgId, appId, demoDomains],
   );
 
   const domains = data.data;
@@ -1025,13 +1028,7 @@ function DomainsTab({ appId, appName }: { appId: string; appName: string }) {
 // Wraps each tab's content as an ARIA tabpanel. The Tabs primitive owns the
 // tab `id`s (generated via useId), so we expose a self-describing panel
 // (role + label + focusable) rather than referencing ids we cannot read here.
-function TabPanel({
-  tab,
-  children,
-}: {
-  tab: Tab;
-  children: React.ReactNode;
-}) {
+function TabPanel({ tab, children }: { tab: Tab; children: React.ReactNode }) {
   return (
     <div
       role="tabpanel"

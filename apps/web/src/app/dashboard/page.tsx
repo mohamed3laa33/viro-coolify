@@ -3,9 +3,14 @@
 import Link from "next/link";
 import { Boxes, Rocket, Globe2, ArrowUpRight, Database } from "lucide-react";
 import { useAuth } from "@/lib/auth";
-import { api } from "@/lib/api";
-import { mockApps, mockDatabases, mockSettings } from "@/lib/mock";
+import {
+  api,
+  type App,
+  type Database as DatabaseModel,
+  type Settings,
+} from "@/lib/api";
 import { isDemoMode } from "@/lib/demo";
+import { useDemoData } from "@/lib/demo-data";
 import { useResource } from "@/lib/use-resource";
 import { PageHeader } from "@/components/page-header";
 import { StatCard } from "@/components/stat-card";
@@ -18,6 +23,18 @@ import { Skeleton } from "@/components/ui/skeleton";
 export default function DashboardOverview() {
   const { user, activeOrgId, authedCall } = useAuth();
 
+  // Demo fallbacks load lazily (and only in demo mode) so mock data is never
+  // shipped to / shown in production.
+  const demoApps = useDemoData((m) => m.mockApps, [] as App[]);
+  const demoDatabases = useDemoData(
+    (m) => m.mockDatabases,
+    [] as DatabaseModel[],
+  );
+  const demoSettings = useDemoData<Settings | null>(
+    (m) => m.mockSettings,
+    null,
+  );
+
   const {
     data,
     loading: appsLoading,
@@ -27,8 +44,9 @@ export default function DashboardOverview() {
     activeOrgId
       ? () => authedCall((token, on) => api.listApps(activeOrgId, token, on))
       : null,
-    { data: isDemoMode() ? mockApps : [] },
-    [activeOrgId],
+    { data: demoApps },
+    [activeOrgId, demoApps],
+    { cacheKey: activeOrgId ? `apps:${activeOrgId}` : undefined },
   );
   const apps = data.data;
 
@@ -39,10 +57,12 @@ export default function DashboardOverview() {
     refetch: refetchDatabases,
   } = useResource(
     activeOrgId
-      ? () => authedCall((token, on) => api.listDatabases(activeOrgId, token, on))
+      ? () =>
+          authedCall((token, on) => api.listDatabases(activeOrgId, token, on))
       : null,
-    { data: isDemoMode() ? mockDatabases : [] },
-    [activeOrgId],
+    { data: demoDatabases },
+    [activeOrgId, demoDatabases],
+    { cacheKey: activeOrgId ? `databases:${activeOrgId}` : undefined },
   );
   const databases = dbData.data;
 
@@ -52,8 +72,8 @@ export default function DashboardOverview() {
     user?.isAdmin
       ? () => authedCall((token, on) => api.getSettings(token, on))
       : null,
-    isDemoMode() ? mockSettings : null,
-    [user?.isAdmin],
+    demoSettings,
+    [user?.isAdmin, demoSettings],
   );
   const regions = settings?.regions ?? [];
 

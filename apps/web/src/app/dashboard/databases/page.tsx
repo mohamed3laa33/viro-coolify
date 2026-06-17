@@ -3,9 +3,9 @@
 import { useState, type FormEvent } from "react";
 import { Plus, Database as DatabaseIcon } from "lucide-react";
 import { useAuth } from "@/lib/auth";
-import { api, type Template } from "@/lib/api";
-import { mockDatabases, mockTemplates } from "@/lib/mock";
+import { api, type Database, type Template } from "@/lib/api";
 import { isDemoMode } from "@/lib/demo";
+import { useDemoData } from "@/lib/demo-data";
 import { useResource } from "@/lib/use-resource";
 import { PageHeader } from "@/components/page-header";
 import { EmptyState } from "@/components/empty-state";
@@ -13,12 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Notice } from "@/components/ui/notice";
 import { StatusDot } from "@/components/ui/status-dot";
 import { Badge } from "@/components/ui/badge";
@@ -40,20 +35,28 @@ export default function DatabasesPage() {
   const { activeOrgId, authedCall } = useAuth();
 
   const demo = isDemoMode();
+
+  // Demo fallbacks load lazily (demo mode only); never shipped to prod.
+  const demoDatabases = useDemoData((m) => m.mockDatabases, [] as Database[]);
+  const demoTemplates = useDemoData((m) => m.mockTemplates, [] as Template[]);
+
   const { data, error, refetch } = useResource(
     activeOrgId
-      ? () => authedCall((token, on) => api.listDatabases(activeOrgId, token, on))
+      ? () =>
+          authedCall((token, on) => api.listDatabases(activeOrgId, token, on))
       : null,
-    { data: demo ? mockDatabases : [] },
-    [activeOrgId],
+    { data: demoDatabases },
+    [activeOrgId, demoDatabases],
+    { cacheKey: activeOrgId ? `databases:${activeOrgId}` : undefined },
   );
   const databases = data.data;
 
   // Engine catalog is driven by the public services catalog (kind "database").
   const { data: templatesData } = useResource(
     () => api.getServiceCatalog(),
-    { data: demo ? mockTemplates : [] },
-    [],
+    { data: demoTemplates },
+    [demoTemplates],
+    { cacheKey: "catalog" },
   );
   const engineTemplates: Template[] = templatesData.data
     .filter((t) => t.kind === "database" && t.active)
@@ -61,9 +64,7 @@ export default function DatabasesPage() {
 
   // Map a database engine string to its catalog template (for the label).
   function engineLabel(engine: string): string {
-    return (
-      templatesData.data.find((t) => t.key === engine)?.name ?? engine
-    );
+    return templatesData.data.find((t) => t.key === engine)?.name ?? engine;
   }
 
   const [creating, setCreating] = useState(false);
@@ -183,9 +184,7 @@ export default function DatabasesPage() {
           >
             <div className="flex items-center gap-3">
               <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-muted">
-                <DatabaseIcon
-                  className={engineAccent(tpl.key) + " h-4 w-4"}
-                />
+                <DatabaseIcon className={engineAccent(tpl.key) + " h-4 w-4"} />
               </div>
               <span className="text-sm font-medium">{tpl.name}</span>
             </div>

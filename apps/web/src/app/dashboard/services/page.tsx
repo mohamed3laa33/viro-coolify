@@ -1,20 +1,7 @@
 "use client";
 
-import {
-  useEffect,
-  useRef,
-  useState,
-  type FormEvent,
-} from "react";
-import {
-  Plus,
-  Play,
-  Square,
-  RotateCw,
-  Trash2,
-  Boxes,
-  X,
-} from "lucide-react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import { Plus, Play, Square, RotateCw, Trash2, Boxes, X } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import {
   api,
@@ -33,12 +20,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Notice } from "@/components/ui/notice";
 import { StatusDot } from "@/components/ui/status-dot";
 import { Badge, type BadgeVariant } from "@/components/ui/badge";
@@ -225,7 +207,9 @@ export default function ServicesPage() {
                     <th className="px-6 py-3 font-medium">Template</th>
                     <th className="px-6 py-3 font-medium">Status</th>
                     <th className="px-6 py-3 font-medium">Host</th>
-                    <th className="px-6 py-3 text-right font-medium">Actions</th>
+                    <th className="px-6 py-3 text-right font-medium">
+                      Actions
+                    </th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
@@ -363,8 +347,7 @@ function LaunchServiceForm({
     activeOrgId
       ? (signal) =>
           authedCall(
-            (token, on) =>
-              api.listProjects(activeOrgId, token, on, { signal }),
+            (token, on) => api.listProjects(activeOrgId, token, on, { signal }),
             signal,
           )
       : null,
@@ -442,7 +425,12 @@ function LaunchServiceForm({
     <Card>
       <CardHeader className="flex-row items-center justify-between space-y-0">
         <CardTitle>Launch service</CardTitle>
-        <Button variant="ghost" size="icon" onClick={onClose} aria-label="Close">
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={onClose}
+          aria-label="Close"
+        >
           <X className="h-4 w-4" />
         </Button>
       </CardHeader>
@@ -610,11 +598,7 @@ function ConfirmDialog({
           >
             Cancel
           </Button>
-          <Button
-            variant="destructive"
-            loading={pending}
-            onClick={onConfirm}
-          >
+          <Button variant="destructive" loading={pending} onClick={onConfirm}>
             {confirmLabel}
           </Button>
         </div>

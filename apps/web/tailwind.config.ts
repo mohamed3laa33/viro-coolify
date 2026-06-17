@@ -1,4 +1,5 @@
 import type { Config } from "tailwindcss";
+import tailwindcssAnimate from "tailwindcss-animate";
 
 const config: Config = {
   darkMode: "class",
@@ -49,11 +50,8 @@ const config: Config = {
           700: "#6d28d9",
           800: "#5b21b6",
           900: "#4c1d95",
-          // Brand gradient stops. Magenta is a CSS token in globals.css;
-          // violet mirrors the 400-ish balloon hue used by the SVG mark.
-          // TODO(design): promote --brand-violet to a CSS var in globals.css
-          // once that file is owned here, then switch this to hsl(var(--brand-violet)).
-          violet: "#9D4EDD",
+          // Brand gradient stops, both backed by CSS tokens in globals.css.
+          violet: "hsl(var(--brand-violet))",
           magenta: "hsl(var(--brand-magenta))",
         },
       },
@@ -67,10 +65,10 @@ const config: Config = {
         mono: ["var(--font-mono)", "monospace"],
       },
       backgroundImage: {
-        // Drives the same violet→magenta balloon gradient, but the magenta
-        // stop now tracks the --brand-magenta CSS token instead of a raw hex.
+        // Drives the violet→magenta balloon gradient; both stops track the
+        // --brand-violet / --brand-magenta CSS tokens instead of raw hex.
         "brand-balloon":
-          "linear-gradient(135deg,#9D4EDD,hsl(var(--brand-magenta)))",
+          "linear-gradient(135deg,hsl(var(--brand-violet)),hsl(var(--brand-magenta)))",
       },
       keyframes: {
         "accordion-down": {
@@ -93,7 +91,7 @@ const config: Config = {
       },
     },
   },
-  plugins: [require("tailwindcss-animate")],
+  plugins: [tailwindcssAnimate],
 };
 
 export default config;

@@ -74,7 +74,7 @@ export function Tabs<T extends string>({
               onClick={() => onChange(t)}
               onKeyDown={handleKeyDown}
               className={cn(
-                "whitespace-nowrap border-b-2 px-1 pb-3 text-sm font-medium transition-colors",
+                "inline-flex items-center whitespace-nowrap border-b-2 px-1 pb-3 pt-1 text-sm font-medium transition-colors pointer-coarse:min-h-11",
                 selected
                   ? "border-primary text-foreground"
                   : "border-transparent text-muted-foreground hover:text-foreground",

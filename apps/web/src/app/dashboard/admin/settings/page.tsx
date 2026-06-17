@@ -3,8 +3,8 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { X } from "lucide-react";
 import { useAuth } from "@/lib/auth";
-import { api, type Settings } from "@/lib/api";
-import { mockPlans, mockSettings } from "@/lib/mock";
+import { api, type AdminPlan, type Settings } from "@/lib/api";
+import { useDemoData } from "@/lib/demo-data";
 import { useResource } from "@/lib/use-resource";
 import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
@@ -25,27 +25,43 @@ function pctLabel(factor: number): string {
   return `${Math.round(factor * 100)}%`;
 }
 
+// Neutral, non-demo default so the settings form always has a shape to edit.
+const EMPTY_SETTINGS: Settings = {
+  defaultCpu: 1,
+  defaultMemoryMb: 512,
+  defaultPlanId: "",
+  cpuOvercommitFactor: 0,
+  memoryOvercommitFactor: 0,
+  defaultRegion: "",
+  regions: [],
+};
+
 export default function AdminSettingsPage() {
   const { authedCall } = useAuth();
 
+  // Demo fallbacks load lazily (demo mode only); prod shows EMPTY_SETTINGS.
+  const demoSettings = useDemoData((m) => m.mockSettings, EMPTY_SETTINGS);
+  const demoPlans = useDemoData((m) => m.mockPlans, [] as AdminPlan[]);
+
   const { data: settings, usingFallback } = useResource(
     () => authedCall((token, on) => api.getSettings(token, on)),
-    mockSettings,
-    [],
+    demoSettings,
+    [demoSettings],
   );
 
   const { data: plansData } = useResource(
     () => authedCall((token, on) => api.listAdminPlans(token, on)),
-    { data: mockPlans },
-    [],
+    { data: demoPlans },
+    [demoPlans],
   );
   const plans = plansData.data;
 
   const [form, setForm] = useState<Settings>(settings);
   const [pending, setPending] = useState(false);
-  const [notice, setNotice] = useState<
-    { variant: "success" | "error"; message: string } | null
-  >(null);
+  const [notice, setNotice] = useState<{
+    variant: "success" | "error";
+    message: string;
+  } | null>(null);
   const [regionDraft, setRegionDraft] = useState("");
 
   // Sync local form state once the resource resolves (fetch or fallback).
@@ -72,7 +88,8 @@ export default function AdminSettingsPage() {
     setForm((f) => ({
       ...f,
       regions: next,
-      defaultRegion: f.defaultRegion === region ? (next[0] ?? "") : f.defaultRegion,
+      defaultRegion:
+        f.defaultRegion === region ? (next[0] ?? "") : f.defaultRegion,
     }));
   }
 
@@ -126,9 +143,7 @@ export default function AdminSettingsPage() {
                   min={0}
                   step="0.25"
                   value={form.defaultCpu}
-                  onChange={(e) =>
-                    set("defaultCpu", Number(e.target.value))
-                  }
+                  onChange={(e) => set("defaultCpu", Number(e.target.value))}
                 />
               </div>
               <div className="space-y-2">
@@ -174,7 +189,9 @@ export default function AdminSettingsPage() {
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <Label htmlFor="cpu-overcommit">CPU overcommit factor</Label>
-                <Badge variant="info">{pctLabel(form.cpuOvercommitFactor)}</Badge>
+                <Badge variant="info">
+                  {pctLabel(form.cpuOvercommitFactor)}
+                </Badge>
               </div>
               <input
                 id="cpu-overcommit"
@@ -191,9 +208,7 @@ export default function AdminSettingsPage() {
             </div>
             <div className="space-y-2">
               <div className="flex items-center justify-between">
-                <Label htmlFor="mem-overcommit">
-                  Memory overcommit factor
-                </Label>
+                <Label htmlFor="mem-overcommit">Memory overcommit factor</Label>
                 <Badge variant="info">
                   {pctLabel(form.memoryOvercommitFactor)}
                 </Badge>
@@ -255,7 +270,7 @@ export default function AdminSettingsPage() {
                     <button
                       type="button"
                       onClick={() => removeRegion(r)}
-                      className="text-muted-foreground hover:text-destructive"
+                      className="inline-flex items-center justify-center text-muted-foreground hover:text-destructive pointer-coarse:min-h-11 pointer-coarse:min-w-11"
                       aria-label={`Remove ${r}`}
                     >
                       <X className="h-3.5 w-3.5" />

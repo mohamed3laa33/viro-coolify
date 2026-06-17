@@ -5,9 +5,7 @@ import { Button } from "@/components/ui/button";
 describe("Button", () => {
   it("renders its label", () => {
     render(<Button>Deploy</Button>);
-    expect(
-      screen.getByRole("button", { name: "Deploy" }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Deploy" })).toBeInTheDocument();
   });
 
   it("defaults to the primary variant classes", () => {
@@ -23,9 +21,7 @@ describe("Button", () => {
   });
 
   it("applies size classes", () => {
-    render(
-      <Button size="lg">Big</Button>,
-    );
+    render(<Button size="lg">Big</Button>);
     const btn = screen.getByRole("button", { name: "Big" });
     expect(btn.className).toContain("h-11");
   });

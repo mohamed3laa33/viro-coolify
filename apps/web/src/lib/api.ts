@@ -185,11 +185,64 @@ export interface BillingResponse {
   subscription: Subscription | null;
   plan: Plan | null;
   usage: Usage;
+  // Estimated cost for the current period, derived server-side from metered
+  // usage and the hourly pricing components. Optional: older API builds omit it.
+  estimatedMonthlyCents?: number;
+  currency?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Hourly pricing components (admin-managed metered rates)
+// ---------------------------------------------------------------------------
+
+// A single metered pricing line item, e.g. "CPU core-hour" at $0.02/hour.
+// Mirrors the backend `PricingComponent`. The `key` is the stable identifier
+// (immutable on update; supplied in the body on create, in the path otherwise).
+export interface PricingComponent {
+  key: string;
+  name: string;
+  // Human-readable billing unit, e.g. "core-hour", "GB-hour".
+  unit: string;
+  // Price per unit per hour, expressed in whole cents (integer or fractional).
+  pricePerHour: number;
+  currency: string;
+  active: boolean;
+  sortOrder: number;
+}
+
+// On create the key is supplied in the body; on update it lives in the path.
+export type PricingComponentInput = PricingComponent;
+
+/** Format a pricing component's per-hour rate, e.g. "$0.02 / core-hour". */
+export function formatHourlyPrice(c: PricingComponent): string {
+  return `${formatCents(c.pricePerHour, c.currency)} / ${c.unit || "hour"}`;
+}
+
+/**
+ * Format a cent amount as a currency string. Sub-cent values (fractional cents,
+ * common for per-hour metered rates) keep up to 4 fraction digits; whole-dollar
+ * amounts drop the cents.
+ */
+export function formatCents(cents: number, currency = "usd"): string {
+  const amount = cents / 100;
+  const cur = (currency || "usd").toUpperCase();
+  const isWhole = Number.isInteger(amount);
+  const hasSubCent = Math.abs(amount * 100 - Math.round(amount * 100)) > 1e-9;
+  return amount.toLocaleString(undefined, {
+    style: "currency",
+    currency: cur,
+    minimumFractionDigits: isWhole ? 0 : 2,
+    maximumFractionDigits: hasSubCent ? 4 : 2,
+  });
 }
 
 // Metric key the backend records for metered compute, used to derive the
 // "hours used" figure shown in the billing UI.
-export const COMPUTE_HOURS_METRICS = ["compute_hours", "machine_hours", "hours"];
+export const COMPUTE_HOURS_METRICS = [
+  "compute_hours",
+  "machine_hours",
+  "hours",
+];
 
 /** Sum the compute-hours-style usage metrics from a usage map. */
 export function computeHoursUsed(usage: Usage | null | undefined): number {
@@ -391,7 +444,10 @@ export function buildUrl(path: string): string {
   return `${base}${suffix}`;
 }
 
-async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+async function request<T>(
+  path: string,
+  options: RequestOptions = {},
+): Promise<T> {
   const { method = "GET", body, token, signal, onUnauthorized } = options;
 
   async function exec(authToken: string | null | undefined): Promise<Response> {
@@ -468,8 +524,16 @@ export const api = {
     });
   },
 
-  me(token: string, onUnauthorized?: OnUnauthorized, opts?: CallOpts): Promise<User> {
-    return request<User>("/v1/me", { token, onUnauthorized, signal: opts?.signal });
+  me(
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<User> {
+    return request<User>("/v1/me", {
+      token,
+      onUnauthorized,
+      signal: opts?.signal,
+    });
   },
 
   // Orgs
@@ -536,10 +600,11 @@ export const api = {
     onUnauthorized?: OnUnauthorized,
     opts?: CallOpts,
   ): Promise<string> {
-    return request<{ logs: string }>(
-      `/v1/orgs/${orgId}/apps/${appId}/logs`,
-      { token, onUnauthorized, signal: opts?.signal },
-    ).then((res) => res.logs);
+    return request<{ logs: string }>(`/v1/orgs/${orgId}/apps/${appId}/logs`, {
+      token,
+      onUnauthorized,
+      signal: opts?.signal,
+    }).then((res) => res.logs);
   },
 
   createApp(
@@ -809,10 +874,11 @@ export const api = {
     onUnauthorized?: OnUnauthorized,
     opts?: CallOpts,
   ): Promise<ListResponse<Invitation>> {
-    return request<ListResponse<Invitation>>(
-      `/v1/orgs/${orgId}/invitations`,
-      { token, onUnauthorized, signal: opts?.signal },
-    );
+    return request<ListResponse<Invitation>>(`/v1/orgs/${orgId}/invitations`, {
+      token,
+      onUnauthorized,
+      signal: opts?.signal,
+    });
   },
 
   invite(
@@ -962,6 +1028,14 @@ export const api = {
   // Billing
   getPlans(opts?: CallOpts): Promise<PlansResponse> {
     return request<PlansResponse>("/v1/billing/plans", {
+      signal: opts?.signal,
+    });
+  },
+
+  // Public hourly pricing components (no auth required) — the rates shown to
+  // users. Mirrors the admin-managed list but is read-only here.
+  getPricing(opts?: CallOpts): Promise<ListResponse<PricingComponent>> {
+    return request<ListResponse<PricingComponent>>("/v1/billing/pricing", {
       signal: opts?.signal,
     });
   },
@@ -1150,6 +1224,67 @@ export const api = {
     opts?: CallOpts,
   ): Promise<AdminOverview> {
     return request<AdminOverview>("/v1/admin/overview", {
+      token,
+      onUnauthorized,
+      signal: opts?.signal,
+    });
+  },
+
+  // Admin: hourly pricing components — mirrors /v1/admin/pricing.
+  listPricing(
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<ListResponse<PricingComponent>> {
+    return request<ListResponse<PricingComponent>>("/v1/admin/pricing", {
+      token,
+      onUnauthorized,
+      signal: opts?.signal,
+    });
+  },
+
+  createPricing(
+    input: PricingComponentInput,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<PricingComponent> {
+    return request<PricingComponent>("/v1/admin/pricing", {
+      method: "POST",
+      body: input,
+      token,
+      onUnauthorized,
+      signal: opts?.signal,
+    });
+  },
+
+  updatePricing(
+    key: string,
+    patch: Partial<PricingComponentInput>,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<PricingComponent> {
+    return request<PricingComponent>(
+      `/v1/admin/pricing/${encodeURIComponent(key)}`,
+      {
+        method: "PATCH",
+        body: patch,
+        token,
+        onUnauthorized,
+        signal: opts?.signal,
+      },
+    );
+  },
+
+  deletePricing(
+    key: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<void> {
+    return request<void>(`/v1/admin/pricing/${encodeURIComponent(key)}`, {
+      method: "DELETE",
       token,
       onUnauthorized,
       signal: opts?.signal,

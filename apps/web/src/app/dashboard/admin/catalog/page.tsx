@@ -9,7 +9,7 @@ import {
   type TemplateInput,
   type TemplateKind,
 } from "@/lib/api";
-import { mockTemplates } from "@/lib/mock";
+import { useDemoData } from "@/lib/demo-data";
 import { useResource } from "@/lib/use-resource";
 import { cn } from "@/lib/utils";
 import { PageHeader } from "@/components/page-header";
@@ -38,10 +38,13 @@ const EMPTY_TEMPLATE: TemplateInput = {
 export default function AdminCatalogPage() {
   const { authedCall } = useAuth();
 
+  // Demo fallback loads lazily (demo mode only); prod shows a real empty table.
+  const demoTemplates = useDemoData((m) => m.mockTemplates, [] as Template[]);
+
   const { data, refetch, usingFallback } = useResource(
     () => authedCall((token, on) => api.listTemplates(token, on)),
-    { data: mockTemplates },
-    [],
+    { data: demoTemplates },
+    [demoTemplates],
   );
   const templates = data.data;
 
@@ -50,7 +53,7 @@ export default function AdminCatalogPage() {
 
   const editingTemplate =
     editing && editing !== "new"
-      ? templates.find((t) => t.key === editing) ?? null
+      ? (templates.find((t) => t.key === editing) ?? null)
       : null;
 
   async function onDelete(tpl: Template) {
@@ -76,9 +79,7 @@ export default function AdminCatalogPage() {
         description="Launchable templates: services, databases, and one-click apps."
         actions={
           <Button
-            onClick={() =>
-              setEditing((cur) => (cur === "new" ? null : "new"))
-            }
+            onClick={() => setEditing((cur) => (cur === "new" ? null : "new"))}
           >
             <Plus className="h-4 w-4" />
             New template
@@ -119,67 +120,67 @@ export default function AdminCatalogPage() {
         <CardContent className="p-0">
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-border text-left text-xs uppercase tracking-wide text-muted-foreground">
-                <th className="px-6 py-3 font-medium">Template</th>
-                <th className="px-6 py-3 font-medium">Kind</th>
-                <th className="px-6 py-3 font-medium">Image</th>
-                <th className="px-6 py-3 font-medium">Port</th>
-                <th className="px-6 py-3 font-medium">Status</th>
-                <th className="px-6 py-3 text-right font-medium">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border">
-              {templates.map((tpl) => (
-                <tr key={tpl.key} className="hover:bg-muted/40">
-                  <td className="px-6 py-4">
-                    <p className="font-medium">{tpl.name}</p>
-                    <p className="font-mono text-xs text-muted-foreground">
-                      {tpl.key} · {tpl.category || "—"} · sort {tpl.sortOrder}
-                    </p>
-                  </td>
-                  <td className="px-6 py-4">
-                    <Badge variant="outline" className="capitalize">
-                      {tpl.kind}
-                    </Badge>
-                  </td>
-                  <td className="px-6 py-4 font-mono text-xs text-muted-foreground">
-                    {tpl.image}
-                  </td>
-                  <td className="px-6 py-4 tabular-nums text-muted-foreground">
-                    {tpl.defaultPort || "—"}
-                  </td>
-                  <td className="px-6 py-4">
-                    <Badge variant={tpl.active ? "success" : "outline"}>
-                      {tpl.active ? "Active" : "Inactive"}
-                    </Badge>
-                  </td>
-                  <td className="px-6 py-4">
-                    <div className="flex items-center justify-end gap-2">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() =>
-                          setEditing((cur) =>
-                            cur === tpl.key ? null : tpl.key,
-                          )
-                        }
-                      >
-                        <Pencil className="h-3.5 w-3.5" />
-                        Edit
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => onDelete(tpl)}
-                      >
-                        <Trash2 className="h-3.5 w-3.5 text-destructive" />
-                      </Button>
-                    </div>
-                  </td>
+              <thead>
+                <tr className="border-b border-border text-left text-xs uppercase tracking-wide text-muted-foreground">
+                  <th className="px-6 py-3 font-medium">Template</th>
+                  <th className="px-6 py-3 font-medium">Kind</th>
+                  <th className="px-6 py-3 font-medium">Image</th>
+                  <th className="px-6 py-3 font-medium">Port</th>
+                  <th className="px-6 py-3 font-medium">Status</th>
+                  <th className="px-6 py-3 text-right font-medium">Actions</th>
                 </tr>
-              ))}
-            </tbody>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {templates.map((tpl) => (
+                  <tr key={tpl.key} className="hover:bg-muted/40">
+                    <td className="px-6 py-4">
+                      <p className="font-medium">{tpl.name}</p>
+                      <p className="font-mono text-xs text-muted-foreground">
+                        {tpl.key} · {tpl.category || "—"} · sort {tpl.sortOrder}
+                      </p>
+                    </td>
+                    <td className="px-6 py-4">
+                      <Badge variant="outline" className="capitalize">
+                        {tpl.kind}
+                      </Badge>
+                    </td>
+                    <td className="px-6 py-4 font-mono text-xs text-muted-foreground">
+                      {tpl.image}
+                    </td>
+                    <td className="px-6 py-4 tabular-nums text-muted-foreground">
+                      {tpl.defaultPort || "—"}
+                    </td>
+                    <td className="px-6 py-4">
+                      <Badge variant={tpl.active ? "success" : "outline"}>
+                        {tpl.active ? "Active" : "Inactive"}
+                      </Badge>
+                    </td>
+                    <td className="px-6 py-4">
+                      <div className="flex items-center justify-end gap-2">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() =>
+                            setEditing((cur) =>
+                              cur === tpl.key ? null : tpl.key,
+                            )
+                          }
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                          Edit
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => onDelete(tpl)}
+                        >
+                          <Trash2 className="h-3.5 w-3.5 text-destructive" />
+                        </Button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
             </table>
           </div>
         </CardContent>
@@ -224,10 +225,7 @@ function TemplateForm({
   const [form, setForm] = useState<TemplateInput>(initial);
   const [pending, setPending] = useState(false);
 
-  function set<K extends keyof TemplateInput>(
-    key: K,
-    value: TemplateInput[K],
-  ) {
+  function set<K extends keyof TemplateInput>(key: K, value: TemplateInput[K]) {
     setForm((f) => ({ ...f, [key]: value }));
   }
 
@@ -339,7 +337,7 @@ function TemplateForm({
             <button
               type="button"
               onClick={() => set("active", !form.active)}
-              className="inline-flex h-10 items-center gap-2 text-sm font-medium"
+              className="inline-flex h-10 items-center gap-2 text-sm font-medium pointer-coarse:min-h-11"
             >
               <span
                 className={cn(
