@@ -47,6 +47,7 @@ func (s *Server) writePlatformError(w http.ResponseWriter, action string, err er
 
 type createAppRequest struct {
 	Name          string `json:"name"`
+	ProjectID     string `json:"projectId"`
 	GitRepository string `json:"gitRepository"`
 	GitBranch     string `json:"gitBranch"`
 	BuildPack     string `json:"buildPack"`
@@ -72,8 +73,17 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
-	app, err := s.platform.CreateApp(r.Context(), chi.URLParam(r, "orgID"), platform.CreateAppInput{
+	orgID := chi.URLParam(r, "orgID")
+	// Apps belong to a project; default to the org's default project when unspecified.
+	projectID := req.ProjectID
+	if projectID == "" {
+		if p, err := s.identity.DefaultProject(r.Context(), orgID); err == nil {
+			projectID = p.ID
+		}
+	}
+	app, err := s.platform.CreateApp(r.Context(), orgID, platform.CreateAppInput{
 		Name:          req.Name,
+		ProjectID:     projectID,
 		GitRepository: req.GitRepository,
 		GitBranch:     req.GitBranch,
 		BuildPack:     req.BuildPack,

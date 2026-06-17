@@ -43,6 +43,21 @@ type Store interface {
 	CreateDatabase(ctx context.Context, d *domain.Database) error
 	ListDatabasesByOrg(ctx context.Context, orgID string) ([]domain.Database, error)
 
+	// Projects (Org → Project → App).
+	CreateProject(ctx context.Context, p *domain.Project) error
+	GetProject(ctx context.Context, id string) (*domain.Project, error)
+	ListProjectsByOrg(ctx context.Context, orgID string) ([]domain.Project, error)
+
+	// Project memberships.
+	AddProjectMembership(ctx context.Context, m domain.ProjectMembership) error
+	GetProjectMembership(ctx context.Context, projectID, userID string) (*domain.ProjectMembership, error)
+
+	// Invitations.
+	CreateInvitation(ctx context.Context, inv *domain.Invitation) error
+	GetInvitationByToken(ctx context.Context, token string) (*domain.Invitation, error)
+	ListInvitationsByOrg(ctx context.Context, orgID string) ([]domain.Invitation, error)
+	UpdateInvitation(ctx context.Context, inv *domain.Invitation) error
+
 	// Billing.
 	UpsertSubscription(ctx context.Context, s *domain.Subscription) error
 	GetSubscription(ctx context.Context, orgID string) (*domain.Subscription, error)

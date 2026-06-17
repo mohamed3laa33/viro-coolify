@@ -106,6 +106,9 @@ func (s *Server) routes() chi.Router {
 
 			r.Get("/me", s.handleMe)
 
+			// Accept an invitation (to an org or a project) as the current user.
+			r.Post("/invitations/accept", s.handleAcceptInvitation)
+
 			r.Route("/orgs", func(r chi.Router) {
 				r.Get("/", s.handleListOrgs)
 				r.Post("/", s.handleCreateOrg)
@@ -113,6 +116,20 @@ func (s *Server) routes() chi.Router {
 				// Org-scoped resources. Reads require membership (member+);
 				// mutations require admin+.
 				r.Route("/{orgID}", func(r chi.Router) {
+					// Members & invitations.
+					r.With(s.orgAuthz(domain.RoleMember)).Get("/members", s.handleListMembers)
+					r.With(s.orgAuthz(domain.RoleAdmin)).Post("/invitations", s.handleCreateInvitation)
+					r.With(s.orgAuthz(domain.RoleAdmin)).Get("/invitations", s.handleListInvitations)
+
+					// Projects (Org → Project → App).
+					r.Route("/projects", func(r chi.Router) {
+						r.With(s.orgAuthz(domain.RoleMember)).Get("/", s.handleListProjects)
+						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/", s.handleCreateProject)
+						// Project-scoped apps (org admins or project members).
+						r.With(s.projectAuthz(domain.RoleMember)).Get("/{projectID}/apps", s.handleListProjectApps)
+						r.With(s.projectAuthz(domain.RoleAdmin)).Post("/{projectID}/apps", s.handleCreateAppInProject)
+					})
+
 					r.Route("/apps", func(r chi.Router) {
 						r.With(s.orgAuthz(domain.RoleMember)).Get("/", s.handleListApps)
 						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/", s.handleCreateApp)

@@ -57,5 +57,22 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
 - ✅ GitHub Actions CI (Go vet/test/build + web install/test/build); `deploy/README.md`
 - ⬜ (Live run deferred to tomorrow with your DO credentials — by design)
 
-## Milestone 8 — Verification ⬜
-- ⬜ Judge-agent review after each milestone; end-to-end `make test` green
+## Milestone 9 — Org → Project → App hierarchy & invitations ✅
+- ✅ `Project` layer (every org auto-gets a `default` project); apps carry `projectId`
+- ✅ Project memberships for fine-grained, project-scoped access
+- ✅ Invitations: invite by email to an **org** (org role) or a **specific project** (project role),
+  token-based accept (email must match), single-use; list + members endpoints
+- ✅ `AuthorizeProject` — org admins/owners get all projects; project members scoped to theirs
+- ✅ Routes: `/v1/orgs/{orgID}/projects[...]`, `/projects/{projectID}/apps`, `/members`,
+  `/invitations`, and `/v1/invitations/accept`
+- ✅ Tests: default project, admin-only project create, org invite→admin, project invite→scoped
+  access (not org admin, no access to other projects), wrong-email + reuse rejected
+
+## Milestone 10 — CI/CD ✅
+- ✅ CI (`ci.yml`): Go vet/test(-race)/build + web install/test/build on every push/PR
+- ✅ CD (`deploy.yml`): tag/manual → DOCR login → build+push API & web images → DOKS Helm rollout
+
+## Milestone 8 — Verification (continuous) 🚧
+- ✅ Judge agent after each milestone (M1 PASS, M2→P0 found+fixed, M3 PASS, web PASS)
+- ✅ Deprecation audits (backend CLEAN; web flagged Next CVE → upgraded to 15.5.19)
+- 🚧 Final end-to-end sweep + frontend build verification

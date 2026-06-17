@@ -3,6 +3,8 @@ package identity
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"regexp"
@@ -21,6 +23,7 @@ var (
 	ErrInvalidCredentials = errors.New("identity: invalid email or password")
 	ErrValidation         = errors.New("identity: validation failed")
 	ErrForbidden          = errors.New("identity: forbidden")
+	ErrInvitationInvalid  = errors.New("identity: invitation is invalid or expired")
 )
 
 // Service holds identity business logic.
@@ -101,6 +104,9 @@ func (s *Service) Signup(ctx context.Context, email, name, password string) (*Au
 	if err := s.store.AddMembership(ctx, domain.Membership{OrgID: org.ID, UserID: user.ID, Role: domain.RoleOwner}); err != nil {
 		return nil, err
 	}
+	if _, err := s.createDefaultProject(ctx, org.ID); err != nil {
+		return nil, err
+	}
 
 	return s.issue(user)
 }
@@ -161,6 +167,9 @@ func (s *Service) CreateOrganization(ctx context.Context, userID, name string) (
 	if err := s.store.AddMembership(ctx, domain.Membership{OrgID: org.ID, UserID: userID, Role: domain.RoleOwner}); err != nil {
 		return nil, err
 	}
+	if _, err := s.createDefaultProject(ctx, org.ID); err != nil {
+		return nil, err
+	}
 	return org, nil
 }
 
@@ -178,6 +187,207 @@ func (s *Service) Authorize(ctx context.Context, userID, orgID string, min domai
 		return nil, ErrForbidden
 	}
 	return m, nil
+}
+
+// ---- Projects (Org → Project → App) ----
+
+func (s *Service) createDefaultProject(ctx context.Context, orgID string) (*domain.Project, error) {
+	p := &domain.Project{
+		ID:        s.idgen(),
+		OrgID:     orgID,
+		Name:      "Default",
+		Slug:      "default",
+		IsDefault: true,
+		CreatedAt: s.now(),
+	}
+	if err := s.store.CreateProject(ctx, p); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+// DefaultProject returns the org's default project (or its first project).
+func (s *Service) DefaultProject(ctx context.Context, orgID string) (*domain.Project, error) {
+	projects, err := s.store.ListProjectsByOrg(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range projects {
+		if projects[i].IsDefault {
+			return &projects[i], nil
+		}
+	}
+	if len(projects) > 0 {
+		return &projects[0], nil
+	}
+	return nil, store.ErrNotFound
+}
+
+// CreateProject creates a project in the org (caller must be org admin+).
+func (s *Service) CreateProject(ctx context.Context, userID, orgID, name string) (*domain.Project, error) {
+	if _, err := s.Authorize(ctx, userID, orgID, domain.RoleAdmin); err != nil {
+		return nil, err
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, fmt.Errorf("%w: project name is required", ErrValidation)
+	}
+	p := &domain.Project{
+		ID:        s.idgen(),
+		OrgID:     orgID,
+		Name:      name,
+		Slug:      slugify(name) + "-" + shortID(s.idgen()),
+		CreatedAt: s.now(),
+	}
+	if err := s.store.CreateProject(ctx, p); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+// ListProjects returns the projects in an org (caller must be a member).
+func (s *Service) ListProjects(ctx context.Context, userID, orgID string) ([]domain.Project, error) {
+	if _, err := s.Authorize(ctx, userID, orgID, domain.RoleMember); err != nil {
+		return nil, err
+	}
+	return s.store.ListProjectsByOrg(ctx, orgID)
+}
+
+// AuthorizeProject reports an error unless the user can act on the project with
+// at least the required role. Org admins/owners have full access to every
+// project; otherwise the user must have a project membership of sufficient role.
+func (s *Service) AuthorizeProject(ctx context.Context, userID, orgID, projectID string, min domain.Role) error {
+	p, err := s.store.GetProject(ctx, projectID)
+	if errors.Is(err, store.ErrNotFound) || (err == nil && p.OrgID != orgID) {
+		return ErrForbidden
+	}
+	if err != nil {
+		return err
+	}
+	if m, err := s.store.GetMembership(ctx, orgID, userID); err == nil && m.Role.AtLeast(domain.RoleAdmin) {
+		return nil
+	}
+	pm, err := s.store.GetProjectMembership(ctx, projectID, userID)
+	if errors.Is(err, store.ErrNotFound) {
+		return ErrForbidden
+	}
+	if err != nil {
+		return err
+	}
+	if !pm.Role.AtLeast(min) {
+		return ErrForbidden
+	}
+	return nil
+}
+
+// ---- Invitations (invite to an org, or to a specific project) ----
+
+// ListMembers returns the org's memberships (caller must be a member).
+func (s *Service) ListMembers(ctx context.Context, userID, orgID string) ([]domain.Membership, error) {
+	if _, err := s.Authorize(ctx, userID, orgID, domain.RoleMember); err != nil {
+		return nil, err
+	}
+	return s.store.ListMemberships(ctx, orgID)
+}
+
+// Invite creates an invitation to the org, or to a specific project when
+// projectID is set. Caller must be an org admin+. Returns the invitation
+// (its Token is the accept credential).
+func (s *Service) Invite(ctx context.Context, inviterID, orgID, projectID, email string, role domain.Role) (*domain.Invitation, error) {
+	if _, err := s.Authorize(ctx, inviterID, orgID, domain.RoleAdmin); err != nil {
+		return nil, err
+	}
+	email = normalizeEmail(email)
+	if !emailRe.MatchString(email) {
+		return nil, fmt.Errorf("%w: invalid email", ErrValidation)
+	}
+	if !role.Valid() {
+		return nil, fmt.Errorf("%w: invalid role", ErrValidation)
+	}
+	if projectID != "" {
+		p, err := s.store.GetProject(ctx, projectID)
+		if err != nil || p.OrgID != orgID {
+			return nil, fmt.Errorf("%w: project not in organization", ErrValidation)
+		}
+	}
+	inv := &domain.Invitation{
+		ID:        s.idgen(),
+		OrgID:     orgID,
+		ProjectID: projectID,
+		Email:     email,
+		Role:      role,
+		Token:     newToken(),
+		Status:    domain.InvitePending,
+		InvitedBy: inviterID,
+		CreatedAt: s.now(),
+	}
+	if err := s.store.CreateInvitation(ctx, inv); err != nil {
+		return nil, err
+	}
+	return inv, nil
+}
+
+// ListInvitations returns an org's invitations (caller must be org admin+).
+func (s *Service) ListInvitations(ctx context.Context, userID, orgID string) ([]domain.Invitation, error) {
+	if _, err := s.Authorize(ctx, userID, orgID, domain.RoleAdmin); err != nil {
+		return nil, err
+	}
+	return s.store.ListInvitationsByOrg(ctx, orgID)
+}
+
+// AcceptInvitation accepts a pending invitation for the authenticated user. The
+// user's email must match the invitation. An org invite grants org membership;
+// a project invite grants project membership (plus baseline org membership so
+// the user can navigate the org).
+func (s *Service) AcceptInvitation(ctx context.Context, userID, userEmail, token string) (*domain.Invitation, error) {
+	inv, err := s.store.GetInvitationByToken(ctx, token)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, ErrInvitationInvalid
+	}
+	if err != nil {
+		return nil, err
+	}
+	if inv.Status != domain.InvitePending {
+		return nil, ErrInvitationInvalid
+	}
+	if normalizeEmail(userEmail) != inv.Email {
+		return nil, ErrForbidden
+	}
+
+	// Ensure a baseline org membership exists.
+	if _, err := s.store.GetMembership(ctx, inv.OrgID, userID); errors.Is(err, store.ErrNotFound) {
+		role := domain.RoleMember
+		if inv.ProjectID == "" {
+			role = inv.Role // org-level invite carries the granted role
+		}
+		if err := s.store.AddMembership(ctx, domain.Membership{OrgID: inv.OrgID, UserID: userID, Role: role}); err != nil {
+			return nil, err
+		}
+	} else if err != nil {
+		return nil, err
+	}
+
+	if inv.ProjectID != "" {
+		err := s.store.AddProjectMembership(ctx, domain.ProjectMembership{ProjectID: inv.ProjectID, UserID: userID, Role: inv.Role})
+		if err != nil && !errors.Is(err, store.ErrConflict) {
+			return nil, err
+		}
+	}
+
+	inv.Status = domain.InviteAccepted
+	if err := s.store.UpdateInvitation(ctx, inv); err != nil {
+		return nil, err
+	}
+	return inv, nil
+}
+
+func newToken() string {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		// crypto/rand failure is catastrophic; fall back to a UUID-derived token.
+		return strings.ReplaceAll(uuid.NewString()+uuid.NewString(), "-", "")
+	}
+	return hex.EncodeToString(b)
 }
 
 func (s *Service) issue(user *domain.User) (*AuthResult, error) {

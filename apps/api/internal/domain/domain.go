@@ -57,11 +57,55 @@ type Membership struct {
 	Role   Role   `json:"role"`
 }
 
-// App is a Viro application owned by an organization. It mirrors a Coolify
-// application (CoolifyUUID) but is the tenant-scoped record Viro authorizes against.
+// Project groups apps and databases within an organization (Org → Project → App),
+// mirroring Coolify's project concept. Every org has at least a "default" project.
+type Project struct {
+	ID        string    `json:"id"`
+	OrgID     string    `json:"orgId"`
+	Name      string    `json:"name"`
+	Slug      string    `json:"slug"`
+	IsDefault bool      `json:"isDefault"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+// ProjectMembership grants a user scoped access to a single project, for
+// finer-grained access than full organization membership.
+type ProjectMembership struct {
+	ProjectID string `json:"projectId"`
+	UserID    string `json:"userId"`
+	Role      Role   `json:"role"`
+}
+
+// InvitationStatus is the lifecycle state of an invitation.
+type InvitationStatus string
+
+const (
+	InvitePending  InvitationStatus = "pending"
+	InviteAccepted InvitationStatus = "accepted"
+	InviteRevoked  InvitationStatus = "revoked"
+)
+
+// Invitation invites a person (by email) to an organization, or to a specific
+// project within it (when ProjectID is set), with a role.
+type Invitation struct {
+	ID        string           `json:"id"`
+	OrgID     string           `json:"orgId"`
+	ProjectID string           `json:"projectId,omitempty"` // empty => org-level invite
+	Email     string           `json:"email"`
+	Role      Role             `json:"role"`
+	Token     string           `json:"token"`
+	Status    InvitationStatus `json:"status"`
+	InvitedBy string           `json:"invitedBy"`
+	CreatedAt time.Time        `json:"createdAt"`
+}
+
+// App is a Viro application owned by an organization and grouped under a project.
+// It mirrors a Coolify application (CoolifyUUID) but is the tenant-scoped record
+// Viro authorizes against.
 type App struct {
 	ID            string    `json:"id"`
 	OrgID         string    `json:"orgId"`
+	ProjectID     string    `json:"projectId"`
 	CoolifyUUID   string    `json:"coolifyUuid,omitempty"`
 	Name          string    `json:"name"`
 	GitRepository string    `json:"gitRepository,omitempty"`

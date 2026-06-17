@@ -38,10 +38,11 @@ func NewService(s store.Store, c *coolify.Client) *Service {
 // CreateAppInput describes a new application.
 type CreateAppInput struct {
 	Name          string
+	ProjectID     string // Viro project the app belongs to (Org → Project → App)
 	GitRepository string
 	GitBranch     string
 	BuildPack     string
-	ProjectUUID   string
+	ProjectUUID   string // Coolify project placement (optional)
 	ServerUUID    string
 }
 
@@ -54,6 +55,7 @@ func (s *Service) CreateApp(ctx context.Context, orgID string, in CreateAppInput
 	app := &domain.App{
 		ID:            s.idgen(),
 		OrgID:         orgID,
+		ProjectID:     in.ProjectID,
 		Name:          strings.TrimSpace(in.Name),
 		GitRepository: in.GitRepository,
 		GitBranch:     branch,
@@ -98,6 +100,21 @@ func (s *Service) AppLogs(ctx context.Context, orgID, appID string) (string, err
 // ListApps returns the apps belonging to the org.
 func (s *Service) ListApps(ctx context.Context, orgID string) ([]domain.App, error) {
 	return s.store.ListAppsByOrg(ctx, orgID)
+}
+
+// ListAppsInProject returns the org's apps filtered to a single project.
+func (s *Service) ListAppsInProject(ctx context.Context, orgID, projectID string) ([]domain.App, error) {
+	all, err := s.store.ListAppsByOrg(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]domain.App, 0, len(all))
+	for _, a := range all {
+		if a.ProjectID == projectID {
+			out = append(out, a)
+		}
+	}
+	return out, nil
 }
 
 // GetApp returns one app, ensuring it belongs to the org.

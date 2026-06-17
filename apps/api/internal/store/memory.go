@@ -19,6 +19,9 @@ type MemoryStore struct {
 	databases     map[string]domain.Database   // by id
 	subscriptions map[string]domain.Subscription // by orgID
 	usage         map[string][]domain.UsageRecord // by orgID
+	projects      map[string]domain.Project      // by id
+	projectMembers map[string]domain.ProjectMembership // key: projectID + "\x00" + userID
+	invitations   map[string]domain.Invitation   // by id
 }
 
 // NewMemoryStore returns an empty in-memory store.
@@ -32,6 +35,9 @@ func NewMemoryStore() *MemoryStore {
 		databases:     make(map[string]domain.Database),
 		subscriptions: make(map[string]domain.Subscription),
 		usage:         make(map[string][]domain.UsageRecord),
+		projects:      make(map[string]domain.Project),
+		projectMembers: make(map[string]domain.ProjectMembership),
+		invitations:   make(map[string]domain.Invitation),
 	}
 }
 
@@ -214,6 +220,104 @@ func (s *MemoryStore) ListDatabasesByOrg(_ context.Context, orgID string) ([]dom
 		}
 	}
 	return out, nil
+}
+
+func (s *MemoryStore) CreateProject(_ context.Context, p *domain.Project) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.projects[p.ID]; exists {
+		return ErrConflict
+	}
+	s.projects[p.ID] = *p
+	return nil
+}
+
+func (s *MemoryStore) GetProject(_ context.Context, id string) (*domain.Project, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	p, ok := s.projects[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return &p, nil
+}
+
+func (s *MemoryStore) ListProjectsByOrg(_ context.Context, orgID string) ([]domain.Project, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]domain.Project, 0)
+	for _, p := range s.projects {
+		if p.OrgID == orgID {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
+func projectMemberKey(projectID, userID string) string { return projectID + "\x00" + userID }
+
+func (s *MemoryStore) AddProjectMembership(_ context.Context, m domain.ProjectMembership) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := projectMemberKey(m.ProjectID, m.UserID)
+	if _, exists := s.projectMembers[key]; exists {
+		return ErrConflict
+	}
+	s.projectMembers[key] = m
+	return nil
+}
+
+func (s *MemoryStore) GetProjectMembership(_ context.Context, projectID, userID string) (*domain.ProjectMembership, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	m, ok := s.projectMembers[projectMemberKey(projectID, userID)]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return &m, nil
+}
+
+func (s *MemoryStore) CreateInvitation(_ context.Context, inv *domain.Invitation) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.invitations[inv.ID]; exists {
+		return ErrConflict
+	}
+	s.invitations[inv.ID] = *inv
+	return nil
+}
+
+func (s *MemoryStore) GetInvitationByToken(_ context.Context, token string) (*domain.Invitation, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, inv := range s.invitations {
+		if inv.Token == token {
+			return &inv, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+func (s *MemoryStore) ListInvitationsByOrg(_ context.Context, orgID string) ([]domain.Invitation, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]domain.Invitation, 0)
+	for _, inv := range s.invitations {
+		if inv.OrgID == orgID {
+			out = append(out, inv)
+		}
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) UpdateInvitation(_ context.Context, inv *domain.Invitation) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.invitations[inv.ID]; !ok {
+		return ErrNotFound
+	}
+	s.invitations[inv.ID] = *inv
+	return nil
 }
 
 func (s *MemoryStore) UpsertSubscription(_ context.Context, sub *domain.Subscription) error {
