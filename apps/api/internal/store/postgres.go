@@ -274,8 +274,8 @@ func (s *PostgresStore) UpdateUser(ctx context.Context, u *domain.User) error {
 
 func (s *PostgresStore) CreateOrganization(ctx context.Context, o *domain.Organization) error {
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO organizations (id, name, slug, created_at) VALUES ($1, $2, $3, $4)`,
-		o.ID, o.Name, o.Slug, o.CreatedAt,
+		`INSERT INTO organizations (id, name, slug, billing_email, created_at) VALUES ($1, $2, $3, $4, $5)`,
+		o.ID, o.Name, o.Slug, o.BillingEmail, o.CreatedAt,
 	)
 	return mapErr(err)
 }
@@ -283,8 +283,8 @@ func (s *PostgresStore) CreateOrganization(ctx context.Context, o *domain.Organi
 func (s *PostgresStore) GetOrganization(ctx context.Context, id string) (*domain.Organization, error) {
 	var o domain.Organization
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, name, slug, created_at FROM organizations WHERE id = $1`, id,
-	).Scan(&o.ID, &o.Name, &o.Slug, &o.CreatedAt)
+		`SELECT id, name, slug, billing_email, created_at FROM organizations WHERE id = $1`, id,
+	).Scan(&o.ID, &o.Name, &o.Slug, &o.BillingEmail, &o.CreatedAt)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -293,7 +293,7 @@ func (s *PostgresStore) GetOrganization(ctx context.Context, id string) (*domain
 
 func (s *PostgresStore) ListOrganizationsForUser(ctx context.Context, userID string) ([]domain.Organization, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT o.id, o.name, o.slug, o.created_at
+		`SELECT o.id, o.name, o.slug, o.billing_email, o.created_at
 		 FROM organizations o
 		 JOIN memberships m ON m.org_id = o.id
 		 WHERE m.user_id = $1`, userID,
@@ -305,12 +305,28 @@ func (s *PostgresStore) ListOrganizationsForUser(ctx context.Context, userID str
 	var out []domain.Organization
 	for rows.Next() {
 		var o domain.Organization
-		if err := rows.Scan(&o.ID, &o.Name, &o.Slug, &o.CreatedAt); err != nil {
+		if err := rows.Scan(&o.ID, &o.Name, &o.Slug, &o.BillingEmail, &o.CreatedAt); err != nil {
 			return nil, mapErr(err)
 		}
 		out = append(out, o)
 	}
 	return out, mapErr(rows.Err())
+}
+
+// UpdateOrg persists the mutable org fields (name, billing email). The org ID is
+// the stable lookup key and is not changed here.
+func (s *PostgresStore) UpdateOrg(ctx context.Context, o *domain.Organization) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE organizations SET name = $2, billing_email = $3 WHERE id = $1`,
+		o.ID, o.Name, o.BillingEmail,
+	)
+	if err != nil {
+		return mapErr(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // ---- Memberships ----
@@ -354,6 +370,32 @@ func (s *PostgresStore) ListMemberships(ctx context.Context, orgID string) ([]do
 		out = append(out, m)
 	}
 	return out, mapErr(rows.Err())
+}
+
+func (s *PostgresStore) UpdateMembershipRole(ctx context.Context, orgID, userID string, role domain.Role) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE memberships SET role = $3 WHERE org_id = $1 AND user_id = $2`,
+		orgID, userID, string(role),
+	)
+	if err != nil {
+		return mapErr(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *PostgresStore) RemoveMembership(ctx context.Context, orgID, userID string) error {
+	tag, err := s.pool.Exec(ctx,
+		`DELETE FROM memberships WHERE org_id = $1 AND user_id = $2`, orgID, userID)
+	if err != nil {
+		return mapErr(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // ---- Apps ----
@@ -675,6 +717,44 @@ func (s *PostgresStore) ListProjectsByOrg(ctx context.Context, orgID string) ([]
 	return out, mapErr(rows.Err())
 }
 
+// DeleteProject removes an empty project scoped to orgID. It returns ErrNotFound
+// when the project does not exist within the org, and ErrConflict when the
+// project still owns any apps or services.
+func (s *PostgresStore) DeleteProject(ctx context.Context, orgID, projectID string) error {
+	var exists bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM projects WHERE id = $1 AND org_id = $2)`,
+		projectID, orgID,
+	).Scan(&exists); err != nil {
+		return mapErr(err)
+	}
+	if !exists {
+		return ErrNotFound
+	}
+
+	var inUse bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM apps WHERE project_id = $1)
+		    OR EXISTS (SELECT 1 FROM services WHERE project_id = $1)`,
+		projectID,
+	).Scan(&inUse); err != nil {
+		return mapErr(err)
+	}
+	if inUse {
+		return ErrConflict
+	}
+
+	tag, err := s.pool.Exec(ctx,
+		`DELETE FROM projects WHERE id = $1 AND org_id = $2`, projectID, orgID)
+	if err != nil {
+		return mapErr(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // ---- Project memberships ----
 
 func (s *PostgresStore) AddProjectMembership(ctx context.Context, m domain.ProjectMembership) error {
@@ -754,6 +834,22 @@ func (s *PostgresStore) UpdateInvitation(ctx context.Context, inv *domain.Invita
 		`UPDATE invitations SET org_id = $2, project_id = $3, email = $4, role = $5, token = $6,
 		 status = $7, invited_by = $8, created_at = $9 WHERE id = $1`,
 		inv.ID, inv.OrgID, inv.ProjectID, inv.Email, string(inv.Role), inv.Token, string(inv.Status), inv.InvitedBy, inv.CreatedAt,
+	)
+	if err != nil {
+		return mapErr(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// RevokeInvitation marks an org's invitation as revoked. It returns ErrNotFound
+// when no matching invitation exists within the org.
+func (s *PostgresStore) RevokeInvitation(ctx context.Context, orgID, inviteID string) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE invitations SET status = $3 WHERE id = $1 AND org_id = $2`,
+		inviteID, orgID, string(domain.InviteRevoked),
 	)
 	if err != nil {
 		return mapErr(err)
@@ -1104,7 +1200,7 @@ func (s *PostgresStore) UpdateSettings(ctx context.Context, in *domain.PlatformS
 // ---- Admin overview helpers ----
 
 func (s *PostgresStore) ListAllOrgs(ctx context.Context) ([]domain.Organization, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id, name, slug, created_at FROM organizations`)
+	rows, err := s.pool.Query(ctx, `SELECT id, name, slug, billing_email, created_at FROM organizations`)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -1112,7 +1208,7 @@ func (s *PostgresStore) ListAllOrgs(ctx context.Context) ([]domain.Organization,
 	out := make([]domain.Organization, 0)
 	for rows.Next() {
 		var o domain.Organization
-		if err := rows.Scan(&o.ID, &o.Name, &o.Slug, &o.CreatedAt); err != nil {
+		if err := rows.Scan(&o.ID, &o.Name, &o.Slug, &o.BillingEmail, &o.CreatedAt); err != nil {
 			return nil, mapErr(err)
 		}
 		out = append(out, o)

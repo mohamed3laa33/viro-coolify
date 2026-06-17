@@ -47,6 +47,12 @@ export interface Org {
   createdAt: string;
 }
 
+// Mutable org fields editable via PATCH /v1/orgs/{orgId}.
+export interface UpdateOrgInput {
+  name?: string;
+  billingEmail?: string;
+}
+
 // Status is an open string from the backend:
 // created | deploying | restarting | stopped | running | error
 export type AppStatus = string;
@@ -59,6 +65,8 @@ export interface App {
   gitRepository: string;
   gitBranch: string;
   buildPack: string;
+  // Prebuilt container image to deploy instead of building from source.
+  image?: string;
   // Requested resources (overcommit is applied server-side).
   cpu: number;
   memoryMb: number;
@@ -329,6 +337,8 @@ export interface CreateAppInput {
   gitRepository: string;
   gitBranch: string;
   buildPack: string;
+  // Optional prebuilt container image to deploy instead of building from source.
+  image?: string;
   // Optional requested resources; the backend falls back to platform defaults.
   cpu?: number;
   memoryMb?: number;
@@ -573,6 +583,22 @@ export const api = {
     return request<Org>("/v1/orgs", {
       method: "POST",
       body: { name },
+      token,
+      onUnauthorized,
+      signal: opts?.signal,
+    });
+  },
+
+  updateOrg(
+    orgId: string,
+    input: UpdateOrgInput,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<Org> {
+    return request<Org>(`/v1/orgs/${orgId}`, {
+      method: "PATCH",
+      body: input,
       token,
       onUnauthorized,
       signal: opts?.signal,
@@ -825,6 +851,21 @@ export const api = {
     });
   },
 
+  deleteDatabase(
+    orgId: string,
+    databaseId: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<void> {
+    return request<void>(`/v1/orgs/${orgId}/databases/${databaseId}`, {
+      method: "DELETE",
+      token,
+      onUnauthorized,
+      signal: opts?.signal,
+    });
+  },
+
   // Projects (org-scoped)
   listProjects(
     orgId: string,
@@ -868,6 +909,21 @@ export const api = {
     );
   },
 
+  deleteProject(
+    orgId: string,
+    projectId: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<void> {
+    return request<void>(`/v1/orgs/${orgId}/projects/${projectId}`, {
+      method: "DELETE",
+      token,
+      onUnauthorized,
+      signal: opts?.signal,
+    });
+  },
+
   // Members (org-scoped)
   listMembers(
     orgId: string,
@@ -876,6 +932,38 @@ export const api = {
     opts?: CallOpts,
   ): Promise<ListResponse<Member>> {
     return request<ListResponse<Member>>(`/v1/orgs/${orgId}/members`, {
+      token,
+      onUnauthorized,
+      signal: opts?.signal,
+    });
+  },
+
+  updateMember(
+    orgId: string,
+    userId: string,
+    input: { role: MemberRole },
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<Member> {
+    return request<Member>(`/v1/orgs/${orgId}/members/${userId}`, {
+      method: "PATCH",
+      body: input,
+      token,
+      onUnauthorized,
+      signal: opts?.signal,
+    });
+  },
+
+  removeMember(
+    orgId: string,
+    userId: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<void> {
+    return request<void>(`/v1/orgs/${orgId}/members/${userId}`, {
+      method: "DELETE",
       token,
       onUnauthorized,
       signal: opts?.signal,
@@ -921,6 +1009,21 @@ export const api = {
     return request<Invitation>(`/v1/invitations/accept`, {
       method: "POST",
       body: { token: inviteToken },
+      token,
+      onUnauthorized,
+      signal: opts?.signal,
+    });
+  },
+
+  revokeInvitation(
+    orgId: string,
+    inviteId: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<void> {
+    return request<void>(`/v1/orgs/${orgId}/invitations/${inviteId}`, {
+      method: "DELETE",
       token,
       onUnauthorized,
       signal: opts?.signal,

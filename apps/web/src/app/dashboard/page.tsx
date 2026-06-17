@@ -1,5 +1,6 @@
 "use client";
 
+import { useRef } from "react";
 import Link from "next/link";
 import { Boxes, Rocket, Globe2, ArrowUpRight, Database } from "lucide-react";
 import { useAuth } from "@/lib/auth";
@@ -11,6 +12,7 @@ import {
 } from "@/lib/api";
 import { isDemoMode } from "@/lib/demo";
 import { useDemoData } from "@/lib/demo-data";
+import { errorMessage } from "@/lib/errors";
 import { useResource } from "@/lib/use-resource";
 import { PageHeader } from "@/components/page-header";
 import { StatCard } from "@/components/stat-card";
@@ -35,14 +37,38 @@ export default function DashboardOverview() {
     null,
   );
 
+  // useResource only reports a boolean `error`; capture each fetcher's actual
+  // failure here so we can show the real ApiError message instead of a generic
+  // placeholder (invariant #6: honesty over fake-success).
+  const appsErrorRef = useRef<string | null>(null);
+  const dbErrorRef = useRef<string | null>(null);
+
   const {
     data,
     loading: appsLoading,
     error: appsError,
+    errorStatus: appsStatus,
     refetch: refetchApps,
   } = useResource(
     activeOrgId
-      ? () => authedCall((token, on) => api.listApps(activeOrgId, token, on))
+      ? (signal) =>
+          authedCall(
+            (token, on) =>
+              api
+                .listApps(activeOrgId, token, on, { signal })
+                .then((res) => {
+                  appsErrorRef.current = null;
+                  return res;
+                })
+                .catch((err: unknown) => {
+                  appsErrorRef.current = errorMessage(
+                    err,
+                    "Failed to load apps.",
+                  );
+                  throw err;
+                }),
+            signal,
+          )
       : null,
     { data: demoApps },
     [activeOrgId, demoApps],
@@ -54,11 +80,28 @@ export default function DashboardOverview() {
     data: dbData,
     loading: dbLoading,
     error: dbError,
+    errorStatus: dbStatus,
     refetch: refetchDatabases,
   } = useResource(
     activeOrgId
-      ? () =>
-          authedCall((token, on) => api.listDatabases(activeOrgId, token, on))
+      ? (signal) =>
+          authedCall(
+            (token, on) =>
+              api
+                .listDatabases(activeOrgId, token, on, { signal })
+                .then((res) => {
+                  dbErrorRef.current = null;
+                  return res;
+                })
+                .catch((err: unknown) => {
+                  dbErrorRef.current = errorMessage(
+                    err,
+                    "Failed to load databases.",
+                  );
+                  throw err;
+                }),
+            signal,
+          )
       : null,
     { data: demoDatabases },
     [activeOrgId, demoDatabases],
@@ -84,6 +127,13 @@ export default function DashboardOverview() {
   // In demo mode the hook falls back to mock data, so don't alarm there.
   const demo = isDemoMode();
   const fetchFailed = !demo && (appsError || dbError);
+  // A 403 means the account simply lacks access — that is not retryable, so we
+  // distinguish it from an unreachable/transient failure (which gets Retry).
+  const forbidden = fetchFailed && (appsStatus === 403 || dbStatus === 403);
+  // The real backend message for the failure (falls back to a generic string
+  // only on true transport errors, via errorMessage at the fetcher).
+  const fetchErrorText =
+    appsErrorRef.current ?? dbErrorRef.current ?? "Failed to load dashboard.";
   // Initial load: no data yet and the fetchers are still in flight.
   const initialLoading = appsLoading || dbLoading;
 
@@ -108,22 +158,28 @@ export default function DashboardOverview() {
       />
 
       {fetchFailed ? (
-        <Notice variant="error">
-          <div className="flex items-start justify-between gap-3">
+        forbidden ? (
+          <Notice variant="warning">
             <span>
-              We couldn&apos;t load your dashboard stats. Some figures may be
-              missing or out of date.
+              You don&apos;t have permission to view these stats. Ask an
+              organization admin for access.
             </span>
-            <Button
-              variant="secondary"
-              size="sm"
-              className="shrink-0"
-              onClick={retry}
-            >
-              Retry
-            </Button>
-          </div>
-        </Notice>
+          </Notice>
+        ) : (
+          <Notice variant="error">
+            <div className="flex items-start justify-between gap-3">
+              <span>{fetchErrorText}</span>
+              <Button
+                variant="secondary"
+                size="sm"
+                className="shrink-0"
+                onClick={retry}
+              >
+                Retry
+              </Button>
+            </div>
+          </Notice>
+        )
       ) : null}
 
       <div className="grid gap-4 sm:grid-cols-3">

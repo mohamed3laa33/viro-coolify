@@ -27,11 +27,17 @@ type Store interface {
 	CreateOrganization(ctx context.Context, o *domain.Organization) error
 	GetOrganization(ctx context.Context, id string) (*domain.Organization, error)
 	ListOrganizationsForUser(ctx context.Context, userID string) ([]domain.Organization, error)
+	// UpdateOrg persists the mutable org fields (name, billing email).
+	UpdateOrg(ctx context.Context, o *domain.Organization) error
 
 	// Memberships.
 	AddMembership(ctx context.Context, m domain.Membership) error
 	GetMembership(ctx context.Context, orgID, userID string) (*domain.Membership, error)
 	ListMemberships(ctx context.Context, orgID string) ([]domain.Membership, error)
+	// UpdateMembershipRole changes an existing member's role within an org.
+	UpdateMembershipRole(ctx context.Context, orgID, userID string, role domain.Role) error
+	// RemoveMembership removes a member from an org.
+	RemoveMembership(ctx context.Context, orgID, userID string) error
 
 	// Apps (tenant-scoped).
 	CreateApp(ctx context.Context, a *domain.App) error
@@ -68,6 +74,10 @@ type Store interface {
 	CreateProject(ctx context.Context, p *domain.Project) error
 	GetProject(ctx context.Context, id string) (*domain.Project, error)
 	ListProjectsByOrg(ctx context.Context, orgID string) ([]domain.Project, error)
+	// DeleteProject removes an empty project. It returns ErrConflict if the
+	// project still owns any apps or services, and ErrNotFound if it does not
+	// exist within the given org.
+	DeleteProject(ctx context.Context, orgID, projectID string) error
 
 	// Project memberships.
 	AddProjectMembership(ctx context.Context, m domain.ProjectMembership) error
@@ -78,6 +88,9 @@ type Store interface {
 	GetInvitationByToken(ctx context.Context, token string) (*domain.Invitation, error)
 	ListInvitationsByOrg(ctx context.Context, orgID string) ([]domain.Invitation, error)
 	UpdateInvitation(ctx context.Context, inv *domain.Invitation) error
+	// RevokeInvitation marks an org's invitation as revoked. It returns
+	// ErrNotFound when no matching invitation exists within the org.
+	RevokeInvitation(ctx context.Context, orgID, inviteID string) error
 
 	// Refresh tokens (rotation + revocation; keyed by jti).
 	CreateRefreshToken(ctx context.Context, rt *domain.RefreshToken) error

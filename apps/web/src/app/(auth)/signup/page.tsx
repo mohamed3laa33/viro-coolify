@@ -66,7 +66,6 @@ export default function SignupPage() {
               placeholder="Ada Lovelace"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              aria-invalid={error ? true : undefined}
               required
             />
           </div>
@@ -80,6 +79,7 @@ export default function SignupPage() {
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               aria-invalid={error ? true : undefined}
+              aria-describedby={error ? "signup-error" : undefined}
               required
             />
           </div>
@@ -93,12 +93,15 @@ export default function SignupPage() {
               minLength={8}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              aria-invalid={error ? true : undefined}
               required
             />
           </div>
 
-          {error && <Notice variant="error">{error}</Notice>}
+          {error && (
+            <Notice id="signup-error" variant="error">
+              {error}
+            </Notice>
+          )}
 
           <Button type="submit" className="w-full" loading={loading}>
             {loading ? "Creating account…" : "Create account"}

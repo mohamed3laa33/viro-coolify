@@ -1,39 +1,10 @@
-// Build a connect-src that allows the app's own origin plus the API origin.
-// The API URL is known at build time via NEXT_PUBLIC_VORTEX_API_URL; if it is
-// unset (or malformed) we fall back to a self-only policy so we never emit a
-// permissive default.
-function apiConnectSrc() {
-  const raw = process.env.NEXT_PUBLIC_VORTEX_API_URL;
-  if (!raw) return "'self'";
-  try {
-    const { origin } = new URL(raw);
-    return `'self' ${origin}`;
-  } catch {
-    return "'self'";
-  }
-}
-
-// Defense-in-depth: auth tokens live in localStorage (readable by any script
-// running on the page), so a strict Content-Security-Policy is our main lever
-// to reduce the blast radius of an XSS bug — it constrains where scripts may
-// load from and where data may be exfiltrated to (connect-src). 'unsafe-inline'
-// is required for style-src only, because Next.js / Tailwind inject inline
-// <style> at runtime; scripts are NOT granted 'unsafe-inline'.
-const csp = [
-  "default-src 'self'",
-  "base-uri 'self'",
-  "object-src 'none'",
-  "frame-ancestors 'none'",
-  "script-src 'self'",
-  "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob:",
-  "font-src 'self' data:",
-  `connect-src ${apiConnectSrc()}`,
-  "form-action 'self'",
-].join("; ");
-
+// Security headers that are identical for every request. The
+// Content-Security-Policy is intentionally NOT set here: it needs a fresh
+// per-request nonce for Next.js's inline hydration scripts, so it is owned
+// entirely by src/middleware.ts (the single source of truth for CSP). A static
+// `script-src 'self'` would block those inline scripts and leave the production
+// app non-interactive.
 const securityHeaders = [
-  { key: "Content-Security-Policy", value: csp },
   { key: "X-Content-Type-Options", value: "nosniff" },
   { key: "X-Frame-Options", value: "DENY" },
   { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },

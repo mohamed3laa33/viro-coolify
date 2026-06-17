@@ -43,27 +43,37 @@ describe("api client", () => {
     vi.restoreAllMocks();
   });
 
-  it("builds the org-scoped apps URL and attaches the bearer header", async () => {
+  it("sends the auth cookie on an authed GET and builds the org-scoped URL", async () => {
     const calls = stubFetch({ data: [] });
 
     await api.listApps("org_1", "tok_123");
 
     expect(calls).toHaveLength(1);
     expect(calls[0].url).toBe(`${API_BASE_URL}/v1/orgs/org_1/apps`);
-
-    const headers = calls[0].init.headers as Record<string, string>;
-    expect(headers.Authorization).toBe("Bearer tok_123");
     expect(calls[0].init.method).toBe("GET");
+    // The browser session is cookie-based: every request must opt into sending
+    // the HttpOnly auth cookies.
+    expect(calls[0].init.credentials).toBe("include");
   });
 
-  it("lists databases under the org scope", async () => {
+  it("sends the auth cookie when listing databases under the org scope", async () => {
     const calls = stubFetch({ data: [] });
 
     await api.listDatabases("org_2", "tok_abc");
 
     expect(calls[0].url).toBe(`${API_BASE_URL}/v1/orgs/org_2/databases`);
+    expect(calls[0].init.credentials).toBe("include");
+  });
+
+  it("still attaches a Bearer header as the non-browser fallback when a token is passed", async () => {
+    // The Bearer header is a fallback for non-browser clients (e.g. the CLI);
+    // the browser path relies on cookies, asserted in the cookie tests above.
+    const calls = stubFetch({ data: [] });
+
+    await api.listApps("org_1", "tok_123");
+
     const headers = calls[0].init.headers as Record<string, string>;
-    expect(headers.Authorization).toBe("Bearer tok_abc");
+    expect(headers.Authorization).toBe("Bearer tok_123");
   });
 
   it("sends a JSON body without auth header for login", async () => {
@@ -80,13 +90,16 @@ describe("api client", () => {
     const headers = calls[0].init.headers as Record<string, string>;
     expect(headers["Content-Type"]).toBe("application/json");
     expect(headers.Authorization).toBeUndefined();
+    // A POST with a JSON body must also opt into cookies so the server can set
+    // the HttpOnly session cookies on the response.
+    expect(calls[0].init.credentials).toBe("include");
     expect(JSON.parse(calls[0].init.body as string)).toEqual({
       email: "a@b.c",
       password: "pw",
     });
   });
 
-  it("posts to the org-scoped deploy action endpoint with the bearer token", async () => {
+  it("posts to the org-scoped deploy action endpoint over the cookie session", async () => {
     const calls = stubFetch({ id: "app_1", status: "deploying" }, 202);
 
     const app = await api.deployApp("org_1", "app_1", "tok_xyz");
@@ -95,8 +108,7 @@ describe("api client", () => {
       `${API_BASE_URL}/v1/orgs/org_1/apps/app_1/deploy`,
     );
     expect(calls[0].init.method).toBe("POST");
-    const headers = calls[0].init.headers as Record<string, string>;
-    expect(headers.Authorization).toBe("Bearer tok_xyz");
+    expect(calls[0].init.credentials).toBe("include");
     expect(app.status).toBe("deploying");
   });
 
@@ -138,11 +150,11 @@ describe("api client", () => {
     expect(headers.Authorization).toBeUndefined();
   });
 
-  it("refreshes once on a 401 and retries the request", async () => {
+  it("refreshes once on a 401 and retries the request, sending cookies on both legs", async () => {
     let attempt = 0;
-    const urls: string[] = [];
-    const fn = vi.fn(async (input: RequestInfo | URL) => {
-      urls.push(String(input));
+    const calls: CapturedCall[] = [];
+    const fn = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), init: init ?? {} });
       attempt += 1;
       if (attempt === 1) {
         return new Response(JSON.stringify({ message: "expired" }), {
@@ -161,7 +173,12 @@ describe("api client", () => {
     await api.listApps("org_1", "stale_token", onUnauthorized);
 
     expect(onUnauthorized).toHaveBeenCalledTimes(1);
-    expect(urls).toHaveLength(2);
+    expect(calls).toHaveLength(2);
+    // Both the original request and the post-refresh retry must carry the
+    // HttpOnly cookies — the refreshed session lives in the rotated cookie, not
+    // a JS-held token, so the cookie mechanism must be exercised on each leg.
+    expect(calls[0].init.credentials).toBe("include");
+    expect(calls[1].init.credentials).toBe("include");
   });
 
   it("throws ApiError on a non-ok response", async () => {
@@ -291,14 +308,68 @@ describe("api client", () => {
     expect(calls[0].init.method).toBe("DELETE");
   });
 
-  it("fetches app metrics", async () => {
+  it("fetches app metrics over the cookie session", async () => {
     const calls = stubFetch({ cpu: [], memory: [], requests: [] });
     await api.getMetrics("org_1", "app_1", "tok");
     expect(calls[0].url).toBe(
       `${API_BASE_URL}/v1/orgs/org_1/apps/app_1/metrics`,
     );
-    const headers = calls[0].init.headers as Record<string, string>;
-    expect(headers.Authorization).toBe("Bearer tok");
+    expect(calls[0].init.credentials).toBe("include");
+  });
+
+  it("deletes a database by id under the org scope", async () => {
+    const calls = stubFetch({});
+    await api.deleteDatabase("org_1", "db_7", "tok");
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/orgs/org_1/databases/db_7`);
+    expect(calls[0].init.method).toBe("DELETE");
+  });
+
+  it("updates an org via PATCH with the editable fields", async () => {
+    const calls = stubFetch({ id: "org_1", name: "Acme" });
+    await api.updateOrg(
+      "org_1",
+      { name: "Acme", billingEmail: "billing@acme.com" },
+      "tok",
+    );
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/orgs/org_1`);
+    expect(calls[0].init.method).toBe("PATCH");
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({
+      name: "Acme",
+      billingEmail: "billing@acme.com",
+    });
+  });
+
+  it("deletes an empty project under the org scope", async () => {
+    const calls = stubFetch({});
+    await api.deleteProject("org_1", "proj_3", "tok");
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/orgs/org_1/projects/proj_3`);
+    expect(calls[0].init.method).toBe("DELETE");
+  });
+
+  it("changes a member's role via PATCH at the member URL", async () => {
+    const calls = stubFetch({ userId: "u_2", role: "admin" });
+    await api.updateMember("org_1", "u_2", { role: "admin" }, "tok");
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/orgs/org_1/members/u_2`);
+    expect(calls[0].init.method).toBe("PATCH");
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({
+      role: "admin",
+    });
+  });
+
+  it("removes a member via DELETE at the member URL", async () => {
+    const calls = stubFetch({});
+    await api.removeMember("org_1", "u_5", "tok");
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/orgs/org_1/members/u_5`);
+    expect(calls[0].init.method).toBe("DELETE");
+  });
+
+  it("revokes an invitation via DELETE at the invitation URL", async () => {
+    const calls = stubFetch({});
+    await api.revokeInvitation("org_1", "inv_9", "tok");
+    expect(calls[0].url).toBe(
+      `${API_BASE_URL}/v1/orgs/org_1/invitations/inv_9`,
+    );
+    expect(calls[0].init.method).toBe("DELETE");
   });
 });
 

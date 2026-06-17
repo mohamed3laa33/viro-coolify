@@ -72,17 +72,11 @@ export default function LoginPage() {
               placeholder="you@vortex.v60ai.com"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              aria-invalid={error ? true : undefined}
               required
             />
           </div>
           <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <Label htmlFor="password">Password</Label>
-              <span className="text-xs text-muted-foreground">
-                Forgot password?
-              </span>
-            </div>
+            <Label htmlFor="password">Password</Label>
             <Input
               id="password"
               type="password"
@@ -91,11 +85,16 @@ export default function LoginPage() {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               aria-invalid={error ? true : undefined}
+              aria-describedby={error ? "login-error" : undefined}
               required
             />
           </div>
 
-          {error && <Notice variant="error">{error}</Notice>}
+          {error && (
+            <Notice id="login-error" variant="error">
+              {error}
+            </Notice>
+          )}
 
           <Button type="submit" className="w-full" loading={loading}>
             {loading ? "Logging in…" : "Log in"}

@@ -1,6 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { renderHook, waitFor, act } from "@testing-library/react";
-import { useResource, __clearResourceCache } from "@/lib/use-resource";
+import {
+  useResource,
+  invalidate,
+  __clearResourceCache,
+} from "@/lib/use-resource";
+import { ApiError } from "@/lib/api";
 
 beforeEach(() => {
   __clearResourceCache();
@@ -62,6 +67,184 @@ describe("useResource — error", () => {
     unmount();
     await new Promise((r) => setTimeout(r, 0));
     expect(result.current.error).toBe(false);
+  });
+});
+
+describe("useResource — errorStatus", () => {
+  it("is null while a fetch is still in flight (no error yet)", async () => {
+    const { result } = renderHook(() =>
+      useResource<string>(() => new Promise<string>(() => {}), "fallback", []),
+    );
+    expect(result.current.errorStatus).toBeNull();
+  });
+
+  it("is null on success", async () => {
+    const { result } = renderHook(() =>
+      useResource<string>(async () => "live", "fallback", []),
+    );
+
+    await waitFor(() => expect(result.current.data).toBe("live"));
+    expect(result.current.errorStatus).toBeNull();
+  });
+
+  it("is null when the fetcher is skipped (null)", async () => {
+    const { result } = renderHook(() =>
+      useResource<string>(null, "fallback", []),
+    );
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.usingFallback).toBe(true);
+    expect(result.current.errorStatus).toBeNull();
+  });
+
+  it("exposes the ApiError status when the backend returns 4xx/5xx", async () => {
+    const fetcher = vi.fn(async () => {
+      throw new ApiError("forbidden", 403);
+    });
+    const { result } = renderHook(() =>
+      useResource<string>(fetcher, "fallback", []),
+    );
+
+    await waitFor(() => expect(result.current.error).toBe(true));
+    expect(result.current.errorStatus).toBe(403);
+  });
+
+  it("stays null for a non-ApiError (network/TypeError) failure", async () => {
+    const fetcher = vi.fn(async () => {
+      throw new TypeError("Failed to fetch");
+    });
+    const { result } = renderHook(() =>
+      useResource<string>(fetcher, "fallback", []),
+    );
+
+    await waitFor(() => expect(result.current.error).toBe(true));
+    expect(result.current.errorStatus).toBeNull();
+  });
+
+  it("clears the status back to null once a later fetch succeeds", async () => {
+    let attempt = 0;
+    const fetcher = vi.fn(async () => {
+      attempt += 1;
+      if (attempt === 1) throw new ApiError("server error", 500);
+      return "recovered";
+    });
+    const { result } = renderHook(() =>
+      useResource<string>(fetcher, "fallback", []),
+    );
+
+    await waitFor(() => expect(result.current.errorStatus).toBe(500));
+
+    act(() => result.current.refetch());
+    await waitFor(() => expect(result.current.data).toBe("recovered"));
+    expect(result.current.errorStatus).toBeNull();
+    expect(result.current.error).toBe(false);
+  });
+});
+
+describe("useResource — invalidate", () => {
+  it("drops the cached entry so the next mount refetches", async () => {
+    let n = 0;
+    const fetcher = vi.fn(async () => `v${++n}`);
+
+    const first = renderHook(() =>
+      useResource<string>(fetcher, "fallback", [], {
+        cacheKey: "inval",
+        ttlMs: 10_000,
+      }),
+    );
+    await waitFor(() => expect(first.result.current.data).toBe("v1"));
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    // Drop the cached entry; the warm value must no longer be reused.
+    act(() => invalidate("inval"));
+
+    const second = renderHook(() =>
+      useResource<string>(fetcher, "fallback", [], {
+        cacheKey: "inval",
+        ttlMs: 10_000,
+      }),
+    );
+    await waitFor(() => expect(second.result.current.data).toBe("v2"));
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("is a no-op for a key that was never cached", async () => {
+    const fetcher = vi.fn(async () => "cached");
+
+    expect(() => invalidate("never-seen")).not.toThrow();
+
+    const { result } = renderHook(() =>
+      useResource<string>(fetcher, "fallback", [], {
+        cacheKey: "fresh",
+        ttlMs: 10_000,
+      }),
+    );
+    await waitFor(() => expect(result.current.data).toBe("cached"));
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("useResource — refetchIntervalMs", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("re-runs the fetcher on each interval tick", async () => {
+    let n = 0;
+    const fetcher = vi.fn(async () => `v${++n}`);
+
+    const { result } = renderHook(() =>
+      useResource<string>(fetcher, "fallback", [], {
+        refetchIntervalMs: 1_000,
+      }),
+    );
+
+    // Initial fetch resolves first.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(result.current.data).toBe("v1");
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    // Each tick of the interval drives a fresh fetch.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(result.current.data).toBe("v2");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(result.current.data).toBe("v3");
+  });
+
+  it("stops polling after unmount", async () => {
+    const fetcher = vi.fn(async () => "x");
+
+    const { unmount } = renderHook(() =>
+      useResource<string>(fetcher, "fallback", [], {
+        refetchIntervalMs: 1_000,
+      }),
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    unmount();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    // No further fetches once the timer is cleared on unmount.
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -6,12 +6,18 @@
   :root {
     --background: 240 10% 7%;
     --card: 240 8% 10%;
+    /* Inset surface a shade below --background (#0c0c0f), e.g. code frames. */
+    --surface-1: 240 11% 5%;
     --surface-2: 240 7% 13%;
     --muted: 240 6% 16%;
     --border: 240 6% 18%;
     --foreground: 240 12% 96%;
     --muted-foreground: 240 5% 65%;
     --primary: 262 83% 58%;
+    /* Lighter primary for text on dark: --primary (58% L) only reaches ~3.1:1
+       against --background and ~2.8:1 on bg-primary/10 tints; at 74% L this
+       clears WCAG AA (>=4.5:1). Use text-primary-bright for primary text. */
+    --primary-bright: 262 83% 74%;
     --primary-foreground: 0 0% 100%;
     /* Brand violet (#9D4EDD) — first stop of the balloon gradient. */
     --brand-violet: 270 66% 59%;

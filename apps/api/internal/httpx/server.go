@@ -163,6 +163,10 @@ func (s *Server) routes() chi.Router {
 	r.Use(requestLogger(s.logger))
 	r.Use(middleware.Recoverer)
 	r.Use(corsMiddleware(s.cfg.CORSAllowedOrigins))
+	// CSRF defense-in-depth: reject state-changing browser requests whose
+	// Origin/Referer is not in the allowlist. Runs after CORS so OPTIONS
+	// preflights are already short-circuited.
+	r.Use(csrfOriginGuard(s.cfg.CORSAllowedOrigins))
 
 	r.Get("/healthz", s.handleHealth)
 	r.Get("/readyz", s.handleReady)
@@ -230,15 +234,23 @@ func (s *Server) routes() chi.Router {
 				// Org-scoped resources. Reads require membership (member+);
 				// mutations require admin+.
 				r.Route("/{orgID}", func(r chi.Router) {
-					// Members & invitations.
+					// Org settings (name, billing email).
+					r.With(s.orgAuthz(domain.RoleAdmin)).Patch("/", s.handleUpdateOrg)
+
+					// Members & invitations. Role changes and removals are
+					// owner-only; the rest require admin+.
 					r.With(s.orgAuthz(domain.RoleMember)).Get("/members", s.handleListMembers)
+					r.With(s.orgAuthz(domain.RoleOwner)).Patch("/members/{userID}", s.handleUpdateMember)
+					r.With(s.orgAuthz(domain.RoleOwner)).Delete("/members/{userID}", s.handleRemoveMember)
 					r.With(s.orgAuthz(domain.RoleAdmin)).Post("/invitations", s.handleCreateInvitation)
 					r.With(s.orgAuthz(domain.RoleAdmin)).Get("/invitations", s.handleListInvitations)
+					r.With(s.orgAuthz(domain.RoleAdmin)).Delete("/invitations/{inviteID}", s.handleRevokeInvitation)
 
 					// Projects (Org → Project → App).
 					r.Route("/projects", func(r chi.Router) {
 						r.With(s.orgAuthz(domain.RoleMember)).Get("/", s.handleListProjects)
 						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/", s.handleCreateProject)
+						r.With(s.orgAuthz(domain.RoleAdmin)).Delete("/{projectID}", s.handleDeleteProject)
 						// Project-scoped apps (org admins or project members).
 						r.With(s.projectAuthz(domain.RoleMember)).Get("/{projectID}/apps", s.handleListProjectApps)
 						r.With(s.projectAuthz(domain.RoleAdmin)).Post("/{projectID}/apps", s.handleCreateAppInProject)

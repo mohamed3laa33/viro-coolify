@@ -2,12 +2,9 @@
 
 import Link from "next/link";
 import { Check } from "lucide-react";
-import { api, type Plan } from "@/lib/api";
-import { useDemoData } from "@/lib/demo-data";
-import { useResource } from "@/lib/use-resource";
+import { type Plan } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 
 function priceLabel(plan: Plan): { price: string; period: string } {
@@ -49,44 +46,27 @@ function planFeatures(plan: Plan): string[] {
   return features;
 }
 
-export function PricingPlans() {
-  // Demo fallback loads lazily (demo mode only); prod shows a real empty state.
-  // Plans always come from the API — never hardcoded (invariant #1).
-  const demoPlans = useDemoData((m) => m.mockPlans, [] as Plan[]);
+export interface PricingPlansProps {
+  /**
+   * Plans fetched server-side from the public billing catalog (invariant #1 —
+   * never hardcoded). An empty list renders the empty state, which also covers
+   * the server-side fetch-failure path.
+   */
+  plans: Plan[];
+}
 
-  const { data, loading } = useResource(
-    () => api.getPlans(),
-    { data: demoPlans, provider: "stripe" },
-    [demoPlans],
-    { cacheKey: "plans" },
-  );
-
+/**
+ * Presentational pricing grid. Data is fetched in the landing server component
+ * and passed in as props so the plan catalog is server-rendered (SEO/perf) with
+ * no client-side request. Filtering/sorting lives here next to the rendering.
+ */
+export function PricingPlans({ plans }: PricingPlansProps) {
   // Show active plans (when the flag is present) sorted by sortOrder.
-  const plans = [...data.data]
+  const visible = [...plans]
     .filter((p) => p.active !== false)
     .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
 
-  if (loading) {
-    return (
-      <div className="mt-14 grid gap-6 lg:grid-cols-3">
-        {Array.from({ length: 3 }).map((_, i) => (
-          <Card key={i} className="p-8">
-            <Skeleton className="h-6 w-24" />
-            <Skeleton className="mt-4 h-10 w-32" />
-            <Skeleton className="mt-3 h-4 w-full" />
-            <div className="mt-6 space-y-3">
-              <Skeleton className="h-4 w-3/4" />
-              <Skeleton className="h-4 w-2/3" />
-              <Skeleton className="h-4 w-1/2" />
-            </div>
-            <Skeleton className="mt-8 h-10 w-full" />
-          </Card>
-        ))}
-      </div>
-    );
-  }
-
-  if (plans.length === 0) {
+  if (visible.length === 0) {
     return (
       <p className="mt-14 text-center text-sm text-muted-foreground">
         No plans are available right now.
@@ -95,11 +75,11 @@ export function PricingPlans() {
   }
 
   // Mark the middle plan as featured for emphasis.
-  const featuredIndex = plans.length > 1 ? 1 : 0;
+  const featuredIndex = visible.length > 1 ? 1 : 0;
 
   return (
     <div className="mt-14 grid gap-6 lg:grid-cols-3">
-      {plans.map((plan, i) => {
+      {visible.map((plan, i) => {
         const featured = i === featuredIndex;
         const { price, period } = priceLabel(plan);
         return (

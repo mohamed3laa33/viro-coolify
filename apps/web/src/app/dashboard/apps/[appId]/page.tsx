@@ -1,15 +1,6 @@
 "use client";
 
-import {
-  use,
-  useCallback,
-  useEffect,
-  useId,
-  useMemo,
-  useRef,
-  useState,
-  type FormEvent,
-} from "react";
+import { use, useEffect, useMemo, useState, type FormEvent } from "react";
 import Link from "next/link";
 import {
   ArrowLeft,
@@ -40,12 +31,14 @@ import {
   type Domain,
   type EnvVar,
 } from "@/lib/api";
+import { errorMessage } from "@/lib/errors";
 import { isDemoMode } from "@/lib/demo";
 import { useDemoData } from "@/lib/demo-data";
-import { useResource } from "@/lib/use-resource";
+import { useResource, invalidate } from "@/lib/use-resource";
 import { cn, buildAppFqdn, slugify, BRAND_MAGENTA } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
@@ -81,6 +74,9 @@ const DEMO_LOGS = [
   "2026-06-17T09:03:40Z [info]  Autoscaled to 3 machines (lhr, sin)",
 ];
 
+// Cap the rendered log tail so a very large response can't bloat the DOM.
+const MAX_LOG_LINES = 500;
+
 export default function AppDetailPage({
   params,
 }: {
@@ -101,11 +97,16 @@ export default function AppDetailPage({
   const {
     data: fetched,
     loading,
+    errorStatus,
     refetch,
   } = useResource<App | null>(
     activeOrgId
-      ? () =>
-          authedCall((token, on) => api.getApp(activeOrgId, appId, token, on))
+      ? (signal) =>
+          authedCall(
+            (token, on) =>
+              api.getApp(activeOrgId, appId, token, on, { signal }),
+            signal,
+          )
       : null,
     fallback,
     [activeOrgId, appId, fallback],
@@ -158,7 +159,9 @@ export default function AppDetailPage({
       refetch();
     } catch (err) {
       setOptimisticStatus(null);
-      setNotice(`${capitalize(kind)} failed — ${errorMessage(err)}`);
+      setNotice(
+        `${capitalize(kind)} failed — ${errorMessage(err, "the API is unreachable.")}`,
+      );
     } finally {
       setPending(null);
     }
@@ -182,15 +185,22 @@ export default function AppDetailPage({
       await authedCall((token, on) =>
         api.deleteApp(activeOrgId, appId, token, on),
       );
+      // Drop the cached apps list so the deleted app disappears immediately.
+      invalidate(`apps:${activeOrgId}`);
       router.push("/dashboard/apps");
     } catch (err) {
-      setNotice(`Delete failed — ${errorMessage(err)}`);
+      setNotice(
+        `Delete failed — ${errorMessage(err, "the API is unreachable.")}`,
+      );
       setDeleting(false);
       setConfirmOpen(false);
     }
   }
 
   if (!app && !loading) {
+    // Distinguish a genuine 404 (the app does not exist) from a transport
+    // failure (the API never answered) so we don't show a misleading message.
+    const notFound = errorStatus === 404;
     return (
       <div className="space-y-6">
         <Link
@@ -200,10 +210,16 @@ export default function AppDetailPage({
           <ArrowLeft className="h-4 w-4" />
           Back to apps
         </Link>
-        <Card className="flex flex-col items-center justify-center py-16 text-center">
+        <Card className="flex flex-col items-center justify-center gap-3 py-16 text-center">
           <p className="text-sm text-muted-foreground">
-            App not found, or the API is unreachable.
+            {notFound ? "App not found." : "API unreachable."}
           </p>
+          {!notFound && (
+            <Button variant="secondary" size="sm" onClick={() => refetch()}>
+              <RefreshCw className="h-3.5 w-3.5" />
+              Retry
+            </Button>
+          )}
         </Card>
       </div>
     );
@@ -293,6 +309,14 @@ export default function AppDetailPage({
                 {app.buildPack}
               </span>
             </InfoCard>
+            {app.image && (
+              <InfoCard title="Image">
+                <span className="inline-flex min-w-0 items-center gap-1.5 font-mono text-sm">
+                  <Package className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <span className="truncate">{app.image}</span>
+                </span>
+              </InfoCard>
+            )}
             <InfoCard title="Requested CPU">
               <span className="inline-flex items-center gap-1.5 font-mono text-sm">
                 <Cpu className="h-3.5 w-3.5 text-muted-foreground" />
@@ -397,120 +421,16 @@ export default function AppDetailPage({
         </TabPanel>
       )}
 
-      {confirmOpen && (
-        <ConfirmDialog
-          title="Delete app?"
-          message={`This permanently removes ${app?.name ?? "this app"} and all of its machines. This action cannot be undone.`}
-          confirmLabel="Delete app"
-          loading={deleting}
-          onConfirm={onDelete}
-          onCancel={() => setConfirmOpen(false)}
-        />
-      )}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Confirm dialog — accessible (role="alertdialog", focus trap, Escape to
-// cancel). Implemented inline to avoid window.confirm.
-// ---------------------------------------------------------------------------
-
-function ConfirmDialog({
-  title,
-  message,
-  confirmLabel,
-  loading,
-  onConfirm,
-  onCancel,
-}: {
-  title: string;
-  message: string;
-  confirmLabel: string;
-  loading: boolean;
-  onConfirm: () => void;
-  onCancel: () => void;
-}) {
-  const titleId = useId();
-  const descId = useId();
-  const dialogRef = useRef<HTMLDivElement | null>(null);
-  const confirmRef = useRef<HTMLButtonElement | null>(null);
-
-  // Focus the destructive action on open so keyboard users land inside.
-  useEffect(() => {
-    confirmRef.current?.focus();
-  }, []);
-
-  const onKeyDown = useCallback(
-    (e: React.KeyboardEvent<HTMLDivElement>) => {
-      if (e.key === "Escape" && !loading) {
-        e.preventDefault();
-        onCancel();
-        return;
-      }
-      // Trap Tab focus within the dialog.
-      if (e.key === "Tab") {
-        const focusable = dialogRef.current?.querySelectorAll<HTMLElement>(
-          'button:not([disabled]), [href], input, [tabindex]:not([tabindex="-1"])',
-        );
-        if (!focusable || focusable.length === 0) return;
-        const first = focusable[0];
-        const last = focusable[focusable.length - 1];
-        const activeEl = document.activeElement;
-        if (e.shiftKey && activeEl === first) {
-          e.preventDefault();
-          last.focus();
-        } else if (!e.shiftKey && activeEl === last) {
-          e.preventDefault();
-          first.focus();
-        }
-      }
-    },
-    [loading, onCancel],
-  );
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget && !loading) onCancel();
-      }}
-    >
-      <div
-        ref={dialogRef}
-        role="alertdialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        aria-describedby={descId}
-        onKeyDown={onKeyDown}
-        className="w-full max-w-md rounded-lg border border-border bg-card p-6 shadow-lg"
-      >
-        <h2 id={titleId} className="text-lg font-semibold text-destructive">
-          {title}
-        </h2>
-        <p id={descId} className="mt-2 text-sm text-muted-foreground">
-          {message}
-        </p>
-        <div className="mt-6 flex justify-end gap-2">
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={onCancel}
-            disabled={loading}
-          >
-            Cancel
-          </Button>
-          <Button
-            ref={confirmRef}
-            variant="destructive"
-            size="sm"
-            onClick={onConfirm}
-            loading={loading}
-          >
-            {confirmLabel}
-          </Button>
-        </div>
-      </div>
+      <ConfirmDialog
+        open={confirmOpen}
+        title="Delete app?"
+        description={`This permanently removes ${app?.name ?? "this app"} and all of its machines. This action cannot be undone.`}
+        confirmLabel="Delete app"
+        destructive
+        loading={deleting}
+        onConfirm={onDelete}
+        onCancel={() => setConfirmOpen(false)}
+      />
     </div>
   );
 }
@@ -526,14 +446,25 @@ function LogsTab({ appId, appName }: { appId: string; appName: string }) {
 
   const { data, loading, error, refetch } = useResource<string>(
     activeOrgId
-      ? () =>
-          authedCall((token, on) => api.getLogs(activeOrgId, appId, token, on))
+      ? (signal) =>
+          authedCall(
+            (token, on) =>
+              api.getLogs(activeOrgId, appId, token, on, { signal }),
+            signal,
+          )
       : null,
     demo ? DEMO_LOGS.join("\n") : "",
     [activeOrgId, appId],
   );
 
-  const lines = data ? data.split("\n") : [];
+  // Defensively cap the render to the most recent lines so a large tail can't
+  // blow up the DOM; classify each line's level in the same pass.
+  const lines = useMemo<{ text: string; level: string }[]>(() => {
+    if (!data) return [];
+    const all = data.split("\n");
+    const tail = all.length > MAX_LOG_LINES ? all.slice(-MAX_LOG_LINES) : all;
+    return tail.map((text) => ({ text, level: logLineClass(text) }));
+  }, [data]);
 
   return (
     <Card className="overflow-hidden">
@@ -559,7 +490,17 @@ function LogsTab({ appId, appName }: { appId: string; appName: string }) {
       </div>
       {error && !demo && (
         <Notice variant="error" className="m-4">
-          Could not load logs — the API is unreachable.
+          <div className="flex items-center justify-between gap-3">
+            <span>Could not load logs — the API is unreachable.</span>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => refetch()}
+              loading={loading}
+            >
+              Retry
+            </Button>
+          </div>
         </Notice>
       )}
       {lines.length === 0 ? (
@@ -568,18 +509,11 @@ function LogsTab({ appId, appName }: { appId: string; appName: string }) {
         </p>
       ) : (
         <div className="scrollbar-thin max-h-[420px] overflow-y-auto bg-background p-4 font-mono text-xs leading-relaxed">
-          {lines.map((line, i) => {
-            const level = line.includes("[warn]")
-              ? "text-warning"
-              : line.includes("[error]")
-                ? "text-destructive"
-                : "text-muted-foreground";
-            return (
-              <div key={i} className={cn("whitespace-pre-wrap", level)}>
-                {line}
-              </div>
-            );
-          })}
+          {lines.map((line, i) => (
+            <div key={i} className={cn("whitespace-pre-wrap", line.level)}>
+              {line.text}
+            </div>
+          ))}
         </div>
       )}
     </Card>
@@ -599,11 +533,13 @@ function MetricsTab({ appId }: { appId: string }) {
   // Demo fallback loads lazily (demo mode only); never shipped to prod.
   const demoMetrics = useDemoData((m) => m.mockMetrics, empty);
 
-  const { data } = useResource<AppMetrics>(
+  const { data, error, refetch } = useResource<AppMetrics>(
     activeOrgId
-      ? () =>
-          authedCall((token, on) =>
-            api.getMetrics(activeOrgId, appId, token, on),
+      ? (signal) =>
+          authedCall(
+            (token, on) =>
+              api.getMetrics(activeOrgId, appId, token, on, { signal }),
+            signal,
           )
       : null,
     demoMetrics,
@@ -626,11 +562,19 @@ function MetricsTab({ appId }: { appId: string }) {
 
   if (cpu.length === 0 && mem.length === 0 && req.length === 0) {
     return (
-      <Card className="flex flex-col items-center justify-center py-16 text-center">
-        <p className="text-sm text-muted-foreground">
-          No metrics recorded yet for this app.
-        </p>
-      </Card>
+      <div className="space-y-4">
+        {error && !demo && (
+          <FetchErrorNotice
+            message="Could not load metrics — the API is unreachable."
+            onRetry={refetch}
+          />
+        )}
+        <Card className="flex flex-col items-center justify-center py-16 text-center">
+          <p className="text-sm text-muted-foreground">
+            No metrics recorded yet for this app.
+          </p>
+        </Card>
+      </div>
     );
   }
 
@@ -668,10 +612,14 @@ function EnvironmentTab({ appId }: { appId: string }) {
   // Demo fallback loads lazily (demo mode only); never shipped to prod.
   const demoEnv = useDemoData((m) => m.mockEnv, [] as EnvVar[]);
 
-  const { data, refetch } = useResource(
+  const { data, error, refetch } = useResource(
     activeOrgId
-      ? () =>
-          authedCall((token, on) => api.listEnv(activeOrgId, appId, token, on))
+      ? (signal) =>
+          authedCall(
+            (token, on) =>
+              api.listEnv(activeOrgId, appId, token, on, { signal }),
+            signal,
+          )
       : null,
     { data: demoEnv },
     [activeOrgId, appId, demoEnv],
@@ -703,8 +651,10 @@ function EnvironmentTab({ appId }: { appId: string }) {
       setKey("");
       setValue("");
       refetch();
-    } catch {
-      setNotice("Could not save the variable — the API is unreachable.");
+    } catch (err) {
+      setNotice(
+        `Could not save the variable — ${errorMessage(err, "the API is unreachable.")}`,
+      );
     } finally {
       setPending(false);
     }
@@ -722,8 +672,10 @@ function EnvironmentTab({ appId }: { appId: string }) {
         api.deleteEnv(activeOrgId, appId, k, token, on),
       );
       refetch();
-    } catch {
-      setNotice("Could not delete the variable — the API is unreachable.");
+    } catch (err) {
+      setNotice(
+        `Could not delete the variable — ${errorMessage(err, "the API is unreachable.")}`,
+      );
     } finally {
       setBusyKey(null);
     }
@@ -732,6 +684,13 @@ function EnvironmentTab({ appId }: { appId: string }) {
   return (
     <div className="space-y-4">
       {notice && <Notice>{notice}</Notice>}
+
+      {error && !isDemoMode() && (
+        <FetchErrorNotice
+          message="Could not load environment variables — the API is unreachable."
+          onRetry={refetch}
+        />
+      )}
 
       <Card>
         <CardHeader>
@@ -852,11 +811,13 @@ function DomainsTab({ appId, appName }: { appId: string; appName: string }) {
   // Demo fallback loads lazily (demo mode only); never shipped to prod.
   const demoDomains = useDemoData((m) => m.mockDomains, [] as Domain[]);
 
-  const { data, refetch } = useResource(
+  const { data, error, refetch } = useResource(
     activeOrgId
-      ? () =>
-          authedCall((token, on) =>
-            api.listDomains(activeOrgId, appId, token, on),
+      ? (signal) =>
+          authedCall(
+            (token, on) =>
+              api.listDomains(activeOrgId, appId, token, on, { signal }),
+            signal,
           )
       : null,
     { data: demoDomains },
@@ -887,8 +848,10 @@ function DomainsTab({ appId, appName }: { appId: string; appName: string }) {
       );
       setDomain("");
       refetch();
-    } catch {
-      setNotice("Could not add the domain — the API is unreachable.");
+    } catch (err) {
+      setNotice(
+        `Could not add the domain — ${errorMessage(err, "the API is unreachable.")}`,
+      );
     } finally {
       setPending(false);
     }
@@ -906,8 +869,10 @@ function DomainsTab({ appId, appName }: { appId: string; appName: string }) {
         api.deleteDomain(activeOrgId, appId, id, token, on),
       );
       refetch();
-    } catch {
-      setNotice("Could not delete the domain — the API is unreachable.");
+    } catch (err) {
+      setNotice(
+        `Could not delete the domain — ${errorMessage(err, "the API is unreachable.")}`,
+      );
     } finally {
       setBusyId(null);
     }
@@ -916,6 +881,13 @@ function DomainsTab({ appId, appName }: { appId: string; appName: string }) {
   return (
     <div className="space-y-4">
       {notice && <Notice>{notice}</Notice>}
+
+      {error && !isDemoMode() && (
+        <FetchErrorNotice
+          message="Could not load domains — the API is unreachable."
+          onRetry={refetch}
+        />
+      )}
 
       <Card>
         <CardHeader>
@@ -1042,6 +1014,28 @@ function TabPanel({ tab, children }: { tab: Tab; children: React.ReactNode }) {
   );
 }
 
+// Error banner shown above a tab's empty state when the fetch actually failed
+// (gated `error && !isDemoMode()` at the call site, mirroring the Logs tab) so
+// a real API failure is never disguised as a success-looking empty state.
+function FetchErrorNotice({
+  message,
+  onRetry,
+}: {
+  message: string;
+  onRetry: () => void;
+}) {
+  return (
+    <Notice variant="error">
+      <div className="flex items-center justify-between gap-3">
+        <span>{message}</span>
+        <Button variant="secondary" size="sm" onClick={onRetry}>
+          Retry
+        </Button>
+      </div>
+    </Notice>
+  );
+}
+
 function InfoCard({
   title,
   children,
@@ -1087,6 +1081,13 @@ function last(data: number[]): number {
   return data.length ? data[data.length - 1] : 0;
 }
 
+// Map a single log line to its level color class in one pass.
+function logLineClass(line: string): string {
+  if (line.includes("[error]")) return "text-destructive";
+  if (line.includes("[warn]")) return "text-warning";
+  return "text-muted-foreground";
+}
+
 function capitalize(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
@@ -1095,9 +1096,4 @@ function formatMemory(mb: number): string {
   if (mb >= 1024 && mb % 1024 === 0) return `${mb / 1024} GB`;
   if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
   return `${mb} MB`;
-}
-
-function errorMessage(err: unknown): string {
-  if (err instanceof Error && err.message) return err.message;
-  return "the API is unreachable.";
 }

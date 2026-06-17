@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
 import { Pencil, Plus, Trash2 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import {
@@ -9,6 +9,8 @@ import {
   type TemplateInput,
   type TemplateKind,
 } from "@/lib/api";
+import { errorMessage } from "@/lib/errors";
+import { isDemoMode } from "@/lib/demo";
 import { useDemoData } from "@/lib/demo-data";
 import { useResource } from "@/lib/use-resource";
 import { cn } from "@/lib/utils";
@@ -18,6 +20,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Notice } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
 
@@ -37,38 +40,63 @@ const EMPTY_TEMPLATE: TemplateInput = {
 
 export default function AdminCatalogPage() {
   const { authedCall } = useAuth();
+  const demo = isDemoMode();
 
   // Demo fallback loads lazily (demo mode only); prod shows a real empty table.
   const demoTemplates = useDemoData((m) => m.mockTemplates, [] as Template[]);
 
-  const { data, refetch, usingFallback } = useResource(
-    () => authedCall((token, on) => api.listTemplates(token, on)),
+  // useResource reports a boolean `error`; capture the real failure here so we
+  // can surface the actual ApiError message instead of a generic placeholder.
+  const fetchErrorRef = useRef<string | null>(null);
+
+  const { data, error, refetch, usingFallback } = useResource(
+    (signal) =>
+      authedCall(
+        (token, on) =>
+          api
+            .listTemplates(token, on, { signal })
+            .then((res) => {
+              fetchErrorRef.current = null;
+              return res;
+            })
+            .catch((err: unknown) => {
+              fetchErrorRef.current = errorMessage(
+                err,
+                "Couldn’t load templates — the API is unreachable.",
+              );
+              throw err;
+            }),
+        signal,
+      ),
     { data: demoTemplates },
     [demoTemplates],
   );
   const templates = data.data;
+  const showError = error && !demo;
 
   const [editing, setEditing] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<Template | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const editingTemplate =
     editing && editing !== "new"
       ? (templates.find((t) => t.key === editing) ?? null)
       : null;
 
-  async function onDelete(tpl: Template) {
-    if (
-      typeof window !== "undefined" &&
-      !window.confirm(`Delete template "${tpl.name}"?`)
-    ) {
-      return;
-    }
+  async function onConfirmDelete() {
+    const tpl = confirmDelete;
+    if (!tpl) return;
     setNotice(null);
+    setDeleting(true);
     try {
       await authedCall((token, on) => api.deleteTemplate(tpl.key, token, on));
+      setConfirmDelete(null);
       refetch();
-    } catch {
-      setNotice("Delete failed (API unreachable — demo mode).");
+    } catch (err) {
+      setNotice(errorMessage(err, `Could not delete ${tpl.name}.`));
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -87,9 +115,21 @@ export default function AdminCatalogPage() {
         }
       />
 
-      {usingFallback && (
+      {usingFallback && demo && (
         <Notice variant="warning">
           Showing demo data — admin API unreachable. Edits won&apos;t persist.
+        </Notice>
+      )}
+
+      {showError && (
+        <Notice variant="error" className="items-center justify-between gap-4">
+          <span>
+            {fetchErrorRef.current ??
+              "Couldn’t load templates — the API is unreachable."}
+          </span>
+          <Button size="sm" variant="secondary" onClick={refetch}>
+            Retry
+          </Button>
         </Notice>
       )}
 
@@ -109,8 +149,8 @@ export default function AdminCatalogPage() {
               );
               setEditing(null);
               refetch();
-            } catch {
-              setNotice("Create failed (API unreachable — demo mode).");
+            } catch (err) {
+              setNotice(errorMessage(err, "Could not create the template."));
             }
           }}
         />
@@ -172,7 +212,7 @@ export default function AdminCatalogPage() {
                         <Button
                           variant="ghost"
                           size="sm"
-                          onClick={() => onDelete(tpl)}
+                          onClick={() => setConfirmDelete(tpl)}
                         >
                           <Trash2 className="h-3.5 w-3.5 text-destructive" />
                         </Button>
@@ -199,12 +239,27 @@ export default function AdminCatalogPage() {
               );
               setEditing(null);
               refetch();
-            } catch {
-              setNotice("Update failed (API unreachable — demo mode).");
+            } catch (err) {
+              setNotice(errorMessage(err, "Could not update the template."));
             }
           }}
         />
       )}
+
+      <ConfirmDialog
+        open={confirmDelete !== null}
+        title="Delete template"
+        description={
+          confirmDelete
+            ? `Delete template “${confirmDelete.name}”? This can’t be undone.`
+            : undefined
+        }
+        confirmLabel="Delete"
+        destructive
+        loading={deleting}
+        onConfirm={onConfirmDelete}
+        onCancel={() => setConfirmDelete(null)}
+      />
     </div>
   );
 }

@@ -1,4 +1,4 @@
-import { Sidebar } from "@/components/sidebar";
+import { Sidebar, MobileSidebar } from "@/components/sidebar";
 import { Topbar } from "@/components/topbar";
 import { AuthGuard } from "@/components/auth-guard";
 
@@ -17,6 +17,7 @@ export default function DashboardLayout({
       </a>
       <div className="flex h-screen overflow-hidden bg-background">
         <Sidebar />
+        <MobileSidebar />
         <div className="flex min-w-0 flex-1 flex-col">
           <Topbar />
           <main

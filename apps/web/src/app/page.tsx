@@ -12,12 +12,13 @@ import { Section } from "@/components/section";
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/logo";
 import { PricingPlans } from "@/components/pricing-plans";
+import type { Plan, PlansResponse } from "@/lib/api";
 
 const FEATURES = [
   {
     icon: Globe2,
     title: "Global deploys",
-    body: "Run your app in 30+ regions. Vortex routes every request to the nearest healthy instance automatically.",
+    body: "Run your app across regions worldwide. Vortex routes every request to the nearest healthy instance automatically.",
   },
   {
     icon: Gauge,
@@ -51,7 +52,41 @@ const CLI_LINES = [
   },
 ];
 
-export default function LandingPage() {
+// Server-only base URL for the public billing catalog. Prefer a server-side
+// VORTEX_API_URL (never exposed to the browser bundle), then fall back to the
+// build-time public URL / legacy alias so local dev keeps working. Returns null
+// when nothing is configured so the caller degrades to the empty state.
+function serverApiBaseUrl(): string | null {
+  const configured =
+    process.env.VORTEX_API_URL ??
+    process.env.NEXT_PUBLIC_VORTEX_API_URL ??
+    process.env.NEXT_PUBLIC_VIRO_API_URL ??
+    (process.env.NODE_ENV !== "production" ? "http://localhost:8080" : null);
+  return configured ? configured.replace(/\/+$/, "") : null;
+}
+
+// Fetch the public plan catalog server-side (GET /v1/billing/plans is public).
+// Cached/revalidated every 5 minutes for SEO/perf. Plans always come from the
+// API — never hardcoded (invariant #1). Any failure degrades to an empty list,
+// which renders the empty state instead of a fake catalog (invariant #6).
+async function fetchPlans(): Promise<Plan[]> {
+  const base = serverApiBaseUrl();
+  if (!base) return [];
+  try {
+    const res = await fetch(`${base}/v1/billing/plans`, {
+      next: { revalidate: 300 },
+    });
+    if (!res.ok) return [];
+    const body = (await res.json()) as PlansResponse;
+    return Array.isArray(body.data) ? body.data : [];
+  } catch {
+    return [];
+  }
+}
+
+export default async function LandingPage() {
+  const plans = await fetchPlans();
+
   return (
     <div className="min-h-screen bg-background">
       <MarketingHeader />
@@ -67,7 +102,7 @@ export default function LandingPage() {
           <div className="mx-auto max-w-3xl text-center">
             <div className="mx-auto mb-6 flex w-fit items-center gap-2 rounded-full border border-border bg-card px-3 py-1 text-xs text-muted-foreground">
               <span className="h-1.5 w-1.5 rounded-full bg-success" />
-              Now serving 30+ regions worldwide
+              Now serving regions worldwide
             </div>
             <h1 className="text-balance bg-gradient-to-br from-foreground to-foreground/60 bg-clip-text text-4xl font-bold tracking-tight text-transparent sm:text-6xl">
               Deploy apps close to your users.
@@ -203,7 +238,7 @@ export default function LandingPage() {
           </p>
         </div>
 
-        <PricingPlans />
+        <PricingPlans plans={plans} />
       </Section>
 
       {/* Footer */}
