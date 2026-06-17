@@ -60,15 +60,16 @@ func NewServer(cfg *config.Config, logger *slog.Logger) *Server {
 		)
 	}
 
+	bill := billing.NewService(st, provider)
 	s := &Server{
 		cfg:      cfg,
 		logger:   logger,
 		coolify:  cool,
 		store:    st,
 		tokens:   tokens,
-		identity: identity.NewService(st, tokens),
-		platform: platform.NewService(st, cool),
-		billing:  billing.NewService(st, provider),
+		identity: identity.NewService(st, tokens, cfg.AdminEmails),
+		platform: platform.NewService(st, cool, bill),
+		billing:  bill,
 	}
 	s.router = s.routes()
 	return s
@@ -111,6 +112,26 @@ func (s *Server) routes() chi.Router {
 
 			// Accept an invitation (to an org or a project) as the current user.
 			r.Post("/invitations/accept", s.handleAcceptInvitation)
+
+			// Super-admin: DB-backed business config (plans, templates, settings).
+			r.Route("/admin", func(r chi.Router) {
+				r.Use(s.adminMiddleware)
+
+				r.Get("/overview", s.handleAdminOverview)
+
+				r.Get("/plans", s.handleAdminListPlans)
+				r.Post("/plans", s.handleAdminCreatePlan)
+				r.Patch("/plans/{id}", s.handleAdminUpdatePlan)
+				r.Delete("/plans/{id}", s.handleAdminDeletePlan)
+
+				r.Get("/templates", s.handleAdminListTemplates)
+				r.Post("/templates", s.handleAdminCreateTemplate)
+				r.Patch("/templates/{key}", s.handleAdminUpdateTemplate)
+				r.Delete("/templates/{key}", s.handleAdminDeleteTemplate)
+
+				r.Get("/settings", s.handleAdminGetSettings)
+				r.Patch("/settings", s.handleAdminUpdateSettings)
+			})
 
 			r.Route("/orgs", func(r chi.Router) {
 				r.Get("/", s.handleListOrgs)

@@ -5,13 +5,15 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/billing"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/coolify"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/store"
 )
 
 // newSvc returns a platform service in demo mode (Coolify not configured, no network).
 func newSvc() *Service {
-	return NewService(store.NewMemoryStore(), coolify.NewClient("", ""))
+	st := store.NewMemoryStore()
+	return NewService(st, coolify.NewClient("", ""), billing.NewService(st, nil))
 }
 
 func TestAppLifecycle(t *testing.T) {

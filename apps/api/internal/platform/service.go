@@ -30,28 +30,29 @@ var ErrQuotaExceeded = errors.New("platform: plan quota exceeded")
 // ErrInvalidTemplate is returned when a catalog template key is unknown.
 var ErrInvalidTemplate = errors.New("platform: unknown catalog template")
 
-// Default resource request for a workload when the caller leaves it unset.
-const (
-	defaultCPU      = 0.25
-	defaultMemoryMB = 256
-)
-
-// planLimits returns the resource limits for the org's plan (hobby if none).
+// planLimits returns the resource limits for the org's plan, reading the plan
+// (and its Max* quotas) from the store via the billing service. An org with no
+// subscription falls back to the store's default plan.
 func (s *Service) planLimits(ctx context.Context, orgID string) billing.Limits {
-	planID := "hobby"
+	planID := ""
 	if sub, err := s.store.GetSubscription(ctx, orgID); err == nil && sub != nil {
 		planID = sub.PlanID
 	}
-	return billing.PlanLimits(planID)
+	return s.billing.PlanLimits(ctx, planID)
 }
 
-// normalizeResources applies defaults to a workload's resource request.
-func normalizeResources(cpu float64, memMB int) (float64, int) {
+// normalizeResources applies the platform default CPU/memory (from settings) to
+// a workload's resource request when the caller leaves them unset.
+func (s *Service) normalizeResources(ctx context.Context, cpu float64, memMB int) (float64, int) {
+	defCPU, defMem := 0.25, 256
+	if set, err := s.store.GetSettings(ctx); err == nil && set != nil {
+		defCPU, defMem = set.DefaultCPU, set.DefaultMemoryMB
+	}
 	if cpu <= 0 {
-		cpu = defaultCPU
+		cpu = defCPU
 	}
 	if memMB <= 0 {
-		memMB = defaultMemoryMB
+		memMB = defMem
 	}
 	return cpu, memMB
 }
@@ -92,13 +93,18 @@ func memoryLimitString(memMB int) string { return fmt.Sprintf("%dM", memMB) }
 type Service struct {
 	store   store.Store
 	coolify *coolify.Client
+	billing *billing.Service
 	idgen   func() string
 	now     func() time.Time
 }
 
-// NewService builds a platform service.
-func NewService(s store.Store, c *coolify.Client) *Service {
-	return &Service{store: s, coolify: c, idgen: uuid.NewString, now: time.Now}
+// NewService builds a platform service. The billing service supplies store-backed
+// plan limits for quota enforcement.
+func NewService(s store.Store, c *coolify.Client, b *billing.Service) *Service {
+	if b == nil {
+		b = billing.NewService(s, nil)
+	}
+	return &Service{store: s, coolify: c, billing: b, idgen: uuid.NewString, now: time.Now}
 }
 
 // CreateAppInput describes a new application.
@@ -121,7 +127,7 @@ func (s *Service) CreateApp(ctx context.Context, orgID string, in CreateAppInput
 	if branch == "" {
 		branch = "main"
 	}
-	cpu, memMB := normalizeResources(in.CPU, in.MemoryMB)
+	cpu, memMB := s.normalizeResources(ctx, in.CPU, in.MemoryMB)
 
 	count, err := s.workloadCount(ctx, orgID)
 	if err != nil {

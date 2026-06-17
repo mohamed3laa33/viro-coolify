@@ -43,6 +43,23 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// adminMiddleware requires the authenticated user to be a Viro super-admin.
+// It returns 401 when unauthenticated and 403 when the user is not an admin.
+func (s *Server) adminMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, ok := userFromContext(r.Context())
+		if !ok {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if !user.IsAdmin {
+			writeError(w, http.StatusForbidden, "super-admin access required")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // --- request / response shapes ---
 
 type signupRequest struct {
@@ -61,9 +78,14 @@ type refreshRequest struct {
 }
 
 type userView struct {
-	ID    string `json:"id"`
-	Email string `json:"email"`
-	Name  string `json:"name"`
+	ID      string `json:"id"`
+	Email   string `json:"email"`
+	Name    string `json:"name"`
+	IsAdmin bool   `json:"isAdmin"`
+}
+
+func toUserView(u *domain.User) userView {
+	return userView{ID: u.ID, Email: u.Email, Name: u.Name, IsAdmin: u.IsAdmin}
 }
 
 type authResponse struct {
@@ -74,7 +96,7 @@ type authResponse struct {
 
 func toAuthResponse(res *identity.AuthResult) authResponse {
 	return authResponse{
-		User:         userView{ID: res.User.ID, Email: res.User.Email, Name: res.User.Name},
+		User:         toUserView(res.User),
 		AccessToken:  res.Access,
 		RefreshToken: res.Refresh,
 	}
@@ -151,5 +173,5 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	writeJSON(w, http.StatusOK, userView{ID: user.ID, Email: user.Email, Name: user.Name})
+	writeJSON(w, http.StatusOK, toUserView(user))
 }

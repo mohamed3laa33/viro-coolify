@@ -11,6 +11,7 @@ import { MarketingHeader } from "@/components/marketing-header";
 import { Section } from "@/components/section";
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/logo";
+import { PricingPlans } from "@/components/pricing-plans";
 
 const FEATURES = [
   {
@@ -42,46 +43,6 @@ const CLI_LINES = [
   { prompt: false, text: "✓ Built image in 18.2s" },
   { prompt: false, text: "✓ Deployed v1 across 3 regions" },
   { prompt: false, text: "✓ https://marketing-site.viro.app is live" },
-];
-
-const PLANS = [
-  {
-    name: "Hobby",
-    price: "$0",
-    period: "/mo",
-    blurb: "For side projects and prototypes.",
-    features: ["1 shared-CPU app", "256MB RAM", "Community support"],
-    cta: "Start free",
-    featured: false,
-  },
-  {
-    name: "Launch",
-    price: "$29",
-    period: "/mo",
-    blurb: "For production apps with real traffic.",
-    features: [
-      "Unlimited apps",
-      "Autoscaling machines",
-      "Managed Postgres",
-      "Email support",
-    ],
-    cta: "Start building",
-    featured: true,
-  },
-  {
-    name: "Scale",
-    price: "Custom",
-    period: "",
-    blurb: "For teams running at global scale.",
-    features: [
-      "Dedicated CPUs",
-      "Multi-region failover",
-      "SOC 2 & SSO",
-      "Priority support",
-    ],
-    cta: "Contact sales",
-    featured: false,
-  },
 ];
 
 export default function LandingPage() {
@@ -231,50 +192,7 @@ export default function LandingPage() {
           </p>
         </div>
 
-        <div className="mt-14 grid gap-6 lg:grid-cols-3">
-          {PLANS.map((plan) => (
-            <div
-              key={plan.name}
-              className={
-                plan.featured
-                  ? "relative rounded-2xl border border-primary/50 bg-card p-8 glow-violet"
-                  : "relative rounded-2xl border border-border bg-card p-8"
-              }
-            >
-              {plan.featured && (
-                <span className="absolute right-6 top-6 rounded-full bg-brand-balloon px-2.5 py-0.5 text-xs font-medium text-white">
-                  Popular
-                </span>
-              )}
-              <h3 className="text-lg font-semibold">{plan.name}</h3>
-              <div className="mt-4 flex items-baseline gap-1">
-                <span className="text-4xl font-bold tracking-tight">
-                  {plan.price}
-                </span>
-                <span className="text-sm text-muted-foreground">
-                  {plan.period}
-                </span>
-              </div>
-              <p className="mt-2 text-sm text-muted-foreground">{plan.blurb}</p>
-              <ul className="mt-6 space-y-3 text-sm">
-                {plan.features.map((feat) => (
-                  <li key={feat} className="flex items-center gap-3">
-                    <Check className="h-4 w-4 text-success" />
-                    <span className="text-muted-foreground">{feat}</span>
-                  </li>
-                ))}
-              </ul>
-              <Link href="/signup" className="mt-8 block">
-                <Button
-                  variant={plan.featured ? "primary" : "secondary"}
-                  className="w-full"
-                >
-                  {plan.cta}
-                </Button>
-              </Link>
-            </div>
-          ))}
-        </div>
+        <PricingPlans />
       </Section>
 
       {/* Footer */}

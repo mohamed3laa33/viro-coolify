@@ -25,11 +25,15 @@ type MemoryStore struct {
 	services       map[string]domain.Service           // by id
 	appEnv         map[string]map[string]string        // appID -> key -> value
 	domains        map[string]domain.Domain            // by id
+	plans          map[string]domain.Plan              // by id
+	templates      map[string]domain.ServiceTemplate   // by key
+	settings       domain.PlatformSettings             // singleton
 }
 
-// NewMemoryStore returns an empty in-memory store.
+// NewMemoryStore returns an in-memory store seeded with the default business
+// config (plans, service templates and platform settings).
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{
+	s := &MemoryStore{
 		users:          make(map[string]domain.User),
 		usersByEmail:   make(map[string]string),
 		organizations:  make(map[string]domain.Organization),
@@ -44,6 +48,86 @@ func NewMemoryStore() *MemoryStore {
 		services:       make(map[string]domain.Service),
 		appEnv:         make(map[string]map[string]string),
 		domains:        make(map[string]domain.Domain),
+		plans:          make(map[string]domain.Plan),
+		templates:      make(map[string]domain.ServiceTemplate),
+	}
+	s.seed()
+	return s
+}
+
+// seed populates the default business config when empty. It is idempotent.
+func (s *MemoryStore) seed() {
+	if len(s.plans) == 0 {
+		for _, p := range defaultPlans() {
+			s.plans[p.ID] = p
+		}
+	}
+	if len(s.templates) == 0 {
+		for _, t := range defaultTemplates() {
+			s.templates[t.Key] = t
+		}
+	}
+	if s.settings.DefaultPlanID == "" {
+		s.settings = defaultSettings()
+	}
+}
+
+// defaultPlans returns the seeded billing catalog (prices + per-plan quotas).
+func defaultPlans() []domain.Plan {
+	return []domain.Plan{
+		{
+			ID: "hobby", Name: "Hobby",
+			Description: "For side projects. Shared CPU, 1 app, community support.",
+			PriceCents:  0, Currency: "usd",
+			IncludedHours: 160, OveragePerHourCents: 0,
+			MaxCPU: 0.5, MaxMemoryMB: 512, MaxApps: 3,
+			IsDefault: true, SortOrder: 1, Active: true,
+		},
+		{
+			ID: "launch", Name: "Launch",
+			Description: "For production apps. Dedicated CPU, autoscaling, custom domains.",
+			PriceCents:  2900, Currency: "usd",
+			IncludedHours: 720, OveragePerHourCents: 2,
+			MaxCPU: 1, MaxMemoryMB: 1024, MaxApps: 20,
+			IsDefault: false, SortOrder: 2, Active: true,
+		},
+		{
+			ID: "scale", Name: "Scale",
+			Description: "For scaling teams. Multi-region, higher limits, priority support.",
+			PriceCents:  9900, Currency: "usd",
+			IncludedHours: 2400, OveragePerHourCents: 1,
+			MaxCPU: 2, MaxMemoryMB: 4096, MaxApps: 100,
+			IsDefault: false, SortOrder: 3, Active: true,
+		},
+	}
+}
+
+// defaultTemplates returns the seeded one-click catalog.
+func defaultTemplates() []domain.ServiceTemplate {
+	return []domain.ServiceTemplate{
+		{Key: "wordpress", Name: "WordPress", Description: "The world's most popular CMS.", Category: "CMS", Kind: "service", Active: true, SortOrder: 1},
+		{Key: "ghost", Name: "Ghost", Description: "Modern publishing platform.", Category: "CMS", Kind: "service", Active: true, SortOrder: 2},
+		{Key: "plausible", Name: "Plausible", Description: "Privacy-friendly web analytics.", Category: "Analytics", Kind: "service", Active: true, SortOrder: 3},
+		{Key: "n8n", Name: "n8n", Description: "Workflow automation.", Category: "Automation", Kind: "service", Active: true, SortOrder: 4},
+		{Key: "postgresql", Name: "PostgreSQL", Description: "Relational database.", Category: "Database", Kind: "database", Active: true, SortOrder: 5},
+		{Key: "mysql", Name: "MySQL", Description: "Relational database.", Category: "Database", Kind: "database", Active: true, SortOrder: 6},
+		{Key: "mariadb", Name: "MariaDB", Description: "MySQL-compatible relational database.", Category: "Database", Kind: "database", Active: true, SortOrder: 7},
+		{Key: "mongodb", Name: "MongoDB", Description: "Document database.", Category: "Database", Kind: "database", Active: true, SortOrder: 8},
+		{Key: "redis", Name: "Redis", Description: "In-memory key-value store.", Category: "Database", Kind: "database", Active: true, SortOrder: 9},
+		{Key: "docker-image", Name: "Docker Image", Description: "Deploy any public Docker image.", Category: "App", Kind: "app", Active: true, SortOrder: 10},
+	}
+}
+
+// defaultSettings returns the seeded platform settings.
+func defaultSettings() domain.PlatformSettings {
+	return domain.PlatformSettings{
+		DefaultCPU:             0.25,
+		DefaultMemoryMB:        256,
+		DefaultPlanID:          "hobby",
+		CPUOvercommitFactor:    0.2,
+		MemoryOvercommitFactor: 0.35,
+		DefaultRegion:          "fra1",
+		Regions:                []string{"fra1", "nyc1", "sfo3", "sgp1"},
 	}
 }
 
@@ -74,6 +158,19 @@ func (s *MemoryStore) GetUserByID(_ context.Context, id string) (*domain.User, e
 		return nil, ErrNotFound
 	}
 	return &u, nil
+}
+
+func (s *MemoryStore) UpdateUser(_ context.Context, u *domain.User) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	existing, ok := s.users[u.ID]
+	if !ok {
+		return ErrNotFound
+	}
+	// Email is the stable lookup key; do not allow it to change here.
+	u.Email = existing.Email
+	s.users[u.ID] = *u
+	return nil
 }
 
 func (s *MemoryStore) GetUserByEmail(_ context.Context, email string) (*domain.User, error) {
@@ -479,4 +576,140 @@ func (s *MemoryStore) DeleteDomain(_ context.Context, id string) error {
 	}
 	delete(s.domains, id)
 	return nil
+}
+
+// ---- Plans ----
+
+func (s *MemoryStore) ListPlans(_ context.Context) ([]domain.Plan, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]domain.Plan, 0, len(s.plans))
+	for _, p := range s.plans {
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) GetPlan(_ context.Context, id string) (*domain.Plan, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	p, ok := s.plans[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return &p, nil
+}
+
+func (s *MemoryStore) UpsertPlan(_ context.Context, p *domain.Plan) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.plans[p.ID] = *p
+	return nil
+}
+
+func (s *MemoryStore) DeletePlan(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.plans[id]; !ok {
+		return ErrNotFound
+	}
+	delete(s.plans, id)
+	return nil
+}
+
+// ---- Service templates ----
+
+func (s *MemoryStore) ListServiceTemplates(_ context.Context) ([]domain.ServiceTemplate, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]domain.ServiceTemplate, 0, len(s.templates))
+	for _, t := range s.templates {
+		out = append(out, t)
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) GetServiceTemplate(_ context.Context, key string) (*domain.ServiceTemplate, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	t, ok := s.templates[key]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return &t, nil
+}
+
+func (s *MemoryStore) UpsertServiceTemplate(_ context.Context, t *domain.ServiceTemplate) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.templates[t.Key] = *t
+	return nil
+}
+
+func (s *MemoryStore) DeleteServiceTemplate(_ context.Context, key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.templates[key]; !ok {
+		return ErrNotFound
+	}
+	delete(s.templates, key)
+	return nil
+}
+
+// ---- Platform settings (singleton) ----
+
+func (s *MemoryStore) GetSettings(_ context.Context) (*domain.PlatformSettings, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	settings := s.settings
+	// Return a copy of the Regions slice so callers cannot mutate internal state.
+	settings.Regions = append([]string(nil), s.settings.Regions...)
+	return &settings, nil
+}
+
+func (s *MemoryStore) UpdateSettings(_ context.Context, in *domain.PlatformSettings) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	settings := *in
+	settings.Regions = append([]string(nil), in.Regions...)
+	s.settings = settings
+	return nil
+}
+
+// ---- Admin overview helpers ----
+
+func (s *MemoryStore) ListAllOrgs(_ context.Context) ([]domain.Organization, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]domain.Organization, 0, len(s.organizations))
+	for _, o := range s.organizations {
+		out = append(out, o)
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) CountUsers(_ context.Context) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.users), nil
+}
+
+func (s *MemoryStore) ListAllSubscriptions(_ context.Context) ([]domain.Subscription, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]domain.Subscription, 0, len(s.subscriptions))
+	for _, sub := range s.subscriptions {
+		out = append(out, sub)
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) ListAllUsage(_ context.Context) ([]domain.UsageRecord, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]domain.UsageRecord, 0)
+	for _, recs := range s.usage {
+		out = append(out, recs...)
+	}
+	return out, nil
 }

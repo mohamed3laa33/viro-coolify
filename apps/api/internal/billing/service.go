@@ -29,9 +29,6 @@ func NewService(s store.Store, p PaymentProvider) *Service {
 	return &Service{store: s, provider: p, idgen: uuid.NewString, now: time.Now}
 }
 
-// Catalog returns the available plans.
-func (s *Service) Catalog() []domain.Plan { return Plans }
-
 // ProviderName reports the active payment provider ("mock" or "stripe").
 func (s *Service) ProviderName() string { return s.provider.Name() }
 
@@ -49,7 +46,7 @@ func (s *Service) GetBilling(ctx context.Context, orgID string) (*Summary, error
 	switch {
 	case err == nil:
 		out.Subscription = sub
-		if p, ok := PlanByID(sub.PlanID); ok {
+		if p, ok := s.PlanByID(ctx, sub.PlanID); ok {
 			out.Plan = &p
 		}
 	case errors.Is(err, store.ErrNotFound):
@@ -76,7 +73,7 @@ type SubscribeResult struct {
 
 // Subscribe subscribes an org to a plan via the payment provider.
 func (s *Service) Subscribe(ctx context.Context, orgID, planID, email string) (*SubscribeResult, error) {
-	plan, ok := PlanByID(planID)
+	plan, ok := s.PlanByID(ctx, planID)
 	if !ok {
 		return nil, ErrUnknownPlan
 	}

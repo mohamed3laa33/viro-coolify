@@ -16,6 +16,7 @@ export interface User {
   id: string;
   email: string;
   name: string;
+  isAdmin?: boolean;
 }
 
 export interface AuthResponse {
@@ -67,6 +68,64 @@ export interface Plan {
   currency: string;
   includedHours: number;
   overagePerHourCents: number;
+  // Admin-managed quota/catalog fields. Optional on the public billing
+  // endpoint; always present on the admin endpoints.
+  maxCpu?: number;
+  maxMemoryMb?: number;
+  maxApps?: number;
+  isDefault?: boolean;
+  sortOrder?: number;
+  active?: boolean;
+  stripePriceId?: string;
+}
+
+// The full plan shape returned/edited by the admin API.
+export interface AdminPlan extends Plan {
+  maxCpu: number;
+  maxMemoryMb: number;
+  maxApps: number;
+  isDefault: boolean;
+  sortOrder: number;
+  active: boolean;
+  stripePriceId: string;
+}
+
+// Payload for creating/updating an admin plan. The id is server-assigned on
+// create, so it is omitted from the input.
+export type AdminPlanInput = Omit<AdminPlan, "id">;
+
+export type TemplateKind = "service" | "database" | "app";
+
+export interface Template {
+  key: string;
+  name: string;
+  description: string;
+  category: string;
+  kind: TemplateKind;
+  image: string;
+  defaultPort: number;
+  active: boolean;
+  sortOrder: number;
+}
+
+// On create the key is supplied in the body; on update it is in the path.
+export type TemplateInput = Template;
+
+export interface Settings {
+  defaultCpu: number;
+  defaultMemoryMb: number;
+  defaultPlanId: string;
+  cpuOvercommitFactor: number;
+  memoryOvercommitFactor: number;
+  defaultRegion: string;
+  regions: string[];
+}
+
+export interface AdminOverview {
+  orgCount: number;
+  userCount: number;
+  subscriptionsByPlan: Record<string, number>;
+  usageTotals: Record<string, number>;
 }
 
 export interface Subscription {
@@ -677,6 +736,145 @@ export const api = {
     return request<SubscribeResponse>(`/v1/orgs/${orgId}/billing/subscribe`, {
       method: "POST",
       body: { planId },
+      token,
+      onUnauthorized,
+    });
+  },
+
+  // -------------------------------------------------------------------------
+  // Admin (super-admin token required) — mirrors /v1/admin/*
+  // -------------------------------------------------------------------------
+
+  // Admin: plans
+  listAdminPlans(
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+  ): Promise<ListResponse<AdminPlan>> {
+    return request<ListResponse<AdminPlan>>("/v1/admin/plans", {
+      token,
+      onUnauthorized,
+    });
+  },
+
+  createPlan(
+    input: AdminPlanInput,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+  ): Promise<AdminPlan> {
+    return request<AdminPlan>("/v1/admin/plans", {
+      method: "POST",
+      body: input,
+      token,
+      onUnauthorized,
+    });
+  },
+
+  updatePlan(
+    id: string,
+    input: Partial<AdminPlanInput>,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+  ): Promise<AdminPlan> {
+    return request<AdminPlan>(`/v1/admin/plans/${id}`, {
+      method: "PATCH",
+      body: input,
+      token,
+      onUnauthorized,
+    });
+  },
+
+  deletePlan(
+    id: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+  ): Promise<void> {
+    return request<void>(`/v1/admin/plans/${id}`, {
+      method: "DELETE",
+      token,
+      onUnauthorized,
+    });
+  },
+
+  // Admin: templates (launchable catalog)
+  listTemplates(
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+  ): Promise<ListResponse<Template>> {
+    return request<ListResponse<Template>>("/v1/admin/templates", {
+      token,
+      onUnauthorized,
+    });
+  },
+
+  createTemplate(
+    input: TemplateInput,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+  ): Promise<Template> {
+    return request<Template>("/v1/admin/templates", {
+      method: "POST",
+      body: input,
+      token,
+      onUnauthorized,
+    });
+  },
+
+  updateTemplate(
+    key: string,
+    input: Partial<TemplateInput>,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+  ): Promise<Template> {
+    return request<Template>(`/v1/admin/templates/${encodeURIComponent(key)}`, {
+      method: "PATCH",
+      body: input,
+      token,
+      onUnauthorized,
+    });
+  },
+
+  deleteTemplate(
+    key: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+  ): Promise<void> {
+    return request<void>(`/v1/admin/templates/${encodeURIComponent(key)}`, {
+      method: "DELETE",
+      token,
+      onUnauthorized,
+    });
+  },
+
+  // Admin: platform settings (singleton)
+  getSettings(
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+  ): Promise<Settings> {
+    return request<Settings>("/v1/admin/settings", {
+      token,
+      onUnauthorized,
+    });
+  },
+
+  updateSettings(
+    input: Partial<Settings>,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+  ): Promise<Settings> {
+    return request<Settings>("/v1/admin/settings", {
+      method: "PATCH",
+      body: input,
+      token,
+      onUnauthorized,
+    });
+  },
+
+  // Admin: platform overview
+  getAdminOverview(
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+  ): Promise<AdminOverview> {
+    return request<AdminOverview>("/v1/admin/overview", {
       token,
       onUnauthorized,
     });

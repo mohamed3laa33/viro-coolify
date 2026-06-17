@@ -210,6 +210,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     if (accessToken) {
       void loadOrgs();
+      // Re-fetch the current user so fields like isAdmin stay fresh and are
+      // available immediately after a hard reload.
+      void api
+        .me(accessToken, onUnauthorized)
+        .then((freshUser) => {
+          if (typeof window !== "undefined") {
+            window.localStorage.setItem(USER_KEY, JSON.stringify(freshUser));
+          }
+          setState((prev) => ({ ...prev, user: freshUser }));
+        })
+        .catch(() => {
+          // Offline/unreachable: keep the hydrated user as-is.
+        });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

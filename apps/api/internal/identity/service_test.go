@@ -14,7 +14,7 @@ import (
 func newService() *Service {
 	s := store.NewMemoryStore()
 	tm := auth.NewTokenManager("test-secret", 15*time.Minute, time.Hour)
-	return NewService(s, tm)
+	return NewService(s, tm, nil)
 }
 
 func TestSignupCreatesUserOrgAndOwnerMembership(t *testing.T) {

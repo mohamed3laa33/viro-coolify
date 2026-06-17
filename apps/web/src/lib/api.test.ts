@@ -286,6 +286,153 @@ describe("api client", () => {
   });
 });
 
+describe("admin api client", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  // Plans
+  it("lists admin plans with the bearer token", async () => {
+    const calls = stubFetch({ data: [] });
+    await api.listAdminPlans("admtok");
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/admin/plans`);
+    expect(calls[0].init.method).toBe("GET");
+    const headers = calls[0].init.headers as Record<string, string>;
+    expect(headers.Authorization).toBe("Bearer admtok");
+  });
+
+  it("creates an admin plan via POST with the full body", async () => {
+    const calls = stubFetch({ id: "scale" }, 201);
+    await api.createPlan(
+      {
+        name: "Scale",
+        description: "big",
+        priceCents: 9900,
+        currency: "usd",
+        includedHours: 3000,
+        overagePerHourCents: 1,
+        maxCpu: 8,
+        maxMemoryMb: 8192,
+        maxApps: 100,
+        isDefault: false,
+        sortOrder: 2,
+        active: true,
+        stripePriceId: "price_x",
+      },
+      "tok",
+    );
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/admin/plans`);
+    expect(calls[0].init.method).toBe("POST");
+    const body = JSON.parse(calls[0].init.body as string);
+    expect(body.maxCpu).toBe(8);
+    expect(body.maxMemoryMb).toBe(8192);
+    expect(body.maxApps).toBe(100);
+    expect(body.stripePriceId).toBe("price_x");
+  });
+
+  it("updates an admin plan via PATCH at the id URL", async () => {
+    const calls = stubFetch({ id: "launch" });
+    await api.updatePlan("launch", { priceCents: 3900 }, "tok");
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/admin/plans/launch`);
+    expect(calls[0].init.method).toBe("PATCH");
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({
+      priceCents: 3900,
+    });
+  });
+
+  it("deletes an admin plan via DELETE at the id URL", async () => {
+    const calls = stubFetch({});
+    await api.deletePlan("hobby", "tok");
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/admin/plans/hobby`);
+    expect(calls[0].init.method).toBe("DELETE");
+  });
+
+  // Templates
+  it("lists templates", async () => {
+    const calls = stubFetch({ data: [] });
+    await api.listTemplates("tok");
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/admin/templates`);
+    expect(calls[0].init.method).toBe("GET");
+  });
+
+  it("creates a template via POST", async () => {
+    const calls = stubFetch({ key: "redis" }, 201);
+    await api.createTemplate(
+      {
+        key: "redis",
+        name: "Redis",
+        description: "cache",
+        category: "Databases",
+        kind: "database",
+        image: "redis:7",
+        defaultPort: 6379,
+        active: true,
+        sortOrder: 4,
+      },
+      "tok",
+    );
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/admin/templates`);
+    expect(calls[0].init.method).toBe("POST");
+    expect(JSON.parse(calls[0].init.body as string).key).toBe("redis");
+  });
+
+  it("updates a template via PATCH at the url-encoded key URL", async () => {
+    const calls = stubFetch({ key: "my key" });
+    await api.updateTemplate("my key", { active: false }, "tok");
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/admin/templates/my%20key`);
+    expect(calls[0].init.method).toBe("PATCH");
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({
+      active: false,
+    });
+  });
+
+  it("deletes a template via DELETE at the key URL", async () => {
+    const calls = stubFetch({});
+    await api.deleteTemplate("postgresql", "tok");
+    expect(calls[0].url).toBe(
+      `${API_BASE_URL}/v1/admin/templates/postgresql`,
+    );
+    expect(calls[0].init.method).toBe("DELETE");
+  });
+
+  // Settings
+  it("gets platform settings", async () => {
+    const calls = stubFetch({ regions: [] });
+    await api.getSettings("tok");
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/admin/settings`);
+    expect(calls[0].init.method).toBe("GET");
+  });
+
+  it("updates platform settings via PATCH including overcommit factors", async () => {
+    const calls = stubFetch({ regions: [] });
+    await api.updateSettings(
+      { cpuOvercommitFactor: 0.8, memoryOvercommitFactor: 0.9 },
+      "tok",
+    );
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/admin/settings`);
+    expect(calls[0].init.method).toBe("PATCH");
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({
+      cpuOvercommitFactor: 0.8,
+      memoryOvercommitFactor: 0.9,
+    });
+  });
+
+  // Overview
+  it("fetches the admin overview", async () => {
+    const calls = stubFetch({
+      orgCount: 0,
+      userCount: 0,
+      subscriptionsByPlan: {},
+      usageTotals: {},
+    });
+    await api.getAdminOverview("tok");
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/admin/overview`);
+    const headers = calls[0].init.headers as Record<string, string>;
+    expect(headers.Authorization).toBe("Bearer tok");
+  });
+});
+
 describe("environment", () => {
   beforeEach(() => {
     // no-op; documents that API_BASE_URL is resolved from env at import time.

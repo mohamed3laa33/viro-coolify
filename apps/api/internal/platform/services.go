@@ -3,6 +3,7 @@ package platform
 import (
 	"context"
 	"errors"
+	"sort"
 	"strings"
 
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/catalog"
@@ -11,8 +12,31 @@ import (
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/store"
 )
 
-// ListCatalog returns the one-click services / databases / apps catalog.
-func (s *Service) ListCatalog() []catalog.Template { return catalog.Templates }
+// ListCatalog returns the active one-click templates, sorted by SortOrder, from
+// the store.
+func (s *Service) ListCatalog(ctx context.Context) []domain.ServiceTemplate {
+	tmpls, err := s.store.ListServiceTemplates(ctx)
+	if err != nil {
+		return nil
+	}
+	active := make([]domain.ServiceTemplate, 0, len(tmpls))
+	for _, t := range tmpls {
+		if t.Active {
+			active = append(active, t)
+		}
+	}
+	sort.Slice(active, func(i, j int) bool { return active[i].SortOrder < active[j].SortOrder })
+	return active
+}
+
+// templateByKey looks up a stored template by key.
+func (s *Service) templateByKey(ctx context.Context, key string) (domain.ServiceTemplate, bool) {
+	t, err := s.store.GetServiceTemplate(ctx, key)
+	if err != nil {
+		return domain.ServiceTemplate{}, false
+	}
+	return *t, true
+}
 
 // CreateServiceInput describes a new one-click service.
 type CreateServiceInput struct {
@@ -29,11 +53,11 @@ type CreateServiceInput struct {
 // status "created"; when Coolify is configured it provisions via the call that
 // matches the template's kind (database vs service vs app).
 func (s *Service) CreateService(ctx context.Context, orgID, projectID string, in CreateServiceInput) (*domain.Service, error) {
-	tmpl, ok := catalog.TemplateByKey(in.TemplateKey)
+	tmpl, ok := s.templateByKey(ctx, in.TemplateKey)
 	if !ok {
 		return nil, ErrInvalidTemplate
 	}
-	cpu, memMB := normalizeResources(in.CPU, in.MemoryMB)
+	cpu, memMB := s.normalizeResources(ctx, in.CPU, in.MemoryMB)
 
 	count, err := s.workloadCount(ctx, orgID)
 	if err != nil {
@@ -62,7 +86,7 @@ func (s *Service) CreateService(ctx context.Context, orgID, projectID string, in
 	if s.coolify.Configured() {
 		var uuid string
 		var err error
-		switch tmpl.Kind {
+		switch catalog.Kind(tmpl.Kind) {
 		case catalog.KindDatabase:
 			uuid, err = s.coolify.CreateDatabase(ctx, coolify.CreateDatabaseRequest{
 				Type:        tmpl.Key,
@@ -115,9 +139,9 @@ func (s *Service) ownedService(ctx context.Context, orgID, serviceID string) (*d
 }
 
 // kindOf returns the catalog kind for a service's template (KindService default).
-func kindOf(template string) catalog.Kind {
-	if t, ok := catalog.TemplateByKey(template); ok {
-		return t.Kind
+func (s *Service) kindOf(ctx context.Context, template string) catalog.Kind {
+	if t, ok := s.templateByKey(ctx, template); ok {
+		return catalog.Kind(t.Kind)
 	}
 	return catalog.KindService
 }
@@ -132,7 +156,7 @@ func (s *Service) serviceAction(ctx context.Context, orgID, serviceID, status st
 	}
 	if s.coolify.Configured() && svc.CoolifyUUID != "" {
 		fn := svcFn
-		if kindOf(svc.Template) == catalog.KindDatabase {
+		if s.kindOf(ctx, svc.Template) == catalog.KindDatabase {
 			fn = dbFn
 		}
 		if err := fn(ctx, svc.CoolifyUUID); err != nil {
@@ -168,7 +192,7 @@ func (s *Service) DeleteService(ctx context.Context, orgID, serviceID string) er
 		return err
 	}
 	if s.coolify.Configured() && svc.CoolifyUUID != "" {
-		if kindOf(svc.Template) == catalog.KindDatabase {
+		if s.kindOf(ctx, svc.Template) == catalog.KindDatabase {
 			err = s.coolify.DeleteDatabase(ctx, svc.CoolifyUUID)
 		} else {
 			err = s.coolify.DeleteService(ctx, svc.CoolifyUUID)

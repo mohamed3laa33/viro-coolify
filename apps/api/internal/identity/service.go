@@ -28,16 +28,25 @@ var (
 
 // Service holds identity business logic.
 type Service struct {
-	store  store.Store
-	tokens *auth.TokenManager
-	idgen  func() string
-	now    func() time.Time
+	store       store.Store
+	tokens      *auth.TokenManager
+	adminEmails map[string]bool
+	idgen       func() string
+	now         func() time.Time
 }
 
-// NewService builds an identity service backed by the given store and token manager.
-func NewService(s store.Store, tm *auth.TokenManager) *Service {
-	return &Service{store: s, tokens: tm, idgen: uuid.NewString, now: time.Now}
+// NewService builds an identity service backed by the given store and token
+// manager. adminEmails (normalized) are granted platform-wide super-admin.
+func NewService(s store.Store, tm *auth.TokenManager, adminEmails []string) *Service {
+	admins := make(map[string]bool, len(adminEmails))
+	for _, e := range adminEmails {
+		admins[normalizeEmail(e)] = true
+	}
+	return &Service{store: s, tokens: tm, adminEmails: admins, idgen: uuid.NewString, now: time.Now}
 }
+
+// isAdminEmail reports whether the normalized email is a configured super-admin.
+func (s *Service) isAdminEmail(email string) bool { return s.adminEmails[normalizeEmail(email)] }
 
 // AuthResult is the outcome of a successful authentication.
 type AuthResult struct {
@@ -83,6 +92,7 @@ func (s *Service) Signup(ctx context.Context, email, name, password string) (*Au
 		Email:        email,
 		Name:         name,
 		PasswordHash: hash,
+		IsAdmin:      s.isAdminEmail(email),
 		CreatedAt:    s.now(),
 	}
 	if err := s.store.CreateUser(ctx, user); err != nil {
@@ -122,6 +132,13 @@ func (s *Service) Login(ctx context.Context, email, password string) (*AuthResul
 	}
 	if !auth.CheckPassword(user.PasswordHash, password) {
 		return nil, ErrInvalidCredentials
+	}
+	// Reconcile super-admin status against the current admin list.
+	if want := s.isAdminEmail(user.Email); want != user.IsAdmin {
+		user.IsAdmin = want
+		if err := s.store.UpdateUser(ctx, user); err != nil {
+			return nil, err
+		}
 	}
 	return s.issue(user)
 }

@@ -21,6 +21,7 @@ type Store interface {
 	CreateUser(ctx context.Context, u *domain.User) error
 	GetUserByID(ctx context.Context, id string) (*domain.User, error)
 	GetUserByEmail(ctx context.Context, email string) (*domain.User, error)
+	UpdateUser(ctx context.Context, u *domain.User) error
 
 	// Organizations.
 	CreateOrganization(ctx context.Context, o *domain.Organization) error
@@ -81,4 +82,26 @@ type Store interface {
 	GetSubscription(ctx context.Context, orgID string) (*domain.Subscription, error)
 	AddUsage(ctx context.Context, u *domain.UsageRecord) error
 	ListUsageByOrg(ctx context.Context, orgID string) ([]domain.UsageRecord, error)
+
+	// Plans (billing catalog, super-admin managed).
+	ListPlans(ctx context.Context) ([]domain.Plan, error)
+	GetPlan(ctx context.Context, id string) (*domain.Plan, error)
+	UpsertPlan(ctx context.Context, p *domain.Plan) error
+	DeletePlan(ctx context.Context, id string) error
+
+	// Service templates (one-click catalog, super-admin managed).
+	ListServiceTemplates(ctx context.Context) ([]domain.ServiceTemplate, error)
+	GetServiceTemplate(ctx context.Context, key string) (*domain.ServiceTemplate, error)
+	UpsertServiceTemplate(ctx context.Context, t *domain.ServiceTemplate) error
+	DeleteServiceTemplate(ctx context.Context, key string) error
+
+	// Platform settings (singleton, super-admin managed).
+	GetSettings(ctx context.Context) (*domain.PlatformSettings, error)
+	UpdateSettings(ctx context.Context, s *domain.PlatformSettings) error
+
+	// Admin overview helpers.
+	ListAllOrgs(ctx context.Context) ([]domain.Organization, error)
+	CountUsers(ctx context.Context) (int, error)
+	ListAllSubscriptions(ctx context.Context) ([]domain.Subscription, error)
+	ListAllUsage(ctx context.Context) ([]domain.UsageRecord, error)
 }

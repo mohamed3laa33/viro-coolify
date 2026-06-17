@@ -2,6 +2,8 @@
 // dashboard renders standalone without a running control-plane.
 
 import type {
+  AdminOverview,
+  AdminPlan,
   App,
   AppMetrics,
   BillingResponse,
@@ -13,6 +15,8 @@ import type {
   Org,
   Plan,
   Project,
+  Settings,
+  Template,
   User,
 } from "@/lib/api";
 
@@ -20,6 +24,7 @@ export const mockUser: User = {
   id: "usr_demo",
   email: "you@viro.dev",
   name: "Demo User",
+  isAdmin: true,
 };
 
 export const mockOrgs: Org[] = [
@@ -130,33 +135,57 @@ export const mockDatabases: Database[] = [
   },
 ];
 
-export const mockPlans: Plan[] = [
+// Full (admin-shaped) plans. Public billing reads the same array; the extra
+// admin fields are harmless there. Ids align to hobby/launch/scale so the
+// "current plan" highlighting matches the live API.
+export const mockPlans: AdminPlan[] = [
   {
-    id: "plan_hobby",
+    id: "hobby",
     name: "Hobby",
     description: "For side projects and experiments.",
     priceCents: 0,
     currency: "usd",
     includedHours: 100,
     overagePerHourCents: 2,
+    maxCpu: 1,
+    maxMemoryMb: 256,
+    maxApps: 1,
+    isDefault: true,
+    sortOrder: 0,
+    active: true,
+    stripePriceId: "",
   },
   {
-    id: "plan_launch",
+    id: "launch",
     name: "Launch",
     description: "For production apps and small teams.",
     priceCents: 2900,
     currency: "usd",
     includedHours: 750,
     overagePerHourCents: 2,
+    maxCpu: 2,
+    maxMemoryMb: 2048,
+    maxApps: 10,
+    isDefault: false,
+    sortOrder: 1,
+    active: true,
+    stripePriceId: "price_launch_demo",
   },
   {
-    id: "plan_scale",
+    id: "scale",
     name: "Scale",
     description: "For high-traffic apps with autoscaling.",
     priceCents: 9900,
     currency: "usd",
     includedHours: 3000,
     overagePerHourCents: 1,
+    maxCpu: 8,
+    maxMemoryMb: 8192,
+    maxApps: 100,
+    isDefault: false,
+    sortOrder: 2,
+    active: true,
+    stripePriceId: "price_scale_demo",
   },
 ];
 
@@ -164,7 +193,7 @@ export const mockBilling: BillingResponse = {
   subscription: {
     id: "sub_demo",
     orgId: "org_acme",
-    planId: "plan_launch",
+    planId: "launch",
     status: "active",
     currentPeriodEnd: "2026-06-30T00:00:00Z",
   },
@@ -173,6 +202,112 @@ export const mockBilling: BillingResponse = {
     hoursUsed: 412,
     includedHours: 750,
     overageHours: 0,
+  },
+};
+
+export const mockTemplates: Template[] = [
+  {
+    key: "postgresql",
+    name: "PostgreSQL",
+    description: "Production-ready Postgres with automated backups.",
+    category: "Databases",
+    kind: "database",
+    image: "postgres:16",
+    defaultPort: 5432,
+    active: true,
+    sortOrder: 0,
+  },
+  {
+    key: "mysql",
+    name: "MySQL",
+    description: "Popular relational database.",
+    category: "Databases",
+    kind: "database",
+    image: "mysql:8",
+    defaultPort: 3306,
+    active: true,
+    sortOrder: 1,
+  },
+  {
+    key: "mariadb",
+    name: "MariaDB",
+    description: "Drop-in MySQL replacement.",
+    category: "Databases",
+    kind: "database",
+    image: "mariadb:11",
+    defaultPort: 3306,
+    active: true,
+    sortOrder: 2,
+  },
+  {
+    key: "mongodb",
+    name: "MongoDB",
+    description: "Document database for flexible schemas.",
+    category: "Databases",
+    kind: "database",
+    image: "mongo:7",
+    defaultPort: 27017,
+    active: true,
+    sortOrder: 3,
+  },
+  {
+    key: "redis",
+    name: "Redis",
+    description: "In-memory cache and message broker.",
+    category: "Databases",
+    kind: "database",
+    image: "redis:7",
+    defaultPort: 6379,
+    active: true,
+    sortOrder: 4,
+  },
+  {
+    key: "ghost",
+    name: "Ghost",
+    description: "Modern publishing platform.",
+    category: "Apps",
+    kind: "app",
+    image: "ghost:5",
+    defaultPort: 2368,
+    active: true,
+    sortOrder: 5,
+  },
+  {
+    key: "minio",
+    name: "MinIO",
+    description: "S3-compatible object storage.",
+    category: "Services",
+    kind: "service",
+    image: "minio/minio:latest",
+    defaultPort: 9000,
+    active: false,
+    sortOrder: 6,
+  },
+];
+
+export const mockSettings: Settings = {
+  defaultCpu: 1,
+  defaultMemoryMb: 512,
+  defaultPlanId: "hobby",
+  cpuOvercommitFactor: 0.8,
+  memoryOvercommitFactor: 0.9,
+  defaultRegion: "iad",
+  regions: ["iad", "lhr", "fra", "sin", "syd", "gru"],
+};
+
+export const mockAdminOverview: AdminOverview = {
+  orgCount: 128,
+  userCount: 342,
+  subscriptionsByPlan: {
+    hobby: 74,
+    launch: 41,
+    scale: 13,
+  },
+  usageTotals: {
+    machineHours: 18420,
+    cpuSeconds: 9_640_000,
+    memoryMbHours: 4_210_000,
+    egressGb: 2310,
   },
 };
 

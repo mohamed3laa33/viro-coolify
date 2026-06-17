@@ -33,6 +33,46 @@ func TestMemoryStoreUsers(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreSeededDefaults(t *testing.T) {
+	s := NewMemoryStore()
+	ctx := context.Background()
+
+	plans, err := s.ListPlans(ctx)
+	if err != nil {
+		t.Fatalf("list plans: %v", err)
+	}
+	if len(plans) != 3 {
+		t.Fatalf("expected 3 seeded plans, got %d", len(plans))
+	}
+	hobby, err := s.GetPlan(ctx, "hobby")
+	if err != nil {
+		t.Fatalf("get hobby: %v", err)
+	}
+	if !hobby.IsDefault || !hobby.Active || hobby.MaxCPU != 0.5 || hobby.MaxMemoryMB != 512 || hobby.MaxApps != 3 {
+		t.Fatalf("unexpected hobby plan: %+v", hobby)
+	}
+
+	tmpls, err := s.ListServiceTemplates(ctx)
+	if err != nil {
+		t.Fatalf("list templates: %v", err)
+	}
+	if len(tmpls) != 10 {
+		t.Fatalf("expected 10 seeded templates, got %d", len(tmpls))
+	}
+	wp, err := s.GetServiceTemplate(ctx, "wordpress")
+	if err != nil || wp.Kind != "service" || !wp.Active {
+		t.Fatalf("unexpected wordpress template: %+v err=%v", wp, err)
+	}
+
+	set, err := s.GetSettings(ctx)
+	if err != nil {
+		t.Fatalf("get settings: %v", err)
+	}
+	if set.DefaultPlanID != "hobby" || set.DefaultCPU != 0.25 || set.DefaultMemoryMB != 256 || len(set.Regions) != 4 {
+		t.Fatalf("unexpected settings: %+v", set)
+	}
+}
+
 func TestMemoryStoreMemberships(t *testing.T) {
 	s := NewMemoryStore()
 	ctx := context.Background()

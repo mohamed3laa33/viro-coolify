@@ -14,11 +14,38 @@ import (
 )
 
 func TestPlanByID(t *testing.T) {
-	if _, ok := PlanByID("launch"); !ok {
+	svc := NewService(store.NewMemoryStore(), MockProvider{})
+	ctx := context.Background()
+	if _, ok := svc.PlanByID(ctx, "launch"); !ok {
 		t.Fatal("expected launch plan in catalog")
 	}
-	if _, ok := PlanByID("nope"); ok {
+	if _, ok := svc.PlanByID(ctx, "nope"); ok {
 		t.Fatal("did not expect unknown plan")
+	}
+}
+
+func TestCatalogActiveSorted(t *testing.T) {
+	svc := NewService(store.NewMemoryStore(), MockProvider{})
+	plans := svc.Catalog()
+	if len(plans) != 3 {
+		t.Fatalf("expected 3 active plans, got %d", len(plans))
+	}
+	for i := 1; i < len(plans); i++ {
+		if plans[i-1].SortOrder > plans[i].SortOrder {
+			t.Fatalf("plans not sorted by SortOrder: %+v", plans)
+		}
+	}
+}
+
+func TestPlanLimitsFallsBackToDefault(t *testing.T) {
+	svc := NewService(store.NewMemoryStore(), MockProvider{})
+	ctx := context.Background()
+	if lim := svc.PlanLimits(ctx, "hobby"); lim.MaxCPU != 0.5 || lim.MaxMemoryMB != 512 || lim.MaxApps != 3 {
+		t.Fatalf("hobby limits = %+v", lim)
+	}
+	// Unknown plan falls back to the default (hobby) plan's limits.
+	if lim := svc.PlanLimits(ctx, "nope"); lim.MaxCPU != 0.5 {
+		t.Fatalf("fallback limits = %+v", lim)
 	}
 }
 

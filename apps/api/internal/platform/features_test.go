@@ -61,7 +61,8 @@ func TestCreateAppDefaultsResources(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if app.CPU != defaultCPU || app.MemoryMB != defaultMemoryMB {
+	// Defaults come from seeded platform settings (DefaultCPU 0.25, DefaultMemoryMB 256).
+	if app.CPU != 0.25 || app.MemoryMB != 256 {
 		t.Fatalf("defaults not applied: %+v", app)
 	}
 }

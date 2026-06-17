@@ -1,0 +1,248 @@
+package httpx
+
+import (
+	"errors"
+	"net/http"
+	"strings"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/domain"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/store"
+)
+
+// ---- Plans ----
+
+func (s *Server) handleAdminListPlans(w http.ResponseWriter, r *http.Request) {
+	plans, err := s.store.ListPlans(r.Context())
+	if err != nil {
+		s.logger.Error("admin list plans", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to list plans")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": plans})
+}
+
+func (s *Server) handleAdminCreatePlan(w http.ResponseWriter, r *http.Request) {
+	var p domain.Plan
+	if !decodeJSON(w, r, &p) {
+		return
+	}
+	p.ID = strings.TrimSpace(p.ID)
+	if p.ID == "" {
+		writeError(w, http.StatusBadRequest, "id is required")
+		return
+	}
+	if _, err := s.store.GetPlan(r.Context(), p.ID); err == nil {
+		writeError(w, http.StatusConflict, "plan already exists")
+		return
+	} else if !errors.Is(err, store.ErrNotFound) {
+		s.logger.Error("admin create plan", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to create plan")
+		return
+	}
+	if err := s.store.UpsertPlan(r.Context(), &p); err != nil {
+		s.logger.Error("admin create plan", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to create plan")
+		return
+	}
+	writeJSON(w, http.StatusCreated, p)
+}
+
+func (s *Server) handleAdminUpdatePlan(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	existing, err := s.store.GetPlan(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "plan not found")
+		return
+	}
+	if err != nil {
+		s.logger.Error("admin update plan", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to load plan")
+		return
+	}
+	// Decode the patch onto the existing record (omitted fields are preserved).
+	plan := *existing
+	if !decodeJSON(w, r, &plan) {
+		return
+	}
+	plan.ID = id // id is immutable
+	if err := s.store.UpsertPlan(r.Context(), &plan); err != nil {
+		s.logger.Error("admin update plan", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to update plan")
+		return
+	}
+	writeJSON(w, http.StatusOK, plan)
+}
+
+func (s *Server) handleAdminDeletePlan(w http.ResponseWriter, r *http.Request) {
+	err := s.store.DeletePlan(r.Context(), chi.URLParam(r, "id"))
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "plan not found")
+		return
+	}
+	if err != nil {
+		s.logger.Error("admin delete plan", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to delete plan")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---- Service templates ----
+
+func (s *Server) handleAdminListTemplates(w http.ResponseWriter, r *http.Request) {
+	tmpls, err := s.store.ListServiceTemplates(r.Context())
+	if err != nil {
+		s.logger.Error("admin list templates", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to list templates")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": tmpls})
+}
+
+func (s *Server) handleAdminCreateTemplate(w http.ResponseWriter, r *http.Request) {
+	var t domain.ServiceTemplate
+	if !decodeJSON(w, r, &t) {
+		return
+	}
+	t.Key = strings.TrimSpace(t.Key)
+	if t.Key == "" {
+		writeError(w, http.StatusBadRequest, "key is required")
+		return
+	}
+	if _, err := s.store.GetServiceTemplate(r.Context(), t.Key); err == nil {
+		writeError(w, http.StatusConflict, "template already exists")
+		return
+	} else if !errors.Is(err, store.ErrNotFound) {
+		s.logger.Error("admin create template", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to create template")
+		return
+	}
+	if err := s.store.UpsertServiceTemplate(r.Context(), &t); err != nil {
+		s.logger.Error("admin create template", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to create template")
+		return
+	}
+	writeJSON(w, http.StatusCreated, t)
+}
+
+func (s *Server) handleAdminUpdateTemplate(w http.ResponseWriter, r *http.Request) {
+	key := chi.URLParam(r, "key")
+	existing, err := s.store.GetServiceTemplate(r.Context(), key)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "template not found")
+		return
+	}
+	if err != nil {
+		s.logger.Error("admin update template", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to load template")
+		return
+	}
+	tmpl := *existing
+	if !decodeJSON(w, r, &tmpl) {
+		return
+	}
+	tmpl.Key = key // key is immutable
+	if err := s.store.UpsertServiceTemplate(r.Context(), &tmpl); err != nil {
+		s.logger.Error("admin update template", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to update template")
+		return
+	}
+	writeJSON(w, http.StatusOK, tmpl)
+}
+
+func (s *Server) handleAdminDeleteTemplate(w http.ResponseWriter, r *http.Request) {
+	err := s.store.DeleteServiceTemplate(r.Context(), chi.URLParam(r, "key"))
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "template not found")
+		return
+	}
+	if err != nil {
+		s.logger.Error("admin delete template", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to delete template")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---- Platform settings ----
+
+func (s *Server) handleAdminGetSettings(w http.ResponseWriter, r *http.Request) {
+	set, err := s.store.GetSettings(r.Context())
+	if err != nil {
+		s.logger.Error("admin get settings", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to load settings")
+		return
+	}
+	writeJSON(w, http.StatusOK, set)
+}
+
+func (s *Server) handleAdminUpdateSettings(w http.ResponseWriter, r *http.Request) {
+	existing, err := s.store.GetSettings(r.Context())
+	if err != nil {
+		s.logger.Error("admin update settings", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to load settings")
+		return
+	}
+	set := *existing
+	if !decodeJSON(w, r, &set) {
+		return
+	}
+	if err := s.store.UpdateSettings(r.Context(), &set); err != nil {
+		s.logger.Error("admin update settings", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to update settings")
+		return
+	}
+	writeJSON(w, http.StatusOK, set)
+}
+
+// ---- Overview ----
+
+type adminOverview struct {
+	OrgCount            int              `json:"orgCount"`
+	UserCount           int              `json:"userCount"`
+	SubscriptionsByPlan map[string]int   `json:"subscriptionsByPlan"`
+	UsageTotals         map[string]int64 `json:"usageTotals"`
+}
+
+func (s *Server) handleAdminOverview(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	orgs, err := s.store.ListAllOrgs(ctx)
+	if err != nil {
+		s.logger.Error("admin overview", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to load overview")
+		return
+	}
+	userCount, err := s.store.CountUsers(ctx)
+	if err != nil {
+		s.logger.Error("admin overview", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to load overview")
+		return
+	}
+	subs, err := s.store.ListAllSubscriptions(ctx)
+	if err != nil {
+		s.logger.Error("admin overview", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to load overview")
+		return
+	}
+	usage, err := s.store.ListAllUsage(ctx)
+	if err != nil {
+		s.logger.Error("admin overview", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to load overview")
+		return
+	}
+
+	out := adminOverview{
+		OrgCount:            len(orgs),
+		UserCount:           userCount,
+		SubscriptionsByPlan: map[string]int{},
+		UsageTotals:         map[string]int64{},
+	}
+	for _, sub := range subs {
+		out.SubscriptionsByPlan[sub.PlanID]++
+	}
+	for _, u := range usage {
+		out.UsageTotals[u.Metric] += u.Quantity
+	}
+	writeJSON(w, http.StatusOK, out)
+}

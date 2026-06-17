@@ -34,6 +34,9 @@ type Config struct {
 	BillingEnabled      bool
 
 	CORSAllowedOrigins []string
+
+	// Super-admin: emails (normalized) that are granted platform-wide admin.
+	AdminEmails []string
 }
 
 // Load reads configuration from environment variables, applying development defaults.
@@ -51,6 +54,7 @@ func Load() (*Config, error) {
 		StripeWebhookSecret: getenv("VIRO_STRIPE_WEBHOOK_SECRET", ""),
 		BillingEnabled:      getenvBool("VIRO_BILLING_ENABLED", false),
 		CORSAllowedOrigins:  splitAndTrim(getenv("VIRO_CORS_ORIGINS", "http://localhost:3000")),
+		AdminEmails:         splitAndTrim(strings.ToLower(getenv("VIRO_ADMIN_EMAILS", ""))),
 	}
 	if cfg.IsProduction() && (cfg.JWTSecret == "" || cfg.JWTSecret == defaultDevJWTSecret) {
 		return nil, errors.New("VIRO_JWT_SECRET must be set to a strong value in production")

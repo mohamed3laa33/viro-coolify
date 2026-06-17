@@ -39,6 +39,7 @@ type User struct {
 	Email        string    `json:"email"`
 	Name         string    `json:"name"`
 	PasswordHash string    `json:"-"`
+	IsAdmin      bool      `json:"isAdmin"` // Viro super-admin (platform-wide)
 	CreatedAt    time.Time `json:"createdAt"`
 }
 
@@ -156,15 +157,48 @@ type Database struct {
 }
 
 // Plan is a billing plan in the Viro catalog (fly.io-style usage-based pricing).
+// Plans are stored in the control-plane store and managed via the super-admin API.
 type Plan struct {
-	ID                  string `json:"id"`
-	Name                string `json:"name"`
-	Description         string `json:"description"`
-	PriceCents          int    `json:"priceCents"`    // monthly base price
-	Currency            string `json:"currency"`      // e.g. "usd"
-	IncludedHours       int    `json:"includedHours"` // included compute-hours per month
-	OveragePerHourCents int    `json:"overagePerHourCents"`
-	StripePriceID       string `json:"-"` // mapped to a Stripe price when billing is live
+	ID                  string  `json:"id"`
+	Name                string  `json:"name"`
+	Description         string  `json:"description"`
+	PriceCents          int     `json:"priceCents"`    // monthly base price
+	Currency            string  `json:"currency"`      // e.g. "usd"
+	IncludedHours       int     `json:"includedHours"` // included compute-hours per month
+	OveragePerHourCents int     `json:"overagePerHourCents"`
+	StripePriceID       string  `json:"stripePriceId"` // mapped to a Stripe price when billing is live
+	MaxCPU              float64 `json:"maxCpu"`        // max vCPU per workload
+	MaxMemoryMB         int     `json:"maxMemoryMb"`   // max memory (MB) per workload
+	MaxApps             int     `json:"maxApps"`       // max workloads per org
+	IsDefault           bool    `json:"isDefault"`     // the fallback plan for unknown/empty plans
+	SortOrder           int     `json:"sortOrder"`     // display order in the catalog
+	Active              bool    `json:"active"`        // shown in the public catalog when true
+}
+
+// ServiceTemplate is a one-click catalog entry (service, database or app) stored
+// in the control-plane store and managed via the super-admin API.
+type ServiceTemplate struct {
+	Key         string `json:"key"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Category    string `json:"category"`
+	Kind        string `json:"kind"` // "service" | "database" | "app"
+	Image       string `json:"image,omitempty"`
+	DefaultPort int    `json:"defaultPort,omitempty"`
+	Active      bool   `json:"active"`
+	SortOrder   int    `json:"sortOrder"`
+}
+
+// PlatformSettings holds platform-wide defaults managed via the super-admin API.
+// It is a singleton.
+type PlatformSettings struct {
+	DefaultCPU             float64  `json:"defaultCpu"`
+	DefaultMemoryMB        int      `json:"defaultMemoryMb"`
+	DefaultPlanID          string   `json:"defaultPlanId"`
+	CPUOvercommitFactor    float64  `json:"cpuOvercommitFactor"`
+	MemoryOvercommitFactor float64  `json:"memoryOvercommitFactor"`
+	DefaultRegion          string   `json:"defaultRegion"`
+	Regions                []string `json:"regions"`
 }
 
 // SubscriptionStatus mirrors the lifecycle of a subscription.

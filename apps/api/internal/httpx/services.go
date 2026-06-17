@@ -9,7 +9,7 @@ import (
 
 // handleServiceCatalog returns the one-click catalog. Public endpoint.
 func (s *Server) handleServiceCatalog(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"data": s.platform.ListCatalog()})
+	writeJSON(w, http.StatusOK, map[string]any{"data": s.platform.ListCatalog(r.Context())})
 }
 
 func (s *Server) handleListServices(w http.ResponseWriter, r *http.Request) {

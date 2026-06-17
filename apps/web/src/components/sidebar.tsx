@@ -7,11 +7,17 @@ import {
   Database,
   FolderGit2,
   Globe,
+  LayoutDashboard,
   LineChart,
+  PackageSearch,
   Settings,
+  Shield,
+  SlidersHorizontal,
+  Tags,
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useAuth } from "@/lib/auth";
 import { Logo } from "@/components/logo";
 
 interface NavItem {
@@ -60,8 +66,60 @@ const NAV: NavItem[] = [
   },
 ];
 
+const ADMIN_NAV: NavItem[] = [
+  {
+    label: "Overview",
+    href: "/dashboard/admin",
+    icon: LayoutDashboard,
+    match: (p) => p === "/dashboard/admin",
+  },
+  {
+    label: "Plans",
+    href: "/dashboard/admin/plans",
+    icon: Tags,
+    match: (p) => p.startsWith("/dashboard/admin/plans"),
+  },
+  {
+    label: "Catalog",
+    href: "/dashboard/admin/catalog",
+    icon: PackageSearch,
+    match: (p) => p.startsWith("/dashboard/admin/catalog"),
+  },
+  {
+    label: "Settings",
+    href: "/dashboard/admin/settings",
+    icon: SlidersHorizontal,
+    match: (p) => p.startsWith("/dashboard/admin/settings"),
+  },
+];
+
+function NavLink({ item, pathname }: { item: NavItem; pathname: string }) {
+  const active = item.match(pathname);
+  const Icon = item.icon;
+  return (
+    <Link
+      href={item.href}
+      className={cn(
+        "group flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+        active
+          ? "bg-primary/15 text-foreground"
+          : "text-muted-foreground hover:bg-muted hover:text-foreground",
+      )}
+    >
+      <Icon
+        className={cn(
+          "h-4 w-4 shrink-0",
+          active ? "text-primary" : "text-muted-foreground",
+        )}
+      />
+      {item.label}
+    </Link>
+  );
+}
+
 export function Sidebar() {
   const pathname = usePathname() ?? "";
+  const { user } = useAuth();
 
   return (
     <aside className="hidden w-60 shrink-0 flex-col border-r border-border bg-card md:flex">
@@ -71,31 +129,24 @@ export function Sidebar() {
         </Link>
       </div>
 
-      <nav className="flex-1 space-y-1 p-3">
-        {NAV.map((item) => {
-          const active = item.match(pathname);
-          const Icon = item.icon;
-          return (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={cn(
-                "group flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
-                active
-                  ? "bg-primary/15 text-foreground"
-                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
-              )}
-            >
-              <Icon
-                className={cn(
-                  "h-4 w-4 shrink-0",
-                  active ? "text-primary" : "text-muted-foreground",
-                )}
-              />
-              {item.label}
-            </Link>
-          );
-        })}
+      <nav className="flex-1 space-y-1 overflow-y-auto p-3 scrollbar-thin">
+        {NAV.map((item) => (
+          <NavLink key={item.href} item={item} pathname={pathname} />
+        ))}
+
+        {user?.isAdmin && (
+          <div className="pt-4">
+            <div className="flex items-center gap-2 px-3 pb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              <Shield className="h-3.5 w-3.5" />
+              Admin
+            </div>
+            <div className="space-y-1">
+              {ADMIN_NAV.map((item) => (
+                <NavLink key={item.href} item={item} pathname={pathname} />
+              ))}
+            </div>
+          </div>
+        )}
       </nav>
 
       <div className="border-t border-border p-4">
