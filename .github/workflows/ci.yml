@@ -63,10 +63,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Trivy
-        uses: aquasecurity/setup-trivy@v0.3.1
-        with:
-          version: v0.58.1
-          cache: true
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -sSfL https://github.com/aquasecurity/trivy/releases/download/v0.71.1/trivy_0.71.1_Linux-64bit.tar.gz \
+            | tar -xz -C "$RUNNER_TEMP/bin" trivy
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/bin/trivy" --version
       - name: Trivy — dependency & secret scan
         run: |
           trivy fs --scanners vuln,secret --severity HIGH,CRITICAL --ignore-unfixed \
