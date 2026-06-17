@@ -1,0 +1,89 @@
+# Vortex — full control-plane deployment for Kubernetes (one command).
+#
+# Brings up the platform prerequisites (Gateway API controller, KEDA, cert-manager,
+# metrics-server) and the Vortex control plane (api + web) wired to Postgres.
+#
+#   # 1) one-time raw manifests (Postgres + the shared Gateway):
+#   kubectl apply -f deploy/k8s/postgres.yaml
+#   kubectl apply -f deploy/k8s/gateway.yaml
+#   # 2) install Gateway API CRDs (once):
+#   kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml
+#   # 3) everything else:
+#   helmfile -f deploy/helmfile.yaml apply
+#
+# Config via env vars (see defaults below).
+
+repositories:
+  - name: jetstack
+    url: https://charts.jetstack.io
+  - name: kedacore
+    url: https://kedacore.github.io/charts
+  - name: metrics-server
+    url: https://kubernetes-sigs.github.io/metrics-server/
+
+environments:
+  default:
+    values:
+      - registry: '{{ env "VORTEX_IMAGE_REGISTRY" | default "registry.digitalocean.com/vortex" }}'
+        tag: '{{ env "VORTEX_IMAGE_TAG" | default "latest" }}'
+        baseDomain: '{{ env "VORTEX_BASE_DOMAIN" | default "vortex.v60ai.com" }}'
+        jwtSecret: '{{ requiredEnv "VORTEX_JWT_SECRET" }}'
+        databaseUrl: '{{ env "VORTEX_DATABASE_URL" | default "postgres://vortex:change-me-in-production@vortex-postgres.vortex.svc.cluster.local:5432/vortex?sslmode=disable" }}'
+        adminEmails: '{{ env "VORTEX_ADMIN_EMAILS" | default "" }}'
+        stripeSecretKey: '{{ env "VORTEX_STRIPE_SECRET_KEY" | default "" }}'
+        stripeWebhookSecret: '{{ env "VORTEX_STRIPE_WEBHOOK_SECRET" | default "" }}'
+
+---
+
+releases:
+  # ---- Platform prerequisites (all current, non-deprecated) ----
+  - name: cert-manager
+    namespace: cert-manager
+    chart: jetstack/cert-manager
+    version: v1.16.3
+    set:
+      - name: crds.enabled
+        value: true
+
+  - name: envoy-gateway
+    namespace: envoy-gateway-system
+    chart: oci://docker.io/envoyproxy/gateway-helm
+    version: v1.2.4
+
+  - name: keda
+    namespace: keda
+    chart: kedacore/keda
+    version: 2.16.0
+
+  - name: metrics-server
+    namespace: kube-system
+    chart: metrics-server/metrics-server
+    values:
+      - args:
+          - --kubelet-insecure-tls
+
+  # ---- Vortex control plane (api + web) wired to Postgres ----
+  - name: vortex
+    namespace: vortex
+    createNamespace: true
+    chart: ./helm/viro
+    values:
+      - image:
+          registry: '{{ .Values.registry }}'
+          tag: '{{ .Values.tag }}'
+        api:
+          env:
+            VORTEX_ENV: production
+            VORTEX_HTTP_ADDR: ":8080"
+            VORTEX_ADMIN_EMAILS: '{{ .Values.adminEmails }}'
+            VORTEX_BILLING_ENABLED: '{{ if .Values.stripeSecretKey }}true{{ else }}false{{ end }}'
+        web_public_api_url: 'https://api.{{ .Values.baseDomain }}'
+        ingress:
+          enabled: true
+          apiHost: 'api.{{ .Values.baseDomain }}'
+          webHost: 'app.{{ .Values.baseDomain }}'
+        secrets:
+          jwtSecret: '{{ .Values.jwtSecret }}'
+          databaseUrl: '{{ .Values.databaseUrl }}'
+          stripeSecretKey: '{{ .Values.stripeSecretKey }}'
+          stripeWebhookSecret: '{{ .Values.stripeWebhookSecret }}'

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/config"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/store"
 )
 
 // newAdminTestServer builds a Server whose admin list includes the given emails.
@@ -20,7 +21,7 @@ func newAdminTestServer(t *testing.T, adminEmails ...string) *Server {
 	cfg.CoolifyBaseURL = "http://unused"
 	cfg.CoolifyToken = ""
 	cfg.AdminEmails = adminEmails
-	return NewServer(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return NewServer(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store.NewMemoryStore())
 }
 
 func TestAdminRoutesRequireAdmin(t *testing.T) {

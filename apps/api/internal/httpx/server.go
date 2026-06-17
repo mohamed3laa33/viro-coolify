@@ -36,8 +36,7 @@ type Server struct {
 // The control-plane store defaults to an in-memory implementation (great for
 // local development and tests); a Postgres store satisfies the same interface
 // and is swapped in by configuration.
-func NewServer(cfg *config.Config, logger *slog.Logger) *Server {
-	st := store.NewMemoryStore()
+func NewServer(cfg *config.Config, logger *slog.Logger, st store.Store) *Server {
 	tokens := auth.NewTokenManager(
 		cfg.JWTSecret,
 		time.Duration(cfg.JWTAccessTTL)*time.Minute,

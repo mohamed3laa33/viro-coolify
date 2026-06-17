@@ -13,6 +13,7 @@ import (
 
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/config"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/httpx"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/store"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/version"
 )
 
@@ -26,7 +27,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	srv := httpx.NewServer(cfg, logger)
+	st, err := buildStore(context.Background(), cfg, logger)
+	if err != nil {
+		logger.Error("init store", "err", err)
+		os.Exit(1)
+	}
+
+	srv := httpx.NewServer(cfg, logger, st)
 	httpServer := &http.Server{
 		Addr:         cfg.HTTPAddr,
 		Handler:      srv.Router(),
@@ -54,4 +61,25 @@ func main() {
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		logger.Error("graceful shutdown failed", "err", err)
 	}
+}
+
+// buildStore selects the control-plane store: Postgres when VORTEX_DATABASE_URL is
+// set (migrated + seeded on boot), otherwise the in-memory store for local dev/tests.
+func buildStore(ctx context.Context, cfg *config.Config, logger *slog.Logger) (store.Store, error) {
+	if cfg.DatabaseURL == "" {
+		logger.Info("store: in-memory (set VORTEX_DATABASE_URL for Postgres persistence)")
+		return store.NewMemoryStore(), nil
+	}
+	logger.Info("store: postgres")
+	pg, err := store.NewPostgresStore(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return nil, err
+	}
+	if err := pg.Migrate(ctx); err != nil {
+		return nil, err
+	}
+	if err := pg.Seed(ctx); err != nil {
+		return nil, err
+	}
+	return pg, nil
 }

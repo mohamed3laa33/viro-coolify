@@ -11,6 +11,7 @@ import (
 
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/config"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/domain"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/store"
 )
 
 // newTestServer builds a Server whose Coolify client points at the given upstream URL.
@@ -25,7 +26,7 @@ func newTestServer(t *testing.T, coolifyURL string) *Server {
 	// creation is store-backed and deterministic; Coolify calls are exercised in
 	// the coolify package's own tests.
 	cfg.CoolifyToken = ""
-	return NewServer(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return NewServer(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store.NewMemoryStore())
 }
 
 // signup registers a user and returns their access token (for authenticated requests).
