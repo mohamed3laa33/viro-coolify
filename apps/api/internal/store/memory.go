@@ -118,6 +118,11 @@ func defaultTemplates() []domain.ServiceTemplate {
 	}
 }
 
+// DefaultSettings returns the seeded platform settings (the same defaults used
+// to seed the store). Exposed so boot-time consumers (e.g. the deploy backend)
+// can read the default overcommit factors before any DB read.
+func DefaultSettings() domain.PlatformSettings { return defaultSettings() }
+
 // defaultSettings returns the seeded platform settings.
 func defaultSettings() domain.PlatformSettings {
 	return domain.PlatformSettings{

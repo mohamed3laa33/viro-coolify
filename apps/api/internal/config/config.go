@@ -30,6 +30,13 @@ type Config struct {
 	CoolifyBaseURL string
 	CoolifyToken   string
 
+	// Kubernetes deploy backend (primary runtime).
+	BaseDomain       string // platform apex, e.g. "vortex.v60ai.com"
+	Kubeconfig       string // path to a kubeconfig (empty => in-cluster / default rules)
+	KubeChartPath    string // path to the common-chart used for workload installs
+	GatewayName      string // shared Gateway every per-app HTTPRoute attaches to
+	GatewayNamespace string // namespace of the shared Gateway
+
 	// Billing (Stripe, test-mode by default).
 	StripeSecretKey     string
 	StripeWebhookSecret string
@@ -52,6 +59,11 @@ func Load() (*Config, error) {
 		JWTRefreshTTL:       getenvInt("JWT_REFRESH_TTL_HOURS", 24*30),
 		CoolifyBaseURL:      getenv("COOLIFY_BASE_URL", "http://localhost:8000"),
 		CoolifyToken:        getenv("COOLIFY_TOKEN", ""),
+		BaseDomain:          getenv("BASE_DOMAIN", "vortex.v60ai.com"),
+		Kubeconfig:          getenv("KUBECONFIG", ""),
+		KubeChartPath:       getenv("KUBE_CHART_PATH", "deploy/charts/common-chart"),
+		GatewayName:         getenv("GATEWAY_NAME", "vortex"),
+		GatewayNamespace:    getenv("GATEWAY_NAMESPACE", "vortex"),
 		StripeSecretKey:     getenv("STRIPE_SECRET_KEY", ""),
 		StripeWebhookSecret: getenv("STRIPE_WEBHOOK_SECRET", ""),
 		BillingEnabled:      getenvBool("BILLING_ENABLED", false),

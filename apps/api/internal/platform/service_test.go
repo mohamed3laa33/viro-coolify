@@ -6,14 +6,23 @@ import (
 	"testing"
 
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/billing"
-	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/coolify"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/kube"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/store"
 )
 
-// newSvc returns a platform service in demo mode (Coolify not configured, no network).
+// newSvc returns a platform service backed by an in-memory store and a real
+// in-memory kube test double (FakeBackend) — no network, no demo skip path.
 func newSvc() *Service {
 	st := store.NewMemoryStore()
-	return NewService(st, coolify.NewClient("", ""), billing.NewService(st, nil))
+	return NewService(st, kube.NewFakeBackend(), billing.NewService(st, nil))
+}
+
+// newSvcWithFake is like newSvc but also returns the FakeBackend so tests can
+// assert what was applied to / acted on the deploy backend.
+func newSvcWithFake() (*Service, *kube.FakeBackend) {
+	st := store.NewMemoryStore()
+	fb := kube.NewFakeBackend()
+	return NewService(st, fb, billing.NewService(st, nil)), fb
 }
 
 func TestAppLifecycle(t *testing.T) {
@@ -24,7 +33,7 @@ func TestAppLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if app.OrgID != "org-1" || app.Status != "created" {
+	if app.OrgID != "org-1" || app.Status != "queued" {
 		t.Fatalf("unexpected app: %+v", app)
 	}
 

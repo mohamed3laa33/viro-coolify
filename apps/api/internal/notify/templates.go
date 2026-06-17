@@ -5,7 +5,7 @@ import (
 	htmltemplate "html/template"
 	"io"
 	"strings"
-	texttemplate "text/template"
+	texttemplate "text/template" // nosemgrep: go.lang.security.audit.xss.import-text-template.import-text-template -- plaintext email body, not HTML
 )
 
 // invitationData is the template payload for InvitationEmail.

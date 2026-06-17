@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/config"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/kube"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/store"
 )
 
@@ -21,7 +22,8 @@ func newAdminTestServer(t *testing.T, adminEmails ...string) *Server {
 	cfg.CoolifyBaseURL = "http://unused"
 	cfg.CoolifyToken = ""
 	cfg.AdminEmails = adminEmails
-	return NewServer(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store.NewMemoryStore())
+	return NewServer(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)),
+		store.NewMemoryStore(), WithBackend(kube.NewFakeBackend()))
 }
 
 func TestAdminRoutesRequireAdmin(t *testing.T) {

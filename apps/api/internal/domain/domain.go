@@ -115,7 +115,11 @@ type App struct {
 	CPU           float64   `json:"cpu"`      // requested vCPU
 	MemoryMB      int       `json:"memoryMb"` // requested memory in MB
 	Status        string    `json:"status"`
-	CreatedAt     time.Time `json:"createdAt"`
+	// Kubernetes placement returned by the deploy backend (kube.Backend).
+	Namespace string    `json:"namespace,omitempty"` // per-org-project namespace
+	Release   string    `json:"release,omitempty"`   // Helm release name
+	Host      string    `json:"host,omitempty"`      // generated public hostname
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 // Service is a one-click catalog instance (WordPress, a database, etc.) owned by
@@ -131,7 +135,11 @@ type Service struct {
 	CPU         float64   `json:"cpu"`
 	MemoryMB    int       `json:"memoryMb"`
 	Status      string    `json:"status"`
-	CreatedAt   time.Time `json:"createdAt"`
+	// Kubernetes placement returned by the deploy backend (kube.Backend).
+	Namespace string    `json:"namespace,omitempty"` // per-org-project namespace
+	Release   string    `json:"release,omitempty"`   // Helm release name
+	Host      string    `json:"host,omitempty"`      // generated public hostname
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 // Domain is a custom domain (FQDN) attached to an app.

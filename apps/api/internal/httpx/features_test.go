@@ -80,7 +80,7 @@ func TestServiceCreateAndLifecycle(t *testing.T) {
 		Status string `json:"status"`
 	}
 	_ = json.NewDecoder(rec.Body).Decode(&svc)
-	if svc.ID == "" || svc.Status != "created" {
+	if svc.ID == "" || svc.Status != "deploying" {
 		t.Fatalf("unexpected service: %+v", svc)
 	}
 

@@ -11,9 +11,9 @@ import (
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/auth"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/billing"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/config"
-	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/coolify"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/domain"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/identity"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/kube"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/platform"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/store"
 )
@@ -22,7 +22,7 @@ import (
 type Server struct {
 	cfg      *config.Config
 	logger   *slog.Logger
-	coolify  *coolify.Client
+	backend  kube.Backend
 	store    store.Store
 	tokens   *auth.TokenManager
 	identity *identity.Service
@@ -31,18 +31,43 @@ type Server struct {
 	router   chi.Router
 }
 
+// Option customizes Server construction (used by tests to inject a deploy
+// backend without touching a real cluster).
+type Option func(*serverOptions)
+
+type serverOptions struct {
+	backend kube.Backend
+}
+
+// WithBackend overrides the Kubernetes deploy backend (e.g. kube.FakeBackend in
+// tests). When unset, NewServer builds the backend from config.
+func WithBackend(b kube.Backend) Option {
+	return func(o *serverOptions) { o.backend = b }
+}
+
 // NewServer constructs a Server with its dependencies and routes wired up.
 //
 // The control-plane store defaults to an in-memory implementation (great for
 // local development and tests); a Postgres store satisfies the same interface
 // and is swapped in by configuration.
-func NewServer(cfg *config.Config, logger *slog.Logger, st store.Store) *Server {
+func NewServer(cfg *config.Config, logger *slog.Logger, st store.Store, opts ...Option) *Server {
+	var so serverOptions
+	for _, opt := range opts {
+		opt(&so)
+	}
 	tokens := auth.NewTokenManager(
 		cfg.JWTSecret,
 		time.Duration(cfg.JWTAccessTTL)*time.Minute,
 		time.Duration(cfg.JWTRefreshTTL)*time.Hour,
 	)
-	cool := coolify.NewClient(cfg.CoolifyBaseURL, cfg.CoolifyToken)
+	// Kubernetes deploy backend. Build the real KubeBackend from in-cluster
+	// config / kubeconfig; on failure (e.g. local dev with no cluster) fall back
+	// to the in-memory FakeBackend so the API still boots. The fake is a real
+	// test double — NOT a demo success path that pretends deploys happened.
+	backend := so.backend
+	if backend == nil {
+		backend = newKubeBackend(cfg, logger)
+	}
 
 	// Payment provider: Stripe when billing is enabled and configured, else a mock
 	// that activates subscriptions locally (so the billing UX works in dev).
@@ -63,15 +88,42 @@ func NewServer(cfg *config.Config, logger *slog.Logger, st store.Store) *Server 
 	s := &Server{
 		cfg:      cfg,
 		logger:   logger,
-		coolify:  cool,
+		backend:  backend,
 		store:    st,
 		tokens:   tokens,
 		identity: identity.NewService(st, tokens, cfg.AdminEmails),
-		platform: platform.NewService(st, cool, bill),
+		platform: platform.NewService(st, backend, bill),
 		billing:  bill,
 	}
 	s.router = s.routes()
 	return s
+}
+
+// newKubeBackend builds the Kubernetes deploy backend from config. When the
+// cluster is unreachable (no in-cluster config and no usable kubeconfig), it
+// logs a warning and returns an in-memory FakeBackend so local/dev still boots.
+func newKubeBackend(cfg *config.Config, logger *slog.Logger) kube.Backend {
+	// Overcommit factors are admin/DB-configurable platform settings; seed the
+	// backend with the seeded defaults here. Per-call sites pass the live quota
+	// derived from the org's plan.
+	settings := store.DefaultSettings()
+	kc := kube.Config{
+		BaseDomain:             cfg.BaseDomain,
+		ChartPath:              cfg.KubeChartPath,
+		GatewayName:            cfg.GatewayName,
+		GatewayNamespace:       cfg.GatewayNamespace,
+		CPUOvercommitFactor:    settings.CPUOvercommitFactor,
+		MemoryOvercommitFactor: settings.MemoryOvercommitFactor,
+	}
+	be, err := kube.New(kc, cfg.Kubeconfig, nil)
+	if err != nil {
+		logger.Warn("kube backend unavailable; falling back to in-memory FakeBackend",
+			"err", err)
+		fb := kube.NewFakeBackend()
+		fb.BaseDomain = cfg.BaseDomain
+		return fb
+	}
+	return be
 }
 
 // Router returns the composed HTTP handler.

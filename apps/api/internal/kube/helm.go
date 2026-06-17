@@ -29,6 +29,7 @@ func NewExecHelmRunner(bin string) HelmRunner {
 }
 
 func (r *execHelmRunner) Run(ctx context.Context, args ...string) (string, error) {
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- args built internally, no shell
 	cmd := exec.CommandContext(ctx, r.bin, args...) //nolint:gosec // G204: no shell; args are constructed internally
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

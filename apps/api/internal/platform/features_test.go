@@ -8,6 +8,109 @@ import (
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/domain"
 )
 
+// TestCreateServiceCallsBackend asserts CreateService deploys onto the backend:
+// it ensures the tenant and applies a workload (recorded by the FakeBackend),
+// and persists the returned placement.
+func TestCreateServiceCallsBackend(t *testing.T) {
+	svc, fb := newSvcWithFake()
+	ctx := context.Background()
+
+	s1, err := svc.CreateService(ctx, "org-1", "proj-1", CreateServiceInput{TemplateKey: "wordpress", Name: "blog"})
+	if err != nil {
+		t.Fatalf("create service: %v", err)
+	}
+	// Tenant ensured for the org-project namespace.
+	if _, ok := fb.Tenants[s1.Namespace]; !ok {
+		t.Fatalf("expected tenant ensured for %q; tenants=%v", s1.Namespace, fb.Tenants)
+	}
+	// Workload applied and keyed by namespace/release.
+	k := s1.Namespace + "/" + s1.Release
+	w, ok := fb.Applied[k]
+	if !ok {
+		t.Fatalf("expected workload applied at %q; applied=%v", k, fb.Applied)
+	}
+	if w.Name != "blog" || w.ServiceTemplateKey != "wordpress" {
+		t.Fatalf("unexpected applied workload: %+v", w)
+	}
+	if fb.Hosts[k] != s1.Host {
+		t.Fatalf("persisted host %q != backend host %q", s1.Host, fb.Hosts[k])
+	}
+}
+
+// TestServiceLifecycleCallsBackend asserts Deploy/Stop/Delete drive the backend
+// for a deployed service.
+func TestServiceLifecycleCallsBackend(t *testing.T) {
+	svc, fb := newSvcWithFake()
+	ctx := context.Background()
+
+	s1, err := svc.CreateService(ctx, "org-1", "proj-1", CreateServiceInput{TemplateKey: "ghost"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	k := s1.Namespace + "/" + s1.Release
+
+	if _, err := svc.StopService(ctx, "org-1", s1.ID); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if fb.Replicas[k] != 0 {
+		t.Fatalf("expected 0 replicas after stop, got %d", fb.Replicas[k])
+	}
+	if _, err := svc.DeployService(ctx, "org-1", s1.ID); err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+	if fb.Replicas[k] != 1 {
+		t.Fatalf("expected 1 replica after deploy, got %d", fb.Replicas[k])
+	}
+	if err := svc.DeleteService(ctx, "org-1", s1.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, ok := fb.Applied[k]; ok {
+		t.Fatalf("expected workload removed from backend after delete")
+	}
+}
+
+// TestCreateAppQueuedNoApply asserts CreateApp ensures the tenant but does NOT
+// deploy yet (no image builder wired): status "queued", no Release, nothing
+// applied to the backend.
+func TestCreateAppQueuedNoApply(t *testing.T) {
+	svc, fb := newSvcWithFake()
+	ctx := context.Background()
+
+	app, err := svc.CreateApp(ctx, "org-1", CreateAppInput{Name: "web", ProjectID: "proj-1"})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	if app.Status != "queued" {
+		t.Fatalf("expected status queued, got %q", app.Status)
+	}
+	if app.Release != "" {
+		t.Fatalf("expected no release before build, got %q", app.Release)
+	}
+	if app.Namespace == "" {
+		t.Fatalf("expected tenant namespace recorded on queued app")
+	}
+	if _, ok := fb.Tenants[app.Namespace]; !ok {
+		t.Fatalf("expected tenant ensured for %q", app.Namespace)
+	}
+	if len(fb.Applied) != 0 {
+		t.Fatalf("expected nothing applied for a queued app, got %v", fb.Applied)
+	}
+}
+
+// TestServiceLogsFromBackend asserts logs are read from the backend once a
+// service is deployed. (Apps without a release return empty.)
+func TestServiceLogsFromBackend(t *testing.T) {
+	svc, fb := newSvcWithFake()
+	ctx := context.Background()
+	fb.LogLines = "hello from pod\n"
+
+	// Apps have no release until built, so AppLogs is empty.
+	app, _ := svc.CreateApp(ctx, "org-1", CreateAppInput{Name: "web", ProjectID: "proj-1"})
+	if out, err := svc.AppLogs(ctx, "org-1", app.ID); err != nil || out != "" {
+		t.Fatalf("expected empty app logs before deploy, got %q err=%v", out, err)
+	}
+}
+
 func TestQuotaEnforcementOverCPU(t *testing.T) {
 	svc := newSvc()
 	ctx := context.Background()
@@ -75,8 +178,11 @@ func TestServiceLifecycleAndIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create service: %v", err)
 	}
-	if s1.Status != "created" || s1.Template != "wordpress" {
+	if s1.Status != "deploying" || s1.Template != "wordpress" {
 		t.Fatalf("unexpected service: %+v", s1)
+	}
+	if s1.Release == "" || s1.Namespace == "" || s1.Host == "" {
+		t.Fatalf("expected backend placement to be persisted: %+v", s1)
 	}
 
 	// Database template.

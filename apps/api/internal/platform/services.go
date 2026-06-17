@@ -7,8 +7,8 @@ import (
 	"strings"
 
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/catalog"
-	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/coolify"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/domain"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/kube"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/store"
 )
 
@@ -49,9 +49,10 @@ type CreateServiceInput struct {
 }
 
 // CreateService provisions a one-click catalog instance for the org, validating
-// the template and the org's plan quota. In demo mode it stores a record with
-// status "created"; when Coolify is configured it provisions via the call that
-// matches the template's kind (database vs service vs app).
+// the template and the org's plan quota, then deploying it onto the Kubernetes
+// backend: it ensures the per-org-project tenant namespace/quota and installs
+// the workload as a Helm release. The resulting placement (namespace/release/
+// host) is persisted and the service is marked "deploying".
 func (s *Service) CreateService(ctx context.Context, orgID, projectID string, in CreateServiceInput) (*domain.Service, error) {
 	tmpl, ok := s.templateByKey(ctx, in.TemplateKey)
 	if !ok {
@@ -71,6 +72,34 @@ func (s *Service) CreateService(ctx context.Context, orgID, projectID string, in
 	if name == "" {
 		name = tmpl.Name
 	}
+
+	orgSlug := s.orgSlug(ctx, orgID)
+	projSlug := s.projectSlug(ctx, projectID)
+
+	namespace, err := s.backend.EnsureTenant(ctx, orgSlug, projSlug, s.quotaForOrg(ctx, orgID))
+	if err != nil {
+		return nil, err
+	}
+
+	kind := "service"
+	if catalog.Kind(tmpl.Kind) == catalog.KindDatabase {
+		kind = "database"
+	}
+
+	release, host, err := s.backend.Apply(ctx, kube.Workload{
+		OrgSlug:            orgSlug,
+		ProjectSlug:        projSlug,
+		Name:               name,
+		Kind:               kind,
+		Image:              tmpl.Image,
+		CPU:                cpu,
+		MemoryMB:           memMB,
+		ServiceTemplateKey: tmpl.Key,
+	})
+	if err != nil {
+		return nil, err
+	}
+
 	svc := &domain.Service{
 		ID:        s.idgen(),
 		OrgID:     orgID,
@@ -79,33 +108,11 @@ func (s *Service) CreateService(ctx context.Context, orgID, projectID string, in
 		Name:      name,
 		CPU:       cpu,
 		MemoryMB:  memMB,
-		Status:    "created",
+		Status:    "deploying",
+		Namespace: namespace,
+		Release:   release,
+		Host:      host,
 		CreatedAt: s.now(),
-	}
-
-	if s.coolify.Configured() {
-		var uuid string
-		var err error
-		switch catalog.Kind(tmpl.Kind) {
-		case catalog.KindDatabase:
-			uuid, err = s.coolify.CreateDatabase(ctx, coolify.CreateDatabaseRequest{
-				Type:        tmpl.Key,
-				Name:        name,
-				ProjectUUID: in.ProjectUUID,
-				ServerUUID:  in.ServerUUID,
-			})
-		default: // service & generic app
-			uuid, err = s.coolify.CreateService(ctx, coolify.CreateServiceRequest{
-				Type:        tmpl.Key,
-				Name:        name,
-				ProjectUUID: in.ProjectUUID,
-				ServerUUID:  in.ServerUUID,
-			})
-		}
-		if err != nil {
-			return nil, err
-		}
-		svc.CoolifyUUID = uuid
 	}
 
 	if err := s.store.CreateService(ctx, svc); err != nil {
@@ -138,28 +145,16 @@ func (s *Service) ownedService(ctx context.Context, orgID, serviceID string) (*d
 	return svc, nil
 }
 
-// kindOf returns the catalog kind for a service's template (KindService default).
-func (s *Service) kindOf(ctx context.Context, template string) catalog.Kind {
-	if t, ok := s.templateByKey(ctx, template); ok {
-		return catalog.Kind(t.Kind)
-	}
-	return catalog.KindService
-}
-
-// serviceAction applies a status transition, calling the matching Coolify
-// lifecycle method for the service's kind when configured and provisioned.
+// serviceAction applies a status transition, invoking the backend lifecycle
+// call for the service's release when it has been deployed.
 func (s *Service) serviceAction(ctx context.Context, orgID, serviceID, status string,
-	svcFn, dbFn func(context.Context, string) error) (*domain.Service, error) {
+	fn func(context.Context, string, string) error) (*domain.Service, error) {
 	svc, err := s.ownedService(ctx, orgID, serviceID)
 	if err != nil {
 		return nil, err
 	}
-	if s.coolify.Configured() && svc.CoolifyUUID != "" {
-		fn := svcFn
-		if s.kindOf(ctx, svc.Template) == catalog.KindDatabase {
-			fn = dbFn
-		}
-		if err := fn(ctx, svc.CoolifyUUID); err != nil {
+	if svc.Release != "" {
+		if err := fn(ctx, svc.Namespace, svc.Release); err != nil {
 			return nil, err
 		}
 	}
@@ -170,34 +165,30 @@ func (s *Service) serviceAction(ctx context.Context, orgID, serviceID, status st
 	return svc, nil
 }
 
-// DeployService starts/deploys a service.
+// DeployService (re)starts a service on the backend.
 func (s *Service) DeployService(ctx context.Context, orgID, serviceID string) (*domain.Service, error) {
-	return s.serviceAction(ctx, orgID, serviceID, "deploying", s.coolify.StartService, s.coolify.StartDatabase)
+	return s.serviceAction(ctx, orgID, serviceID, "deploying", s.backend.Start)
 }
 
-// StopService stops a service.
+// StopService scales a service to zero on the backend.
 func (s *Service) StopService(ctx context.Context, orgID, serviceID string) (*domain.Service, error) {
-	return s.serviceAction(ctx, orgID, serviceID, "stopped", s.coolify.StopService, s.coolify.StopDatabase)
+	return s.serviceAction(ctx, orgID, serviceID, "stopped", s.backend.Stop)
 }
 
-// RestartService restarts a service.
+// RestartService triggers a rollout restart of a service on the backend.
 func (s *Service) RestartService(ctx context.Context, orgID, serviceID string) (*domain.Service, error) {
-	return s.serviceAction(ctx, orgID, serviceID, "restarting", s.coolify.RestartService, s.coolify.RestartDatabase)
+	return s.serviceAction(ctx, orgID, serviceID, "restarting", s.backend.Restart)
 }
 
-// DeleteService removes a service from Coolify (when configured) and the store.
+// DeleteService uninstalls a service's release from the backend (when deployed)
+// and removes the store record.
 func (s *Service) DeleteService(ctx context.Context, orgID, serviceID string) error {
 	svc, err := s.ownedService(ctx, orgID, serviceID)
 	if err != nil {
 		return err
 	}
-	if s.coolify.Configured() && svc.CoolifyUUID != "" {
-		if s.kindOf(ctx, svc.Template) == catalog.KindDatabase {
-			err = s.coolify.DeleteDatabase(ctx, svc.CoolifyUUID)
-		} else {
-			err = s.coolify.DeleteService(ctx, svc.CoolifyUUID)
-		}
-		if err != nil {
+	if svc.Release != "" {
+		if err := s.backend.Delete(ctx, svc.Namespace, svc.Release); err != nil {
 			return err
 		}
 	}

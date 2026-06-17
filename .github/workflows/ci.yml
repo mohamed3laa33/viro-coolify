@@ -62,22 +62,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install Trivy
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin v0.58.1
+          trivy --version
       - name: Trivy — dependency & secret scan
-        uses: aquasecurity/trivy-action@0.33.1
-        with:
-          scan-type: fs
-          scanners: vuln,secret
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          exit-code: "1"
-          skip-dirs: _ref-volo,_ref-viro-app,_clone
+        run: |
+          trivy fs --scanners vuln,secret --severity HIGH,CRITICAL --ignore-unfixed \
+            --exit-code 1 --no-progress --skip-dirs _ref-volo,_ref-viro-app,_clone .
       - name: Trivy — IaC/K8s misconfig scan
-        uses: aquasecurity/trivy-action@0.33.1
-        with:
-          scan-type: config
-          severity: HIGH,CRITICAL
-          exit-code: "1"
-          skip-dirs: deploy/charts/common-chart
+        run: |
+          trivy config --severity HIGH,CRITICAL --exit-code 1 --no-progress \
+            --skip-dirs deploy/charts/common-chart .
       - name: Gitleaks — secret scan
         uses: gitleaks/gitleaks-action@v2
         env:

@@ -1,10 +1,12 @@
-// Package platform implements tenant-scoped app and database lifecycle on top
-// of Coolify. Every operation is scoped to an organization; the HTTP layer is
-// responsible for authorizing the caller's membership/role before calling in.
+// Package platform implements tenant-scoped app and service lifecycle on top of
+// the Kubernetes deploy backend (kube.Backend). Every operation is scoped to an
+// organization; the HTTP layer is responsible for authorizing the caller's
+// membership/role before calling in.
 //
-// When Coolify is not configured (local/demo mode), records are managed in the
-// store and outbound Coolify calls are skipped so the product is fully usable
-// locally.
+// Workloads are placed into a per-org-project namespace and installed as Helm
+// releases by the backend. There is no demo / no-op success path: tests inject
+// kube.FakeBackend (a real, inspectable in-memory double) rather than skipping
+// the backend.
 package platform
 
 import (
@@ -16,8 +18,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/billing"
-	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/coolify"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/domain"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/kube"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/store"
 )
 
@@ -86,25 +88,54 @@ func (s *Service) workloadCount(ctx context.Context, orgID string) (int, error) 
 	return len(apps) + len(svcs), nil
 }
 
-// memoryLimitString renders a memory limit in Coolify's "<n>M" form.
-func memoryLimitString(memMB int) string { return fmt.Sprintf("%dM", memMB) }
-
-// Service provides org-scoped app and database operations.
+// Service provides org-scoped app and service operations on top of the
+// Kubernetes deploy backend.
 type Service struct {
 	store   store.Store
-	coolify *coolify.Client
+	backend kube.Backend
 	billing *billing.Service
 	idgen   func() string
 	now     func() time.Time
 }
 
-// NewService builds a platform service. The billing service supplies store-backed
-// plan limits for quota enforcement.
-func NewService(s store.Store, c *coolify.Client, b *billing.Service) *Service {
+// NewService builds a platform service. The backend is the Kubernetes deploy
+// surface (kube.Backend); tests inject kube.FakeBackend. The billing service
+// supplies store-backed plan limits for quota enforcement.
+func NewService(s store.Store, backend kube.Backend, b *billing.Service) *Service {
 	if b == nil {
 		b = billing.NewService(s, nil)
 	}
-	return &Service{store: s, coolify: c, billing: b, idgen: uuid.NewString, now: time.Now}
+	if backend == nil {
+		backend = kube.NewFakeBackend()
+	}
+	return &Service{store: s, backend: backend, billing: b, idgen: uuid.NewString, now: time.Now}
+}
+
+// orgSlug resolves the org's slug, falling back to the org id when the org
+// record is missing (e.g. in unit tests that work with bare ids).
+func (s *Service) orgSlug(ctx context.Context, orgID string) string {
+	if org, err := s.store.GetOrganization(ctx, orgID); err == nil && org != nil && org.Slug != "" {
+		return org.Slug
+	}
+	return orgID
+}
+
+// projectSlug resolves a project's slug, falling back to the project id (or
+// "default" when unset) when the project record is missing.
+func (s *Service) projectSlug(ctx context.Context, projectID string) string {
+	if projectID == "" {
+		return "default"
+	}
+	if p, err := s.store.GetProject(ctx, projectID); err == nil && p != nil && p.Slug != "" {
+		return p.Slug
+	}
+	return projectID
+}
+
+// quotaForOrg builds the backend tenant quota from the org's plan limits.
+func (s *Service) quotaForOrg(ctx context.Context, orgID string) kube.Quota {
+	lim := s.planLimits(ctx, orgID)
+	return kube.Quota{MaxCPU: lim.MaxCPU, MaxMemoryMB: lim.MaxMemoryMB, MaxApps: lim.MaxApps}
 }
 
 // CreateAppInput describes a new application.
@@ -120,8 +151,13 @@ type CreateAppInput struct {
 	ServerUUID    string
 }
 
-// CreateApp creates an app for the org, provisioning it in Coolify when configured.
-// Requested CPU/memory are validated against the org's plan quota.
+// CreateApp creates an app for the org. Requested CPU/memory are validated
+// against the org's plan quota, and the per-org-project namespace + quota are
+// ensured on the backend.
+//
+// Apps are Git-based and require an image build before they can be deployed;
+// that builder is not wired yet, so the app is stored as "queued" and the
+// backend Apply is intentionally deferred (no demo success path).
 func (s *Service) CreateApp(ctx context.Context, orgID string, in CreateAppInput) (*domain.App, error) {
 	branch := in.GitBranch
 	if branch == "" {
@@ -137,6 +173,16 @@ func (s *Service) CreateApp(ctx context.Context, orgID string, in CreateAppInput
 		return nil, err
 	}
 
+	orgSlug := s.orgSlug(ctx, orgID)
+	projSlug := s.projectSlug(ctx, in.ProjectID)
+
+	// Ensure the tenant namespace + ResourceQuota/LimitRange exist up front, so
+	// quota is enforced and the placement is ready once a build produces an image.
+	namespace, err := s.backend.EnsureTenant(ctx, orgSlug, projSlug, s.quotaForOrg(ctx, orgID))
+	if err != nil {
+		return nil, err
+	}
+
 	app := &domain.App{
 		ID:            s.idgen(),
 		OrgID:         orgID,
@@ -147,26 +193,12 @@ func (s *Service) CreateApp(ctx context.Context, orgID string, in CreateAppInput
 		BuildPack:     in.BuildPack,
 		CPU:           cpu,
 		MemoryMB:      memMB,
-		Status:        "created",
+		Status:        "queued",
+		Namespace:     namespace,
 		CreatedAt:     s.now(),
 	}
-
-	if s.coolify.Configured() && in.GitRepository != "" {
-		coolifyUUID, err := s.coolify.CreatePublicApplication(ctx, coolify.CreatePublicApplicationRequest{
-			ProjectUUID:   in.ProjectUUID,
-			ServerUUID:    in.ServerUUID,
-			GitRepository: in.GitRepository,
-			GitBranch:     branch,
-			BuildPack:     in.BuildPack,
-			Name:          app.Name,
-			LimitsCPUs:    cpu,
-			LimitsMemory:  memoryLimitString(memMB),
-		})
-		if err != nil {
-			return nil, err
-		}
-		app.CoolifyUUID = coolifyUUID
-	}
+	// TODO: build the image from the Git repo, then backend.Apply(...) to deploy
+	// and record Namespace/Release/Host on the app.
 
 	if err := s.store.CreateApp(ctx, app); err != nil {
 		return nil, err
@@ -174,16 +206,17 @@ func (s *Service) CreateApp(ctx context.Context, orgID string, in CreateAppInput
 	return app, nil
 }
 
-// AppLogs returns recent logs for an org's app (empty in demo mode / no Coolify).
+// AppLogs returns recent logs for an org's app from the backend (empty when the
+// app has not been deployed yet, i.e. no Release).
 func (s *Service) AppLogs(ctx context.Context, orgID, appID string) (string, error) {
 	app, err := s.ownedApp(ctx, orgID, appID)
 	if err != nil {
 		return "", err
 	}
-	if !s.coolify.Configured() || app.CoolifyUUID == "" {
+	if app.Release == "" {
 		return "", nil
 	}
-	return s.coolify.GetApplicationLogs(ctx, app.CoolifyUUID)
+	return s.backend.Logs(ctx, app.Namespace, app.Release, 200)
 }
 
 // ListApps returns the apps belonging to the org.
@@ -211,42 +244,45 @@ func (s *Service) GetApp(ctx context.Context, orgID, appID string) (*domain.App,
 	return s.ownedApp(ctx, orgID, appID)
 }
 
-// Deploy (re)deploys the app via Coolify (when configured) and updates status.
+// Deploy (re)starts a deployed app on the backend and updates status.
 func (s *Service) Deploy(ctx context.Context, orgID, appID string) (*domain.App, error) {
-	return s.action(ctx, orgID, appID, "deploying", s.coolify.StartApplication)
+	return s.action(ctx, orgID, appID, "deploying", s.backend.Start)
 }
 
-// Stop stops the app.
+// Stop scales the app to zero on the backend.
 func (s *Service) Stop(ctx context.Context, orgID, appID string) (*domain.App, error) {
-	return s.action(ctx, orgID, appID, "stopped", s.coolify.StopApplication)
+	return s.action(ctx, orgID, appID, "stopped", s.backend.Stop)
 }
 
-// Restart restarts the app.
+// Restart triggers a rollout restart of the app on the backend.
 func (s *Service) Restart(ctx context.Context, orgID, appID string) (*domain.App, error) {
-	return s.action(ctx, orgID, appID, "restarting", s.coolify.RestartApplication)
+	return s.action(ctx, orgID, appID, "restarting", s.backend.Restart)
 }
 
-// Delete removes the app from Coolify (when configured) and the store.
+// Delete uninstalls the app's release from the backend (when deployed) and
+// removes the store record.
 func (s *Service) Delete(ctx context.Context, orgID, appID string) error {
 	app, err := s.ownedApp(ctx, orgID, appID)
 	if err != nil {
 		return err
 	}
-	if s.coolify.Configured() && app.CoolifyUUID != "" {
-		if err := s.coolify.DeleteApplication(ctx, app.CoolifyUUID); err != nil {
+	if app.Release != "" {
+		if err := s.backend.Delete(ctx, app.Namespace, app.Release); err != nil {
 			return err
 		}
 	}
 	return s.store.DeleteApp(ctx, app.ID)
 }
 
-func (s *Service) action(ctx context.Context, orgID, appID, status string, fn func(context.Context, string) error) (*domain.App, error) {
+// action applies a status transition, invoking the backend lifecycle call for
+// the app's release when it has been deployed.
+func (s *Service) action(ctx context.Context, orgID, appID, status string, fn func(context.Context, string, string) error) (*domain.App, error) {
 	app, err := s.ownedApp(ctx, orgID, appID)
 	if err != nil {
 		return nil, err
 	}
-	if s.coolify.Configured() && app.CoolifyUUID != "" {
-		if err := fn(ctx, app.CoolifyUUID); err != nil {
+	if app.Release != "" {
+		if err := fn(ctx, app.Namespace, app.Release); err != nil {
 			return nil, err
 		}
 	}

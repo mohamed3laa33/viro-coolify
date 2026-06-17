@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/coolify"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/domain"
 )
 
@@ -34,8 +33,8 @@ func (s *Service) ListEnv(ctx context.Context, orgID, appID string) ([]EnvVar, e
 	return out, nil
 }
 
-// SetEnv sets a single environment variable on an app, syncing to Coolify when
-// configured.
+// SetEnv sets a single environment variable on an app. The value is persisted
+// in the store and applied to the workload on its next deploy.
 func (s *Service) SetEnv(ctx context.Context, orgID, appID, key, value string) (*EnvVar, error) {
 	app, err := s.ownedApp(ctx, orgID, appID)
 	if err != nil {
@@ -44,11 +43,6 @@ func (s *Service) SetEnv(ctx context.Context, orgID, appID, key, value string) (
 	key = strings.TrimSpace(key)
 	if err := s.store.SetAppEnv(ctx, app.ID, key, value); err != nil {
 		return nil, err
-	}
-	if s.coolify.Configured() && app.CoolifyUUID != "" {
-		if err := s.coolify.CreateApplicationEnv(ctx, app.CoolifyUUID, coolify.EnvVar{Key: key, Value: value}); err != nil {
-			return nil, err
-		}
 	}
 	return &EnvVar{Key: key, Value: value}, nil
 }
@@ -71,8 +65,8 @@ func (s *Service) ListDomains(ctx context.Context, orgID, appID string) ([]domai
 	return s.store.ListDomainsByApp(ctx, app.ID)
 }
 
-// AddDomain attaches a custom domain to an app, setting the Coolify fqdn when
-// configured.
+// AddDomain attaches a custom domain to an app. The domain is persisted and
+// wired onto the workload's HTTPRoute on its next deploy.
 func (s *Service) AddDomain(ctx context.Context, orgID, appID, fqdn string) (*domain.Domain, error) {
 	app, err := s.ownedApp(ctx, orgID, appID)
 	if err != nil {
@@ -85,11 +79,6 @@ func (s *Service) AddDomain(ctx context.Context, orgID, appID, fqdn string) (*do
 		Domain:    strings.TrimSpace(fqdn),
 		Verified:  false,
 		CreatedAt: s.now(),
-	}
-	if s.coolify.Configured() && app.CoolifyUUID != "" {
-		if err := s.coolify.SetApplicationFQDN(ctx, app.CoolifyUUID, d.Domain); err != nil {
-			return nil, err
-		}
 	}
 	if err := s.store.CreateDomain(ctx, d); err != nil {
 		return nil, err

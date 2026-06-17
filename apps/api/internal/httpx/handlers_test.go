@@ -11,6 +11,7 @@ import (
 
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/config"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/domain"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/kube"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/store"
 )
 
@@ -22,11 +23,11 @@ func newTestServer(t *testing.T, coolifyURL string) *Server {
 		t.Fatalf("load config: %v", err)
 	}
 	cfg.CoolifyBaseURL = coolifyURL
-	// Control-plane HTTP tests run in demo mode (no Coolify token) so resource
-	// creation is store-backed and deterministic; Coolify calls are exercised in
-	// the coolify package's own tests.
-	cfg.CoolifyToken = ""
-	return NewServer(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store.NewMemoryStore())
+	// Control-plane HTTP tests inject the in-memory FakeBackend (a real test
+	// double for kube.Backend) so resource creation is deterministic and never
+	// touches a real cluster.
+	return NewServer(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)),
+		store.NewMemoryStore(), WithBackend(kube.NewFakeBackend()))
 }
 
 // signup registers a user and returns their access token (for authenticated requests).
@@ -113,7 +114,7 @@ func TestAppLifecycleOrgScoped(t *testing.T) {
 		Status string `json:"status"`
 	}
 	_ = json.NewDecoder(rec.Body).Decode(&app)
-	if app.ID == "" || app.Status != "created" {
+	if app.ID == "" || app.Status != "queued" {
 		t.Fatalf("unexpected app: %+v", app)
 	}
 
