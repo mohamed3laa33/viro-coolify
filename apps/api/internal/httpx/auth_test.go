@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -107,5 +108,92 @@ func TestLoginWrongPassword(t *testing.T) {
 		`{"email":"dan@example.com","password":"nope"}`, "")
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("login wrong password = %d, want 401", rec.Code)
+	}
+}
+
+// TestSignupValidationHTTP asserts the HTTP status contract for signup input.
+func TestSignupValidationHTTP(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want int
+	}{
+		{"valid", `{"email":"ok@example.com","name":"Ok","password":"supersecret"}`, http.StatusCreated},
+		{"weak password", `{"email":"weak@example.com","name":"W","password":"short"}`, http.StatusBadRequest},
+		{"empty password", `{"email":"empty@example.com","name":"E","password":""}`, http.StatusBadRequest},
+		{"invalid email", `{"email":"not-an-email","name":"N","password":"supersecret"}`, http.StatusBadRequest},
+		{"password over 72 bytes", `{"email":"long@example.com","name":"L","password":"` + strings.Repeat("a", 73) + `"}`, http.StatusBadRequest},
+		{"malformed json", `{"email":`, http.StatusBadRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestServer(t, "http://unused")
+			rec := doJSON(t, s, http.MethodPost, "/v1/auth/signup", tc.body, "")
+			if rec.Code != tc.want {
+				t.Fatalf("signup %s = %d, want %d (body: %s)", tc.name, rec.Code, tc.want, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestLoginUnknownUserHTTP asserts login for a non-existent user returns 401
+// (not 404), so user existence is not disclosed.
+func TestLoginUnknownUserHTTP(t *testing.T) {
+	s := newTestServer(t, "http://unused")
+	rec := doJSON(t, s, http.MethodPost, "/v1/auth/login",
+		`{"email":"ghost@example.com","password":"supersecret"}`, "")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("login unknown user = %d, want 401", rec.Code)
+	}
+}
+
+// TestRefreshFlowHTTP covers refresh success and rejection of invalid/non-refresh tokens.
+func TestRefreshFlowHTTP(t *testing.T) {
+	s := newTestServer(t, "http://unused")
+	rec := doJSON(t, s, http.MethodPost, "/v1/auth/signup",
+		`{"email":"refresh@example.com","name":"R","password":"supersecret"}`, "")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("signup = %d", rec.Code)
+	}
+	var a authResponse
+	if err := json.NewDecoder(rec.Body).Decode(&a); err != nil {
+		t.Fatalf("decode signup: %v", err)
+	}
+
+	// Valid refresh token yields a new pair.
+	rec = doJSON(t, s, http.MethodPost, "/v1/auth/refresh",
+		`{"refreshToken":"`+a.RefreshToken+`"}`, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("refresh = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var refreshed authResponse
+	if err := json.NewDecoder(rec.Body).Decode(&refreshed); err != nil {
+		t.Fatalf("decode refresh: %v", err)
+	}
+	if refreshed.AccessToken == "" || refreshed.RefreshToken == "" {
+		t.Fatalf("expected a new token pair, got %+v", refreshed)
+	}
+
+	// An access token must not be accepted as a refresh token -> 401.
+	if rec := doJSON(t, s, http.MethodPost, "/v1/auth/refresh",
+		`{"refreshToken":"`+a.AccessToken+`"}`, ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("access-as-refresh = %d, want 401", rec.Code)
+	}
+
+	// Garbage refresh token -> 401.
+	if rec := doJSON(t, s, http.MethodPost, "/v1/auth/refresh",
+		`{"refreshToken":"not.a.jwt"}`, ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("garbage refresh = %d, want 401", rec.Code)
+	}
+}
+
+// TestMeInvalidTokenHTTP asserts /me rejects malformed and missing bearer tokens.
+func TestMeInvalidTokenHTTP(t *testing.T) {
+	s := newTestServer(t, "http://unused")
+	if rec := doJSON(t, s, http.MethodGet, "/v1/me", "", ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("me missing token = %d, want 401", rec.Code)
+	}
+	if rec := doJSON(t, s, http.MethodGet, "/v1/me", "", "garbage.token.value"); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("me garbage token = %d, want 401", rec.Code)
 	}
 }

@@ -3,6 +3,7 @@ package identity
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -108,5 +109,29 @@ func TestAuthorizeRequiresMembership(t *testing.T) {
 
 	if _, err := svc.Authorize(ctx, outsider.User.ID, orgID, domain.RoleMember); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("expected outsider to be forbidden, got %v", err)
+	}
+}
+
+func TestSignupRejectsInvalidEmail(t *testing.T) {
+	svc := newService()
+	for _, email := range []string{"not-an-email", "no-at-sign.com", "@example.com", ""} {
+		if _, err := svc.Signup(context.Background(), email, "X", "supersecret"); !errors.Is(err, ErrValidation) {
+			t.Fatalf("email %q: expected ErrValidation, got %v", email, err)
+		}
+	}
+}
+
+func TestSignupRejectsEmptyPassword(t *testing.T) {
+	svc := newService()
+	if _, err := svc.Signup(context.Background(), "ep@example.com", "EP", ""); !errors.Is(err, ErrValidation) {
+		t.Fatalf("expected ErrValidation for empty password, got %v", err)
+	}
+}
+
+func TestSignupRejectsPasswordOver72Bytes(t *testing.T) {
+	svc := newService()
+	long := strings.Repeat("a", 73)
+	if _, err := svc.Signup(context.Background(), "lp@example.com", "LP", long); !errors.Is(err, ErrValidation) {
+		t.Fatalf("expected ErrValidation for >72-byte password, got %v", err)
 	}
 }

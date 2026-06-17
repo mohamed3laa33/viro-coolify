@@ -60,3 +60,18 @@ func TestPasswordHashing(t *testing.T) {
 		t.Fatal("expected wrong password to fail")
 	}
 }
+
+// TestVerifyRejectsExpiredRefresh issues a refresh token with a clock pinned to
+// the past, then verifies it under the real clock — it must be rejected.
+func TestVerifyRejectsExpiredRefresh(t *testing.T) {
+	m := NewTokenManager("secret", 15*time.Minute, time.Hour)
+	m.now = func() time.Time { return time.Now().Add(-2 * time.Hour) }
+	tok, err := m.Issue("user-1", RefreshToken)
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+	m.now = time.Now
+	if _, err := m.Verify(tok, RefreshToken); err == nil {
+		t.Fatal("expected expired refresh token to be rejected")
+	}
+}
