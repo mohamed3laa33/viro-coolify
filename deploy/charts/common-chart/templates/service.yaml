@@ -1,0 +1,22 @@
+{{- if .Values.service.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ template "common-chart.fullname" . }}
+  namespace: {{ template "common-chart.namespace" . }}
+  labels:
+    {{- include "common-chart.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  {{- if .Values.service.sessionAffinity }}
+  sessionAffinity: {{ .Values.service.sessionAffinity }}
+  {{- end }}
+  ports:
+{{ toYaml .Values.service.ports | indent 4 }}
+  selector:
+    {{- include "common-chart.selectorLabels" . | nindent 4 }}
+{{- end }}

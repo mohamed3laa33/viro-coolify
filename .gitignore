@@ -57,3 +57,6 @@ reference/
 
 # terraform secrets
 deploy/terraform/terraform.tfvars
+
+# reference: prior viro-app (read-only)
+_ref-viro-app/

@@ -1,0 +1,16 @@
+{{- if and .Values.ingress.enabled .Values.frontendConfig.enabled }}
+apiVersion: networking.gke.io/v1beta1
+kind: FrontendConfig
+metadata:
+  name: {{ .Values.frontendConfig.name | quote }}
+  namespace: {{ template "common-chart.namespace" . }}
+  labels:
+    {{- include "common-chart.labels" . | nindent 4 }}
+spec:
+  redirectToHttps:
+    enabled: {{ .Values.frontendConfig.redirectToHttps | default true }}
+    responseCodeName: {{ .Values.frontendConfig.responseCodeName | default "MOVED_PERMANENTLY_DEFAULT" }}
+  {{- if .Values.frontendConfig.sslPolicy }}
+  sslPolicy: {{ .Values.frontendConfig.sslPolicy }}
+  {{- end }}
+{{- end }}

@@ -1,0 +1,162 @@
+{{- if and .Values.deployment.enabled (not .Values.deployment.stateful) }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ template "common-chart.fullname" . }}
+  namespace: {{ template "common-chart.namespace" . }}
+  labels:
+    {{- include "common-chart.labels" . | nindent 4 }}
+{{- if .Values.deployment.additionalLabels }}
+{{ toYaml .Values.deployment.additionalLabels | indent 4 }}
+{{- end }}
+{{- with .Values.deployment.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+{{- end }}
+spec:
+  strategy:
+    {{- toYaml .Values.deployment.strategySpec | nindent 4 }}
+{{- if and (hasKey .Values.deployment "replicaCount") (not .Values.autoscaling.enabled) }}
+  replicas: {{ .Values.deployment.replicaCount }}
+{{- end }}
+  selector:
+    matchLabels:
+      {{- include "common-chart.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "common-chart.selectorLabels" . | nindent 8 }}
+        {{- if .Values.deployment.podLabels }}
+{{ toYaml .Values.deployment.podLabels | indent 8 }}
+        {{- end }}
+      annotations:
+        # Disabled due to conflicting with Reloader that leads to Deployment double restart
+        # {{- if .Values.config }}
+        # checksum/config: {{ print .Values.config | sha256sum }}
+        # {{- end }}
+        {{- if .Values.deployment.additionalPodAnnotations }}
+{{ toYaml .Values.deployment.additionalPodAnnotations | indent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.deployment.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.serviceAccount.enabled }}
+      {{- if .Values.serviceAccount.name }}
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      {{- else }}
+      serviceAccountName: {{ template "common-chart.name" $ }}
+      {{- end }}
+      {{- end }}
+      {{- if .Values.deployment.terminationGracePeriodSeconds }}
+      terminationGracePeriodSeconds: {{ .Values.deployment.terminationGracePeriodSeconds }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.deployment.podSecurityContext | nindent 8 }}
+      {{- if .Values.deployment.initContainers }}
+      initContainers:
+      {{- range $initContainer := .Values.deployment.initContainers }}
+        - name: {{ $initContainer.name }}
+          image: {{ $initContainer.image }}
+          {{- with $initContainer.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $initContainer.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $initContainer.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $initContainer.volumeMounts }}
+          volumeMounts:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- end }}
+      {{- end }}
+      containers:
+        - name: {{ template "common-chart.fullname" . }}
+          securityContext:
+            {{- toYaml .Values.deployment.containerSecurityContext | nindent 12 }}
+          image: "{{ .Values.deployment.image.repository }}:{{ .Values.deployment.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.deployment.image.pullPolicy }}
+          {{- with .Values.deployment.command }}
+          command: {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.deployment.args }}
+          args: {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+          {{- range .Values.service.ports }}
+            - name: {{ .name }}
+              containerPort: {{ .targetPort }}
+              protocol: {{ .protocol }}
+          {{- end }}
+          {{- with .Values.deployment.lifecycle }}
+          {{- if and .preStop.enabled (hasKey . "preStop") }}
+          lifecycle:
+            preStop:
+              exec:
+                command: {{- toYaml .preStop.command | nindent 16 }}
+          {{- end }}
+          {{- end }}
+          {{- with .Values.deployment.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | trim | nindent 12 }}
+          {{- end }}
+          {{- with .Values.deployment.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | trim | nindent 12 }}
+          {{- end }}
+          {{- with .Values.deployment.startupProbe }}
+          startupProbe:
+            {{- toYaml . | trim | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.deployment.resources | nindent 12 }}
+          env:
+          {{- range $key, $value := .Values.deployment.env }}
+            - name: "{{ $key }}"
+              {{- if eq (typeOf $value) "string" }}
+              value: "{{ $value }}"
+              {{- else }}
+              {{- toYaml $value | nindent 14 }}
+              {{- end }}
+          {{- end }}
+          {{- with .Values.deployment.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            {{- with .Values.deployment.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      {{ if .Values.deployment.topologySpreadConstraints.enabled }}
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            {{- include "common-chart.selectorLabels" . | nindent 12 }}
+      {{- end }}
+      {{- with .Values.deployment.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.deployment.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.deployment.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+      {{- with .Values.deployment.extraVolumes }}
+      {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

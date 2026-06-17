@@ -1,0 +1,123 @@
+{{- if .Values.cronjob.enabled }}
+{{- range $name, $job := .Values.cronjob.jobs }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $name }}
+  namespace: {{ template "common-chart.namespace" $ }}
+  labels:
+  {{- include "common-chart.labels" $ | nindent 4 }}
+{{- if $job.additionalLabels }}
+{{ $job.additionalLabels | indent 4 }}
+{{- end }}
+{{- if $job.annotations }}
+  annotations:
+{{ $job.annotations | indent 4 }}
+{{- end }}
+
+spec:
+  schedule: {{ $job.schedule | quote }}
+{{- if $job.timeZone }}
+  timeZone: {{ $job.timeZone }}
+{{ end }}
+{{- if $job.successfulJobsHistoryLimit }}
+  successfulJobsHistoryLimit: {{ $job.successfulJobsHistoryLimit }}
+{{ end }}
+{{- if $job.concurrencyPolicy }}
+  concurrencyPolicy: {{ $job.concurrencyPolicy }}
+{{ end }}
+{{- if $job.failedJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ $job.failedJobsHistoryLimit }}
+{{ end }}
+  jobTemplate:
+    spec:
+      {{- with $job.activeDeadlineSeconds }}
+      activeDeadlineSeconds: {{ . }}
+      {{- end }}
+      {{- if not (kindIs "invalid" $job.backoffLimit) }}
+      backoffLimit: {{ $job.backoffLimit }}
+      {{- end }}
+      template:
+        metadata:
+          labels:
+          {{- include "common-chart.labels" $ | nindent 12 }}
+          {{- with $job.additionalPodLabels }}
+          {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $job.additionalPodAnnotations }}
+          annotations: {{ toYaml . | nindent 12 }}
+          {{- end }}
+        spec:
+          {{- if $.Values.serviceAccount.name }}
+          serviceAccountName: {{ $.Values.serviceAccount.name }}
+            {{- else }}
+          serviceAccountName: {{ template "common-chart.name" $ }}
+          {{- end }}
+          containers:
+          - name: {{ $name }}
+            {{- $image := required (print "Undefined image repo for container '" $name "'") $job.image.repository }}
+            {{- with $job.image.tag    }} {{- $image = print $image ":" . }} {{- end }}
+            {{- with $job.image.digest }} {{- $image = print $image "@" . }} {{- end }}
+            image: {{ $image }}
+
+            {{- if $job.image.imagePullPolicy }}
+            imagePullPolicy: {{ $job.image.imagePullPolicy }}
+            {{ end }}
+            {{- with $job.env }}
+            env:
+            {{- range $key, $value := $job.env }}
+            - name: {{ include "common-chart.tplvalues.render" ( dict "value" $key "context" $ ) }}
+{{ include "common-chart.tplvalues.render" ( dict "value" $value "context" $ ) | indent 14 }}
+            {{- end }}
+            {{- end }}
+            {{- with $job.envFrom }}
+            envFrom:
+{{ toYaml . | indent 12 }}
+            {{- end }}
+            {{- if $job.command }}
+            command: {{ $job.command }}
+            {{- end }}
+            {{- with $job.args }}
+            args:
+{{ toYaml . | indent 12 }}
+              {{- end }}
+            {{- with $job.resources }}
+            resources:
+{{ toYaml . | indent 14 }}
+            {{- end }}
+            {{- with $job.volumeMounts }}
+            volumeMounts:
+{{ toYaml . | indent 12 }}
+            {{- end }}
+          {{- with $job.nodeSelector }}
+          nodeSelector:
+{{ toYaml . | indent 12 }}
+          {{- end }}
+          {{- with $job.affinity }}
+          affinity:
+{{ toYaml . | indent 12 }}
+          {{- end }}
+          {{- with $job.tolerations }}
+          tolerations: {{ toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $job.topologySpreadConstraints }}
+          topologySpreadConstraints: {{ toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $job.securityContext }}
+          securityContext: {{ toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if $job.restartPolicy}}
+          restartPolicy: {{ $job.restartPolicy }}
+          {{ else }}
+          restartPolicy: OnFailure
+          {{ end }}
+          {{- with $job.imagePullSecrets}}
+          imagePullSecrets:
+{{ toYaml . | indent 12 }}
+          {{ end }}
+          {{- with $job.volumes }}
+          volumes:
+{{ toYaml . | indent 12 }}
+          {{- end }}
+{{- end }}
+{{- end }}

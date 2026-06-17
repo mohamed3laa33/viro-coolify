@@ -1,0 +1,650 @@
+# -- Provide a name in place of node for `app:` labels
+nameOverride: ""
+
+# -- Provide a name to substitute for the full names of resources
+fullnameOverride: ""
+
+# -- Provide a name to substitute for the full names of resources
+namespaceOverride: ""
+
+# -- Additional common labels on resources
+extraLabels: {}
+
+##########################################################
+# Deployment- deployment.yaml
+##########################################################
+deployment:
+  enabled: true
+  stateful: false
+
+  # -- Image to use for the chart
+  image:
+    # -- Image repository
+    repository: nginx
+    # -- Image pull policy
+    pullPolicy: IfNotPresent
+    # -- Image tag
+    tag: "latest"
+
+  # -- Enable Pod Topology Spread Constraints to distribute pods evenly across the nodes
+  topologySpreadConstraints:
+    enabled: true
+
+  # -- Override default container args
+  args: []
+
+  # -- Override default container command
+  command: []
+
+  # -- Deployment strategy specification
+  strategySpec:
+    type: RollingUpdate
+
+  # -- Number of replicas for the pod
+  replicaCount: 1
+
+  # -- Reference to one or more secrets to be used when pulling images
+  # ref: https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/
+  imagePullSecrets: []
+
+  # -- Define init container
+  # ref: https://kubernetes.io/docs/concepts/workloads/pods/init-containers/
+  # initContainers:
+  #   - name: init-container
+  #     image: busybox:1.28
+  #     command: ['sh', '-c', "sleep 30"]
+  #     volumeMounts:
+  #       - name: name
+  #         mountPath: "/path"
+
+  annotations: {}
+
+  # -- Annotations to add to the pod
+  podAnnotations: {}
+
+  # -- SecurityContext holds pod-level security attributes and common container settings.
+  # This defaults to non root user with uid 1000 and gid 1000.
+  # ref: https://kubernetes.io/docs/tasks/configure-pod-container/security-context/
+  podSecurityContext: {}
+    # fsGroup: 1000
+    # runAsNonRoot: true
+    # runAsUser: 1000
+    # runAsGroup: 1000
+  # -- SecurityContext settings for the main container
+  containerSecurityContext: {}
+    # capabilities:
+    #   drop:
+    #   - ALL
+    # readOnlyRootFilesystem: true
+    # runAsNonRoot: true
+    # runAsUser: 1000
+    # runAsGroup: 1000
+
+  # -- Environment variable to add to the pods
+  env: {}
+    # VAR: "value"
+    # VAR2:
+    #   valueFrom:
+    #     secretKeyRef:
+    #       key: my-key
+    #       name: env-secret
+
+  # -- Environment variables from secrets or configmaps to add to the pods
+  envFrom: []
+  #  - configMapRef:
+  #      name: env-configmap
+  #  - secretRef:
+  #      name: env-secret
+
+
+  # -- Additional Pod Spec
+  additionalPodSpec: {}
+
+  # -- Resource limits & requests
+  resources: {}
+    # limits:
+    #   cpu: 100m
+    #   memory: 128Mi
+    # requests:
+    #   cpu: 100m
+    #   memory: 128Mi
+
+  # -- Define which Nodes the Pods are scheduled on.
+  nodeSelector: {}
+
+  # -- Tolerations for use with node taints
+  tolerations: []
+
+  # -- Assign custom affinity rules
+  affinity: {}
+
+  # -- Controller Container liveness probe configuration
+  # ref: https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
+  livenessProbe: {}
+    # failureThreshold: 3
+    # successThreshold: 1
+    # initialDelaySeconds: 0
+    # timeoutSeconds: 1
+    # tcpSocket:
+    #   port: 80
+    # periodSeconds: 10
+
+  # -- Controller Container readiness probe configuration
+  readinessProbe: {}
+    # failureThreshold: 3
+    # successThreshold: 1
+    # initialDelaySeconds: 0
+    # timeoutSeconds: 1
+    # tcpSocket:
+    #   port: 80
+    # periodSeconds: 10
+
+  # -- Controller Container startup probe configuration
+  startupProbe: {}
+    # failureThreshold: 3
+    # successThreshold: 1
+    # initialDelaySeconds: 0
+    # timeoutSeconds: 1
+    # tcpSocket:
+    #   port: 80
+    # periodSeconds: 10
+
+  additionalPodAnnotations: {}
+  # -- Annotations to add to the pod
+
+##########################################################
+# ConfigMap- configmap.yaml
+##########################################################
+config: {}
+
+##########################################################
+# Service- service.yaml
+##########################################################
+service:
+  enabled: true
+  # -- Annotations to add to the Service resource
+  annotations: {}
+  # -- Service type
+  type: ClusterIP
+  # -- Session Affinitiy type
+  sessionAffinity: ""
+  # -- Ports to expose on the service
+  ports:
+    # - name: http
+    #   port: 80
+    #   targetPort: 8080
+    #   protocol: TCP
+    # - name: rpc
+    #   port: 9090
+    #   targetPort: 9090
+    #   protocol: TCP
+
+##########################################################
+# Extra Services - extra-services.yaml
+##########################################################
+# -- List of additional Service resources to create alongside the primary service.
+# Each entry creates a separate Service. Leave empty to skip.
+# Supported keys per entry:
+#   name (required), type, ports (required), selector, annotations, sessionAffinity
+# When selector is omitted, the chart's default selectorLabels are used.
+# NOTE: when adopting a pre-existing in-cluster Service that already carries a
+# different selector (e.g. a Service originally created by Kustomize/Skaffold),
+# always supply `selector` explicitly. Omitting it lets the chart overwrite
+# spec.selector via ServerSideApply, which can momentarily stop routing to
+# legacy pods until new pods carrying chart labels are Ready.
+extraServices: []
+  # - name: my-app-nodeport
+  #   type: NodePort
+  #   annotations: {}
+  #   ports:
+  #     - name: http
+  #       port: 80
+  #       targetPort: 8080
+  #       nodePort: 30080
+  #       protocol: TCP
+  # - name: my-app-apidocs-iap
+  #   type: NodePort
+  #   annotations:
+  #     cloud.google.com/backend-config: '{"default":"my-app-iap-backendconfig"}'
+  #   ports:
+  #     - name: http
+  #       port: 80
+  #       targetPort: 8080
+  #       protocol: TCP
+  # - name: my-app-internal-lb
+  #   type: LoadBalancer
+  #   annotations:
+  #     networking.gke.io/load-balancer-type: "Internal"
+  #   ports:
+  #     - name: http
+  #       port: 80
+  #       targetPort: 8080
+  #       protocol: TCP
+
+##########################################################
+# Additional BackendConfigs
+##########################################################
+# -- List of additional GKE BackendConfig resources, beyond the single
+# `backendConfig` above. Each entry maps to one BackendConfig. Pair an entry
+# with an `extraServices` Service (via its `cloud.google.com/backend-config`
+# annotation) to give a subset of Ingress paths a different policy — e.g. an
+# IAP-exempt backend for webhook paths while the default stays behind IAP.
+# Each entry supports the same keys as `backendConfig`: name (required),
+# annotations, additionalLabels, timeoutSec, connectionDraining,
+# sessionAffinity, cdn, securityPolicy, logging, healthCheck, iap,
+# customRequestHeaders, customResponseHeaders.
+extraBackendConfigs: []
+  # - name: my-app-public
+  #   # IAP omitted entirely => unauthenticated backend
+  #   healthCheck:
+  #     requestPath: /healthz
+  #     type: HTTP
+  #   # Optional Cloud Armor policy for defense-in-depth on the public backend
+  #   securityPolicy:
+  #     name: my-rate-limit-policy
+
+##########################################################
+# Role Based Access Control (RBAC)- serviceaccount.yaml
+##########################################################
+# Service Account to use by pods
+serviceAccount:
+  enabled: false
+  name: ""
+
+  # Additional Labels on service account
+  additionalLabels:
+    # key: value
+
+    # Annotations on service account
+  annotations:
+    # key: value
+
+# Role Based Access Control (RBAC)
+rbac:
+  # -- Enable creation of Role and RoleBinding
+  enabled: false
+
+  # -- Name of the Role (defaults to chart name if not set)
+  roleName: ""
+
+  # -- Name of the RoleBinding (defaults to chart name if not set)
+  roleBindingName: ""
+
+  # -- RBAC rules for the Role
+  rules: []
+    # - apiGroups: [""]
+    #   resources: ["pods"]
+    #   verbs: ["get", "list", "watch"]
+
+  # -- Additional labels for RBAC resources
+  additionalLabels: {}
+
+  # -- Annotations for RBAC resources
+  annotations: {}
+
+# Cluster Role Based Access Control (ClusterRole)
+clusterRole:
+  # -- Enable creation of ClusterRole
+  enabled: false
+
+  # -- Name of the ClusterRole (defaults to chart name if not set)
+  name: ""
+
+  # -- RBAC rules for the ClusterRole
+  rules: []
+    # - apiGroups: ["batch"]
+    #   resources: ["jobs"]
+    #   verbs: ["get", "list", "watch"]
+
+  # -- Additional labels for ClusterRole
+  additionalLabels: {}
+
+  # -- Annotations for ClusterRole
+  annotations: {}
+
+# Cluster Role Binding
+clusterRoleBinding:
+  # -- Enable creation of ClusterRoleBinding
+  enabled: false
+
+  # -- Name of the ClusterRoleBinding (defaults to chart name if not set)
+  name: ""
+
+  # -- Name of the ClusterRole to bind to
+  clusterRoleName: ""
+
+  # -- Additional labels for ClusterRoleBinding
+  additionalLabels: {}
+
+  # -- Annotations for ClusterRoleBinding
+  annotations: {}
+
+
+##########################################################
+# Ingress- ingress.yaml
+##########################################################
+ingress:
+  # -- Enable creation of Ingress
+  enabled: false
+  # -- Ingress class name
+  className: ""
+  # -- Annotations to add to the Ingress
+  annotations: {}
+    # kubernetes.io/ingress.class: nginx
+    # kubernetes.io/tls-acme: "true"
+  # -- Default backend (simple single-service ingress, used by GCE ingress)
+  # If set, rules and tls are ignored
+  # defaultBackend:
+  #   serviceName: my-service  # defaults to fullname if not set
+  #   servicePort: 80
+  # -- A list of hosts for the Ingress (ignored if defaultBackend is set)
+  rules:
+  #  - host: chart-example.local
+  #    http:
+  #      paths:
+  #        - path: /
+  #          pathType: ImplementationSpecific
+  #          # backend:
+  #          #   service:
+  #          #     name: signet-frontend
+  #          #     port:
+  #          #       name: http
+  # -- Ingress TLS configuration (ignored if defaultBackend is set)
+  tls:
+  # -- Secrets to use for TLS configuration
+#  - secretName: chart-example-tls
+#    # -- A list of hosts for the Ingress with TLS enabled
+#    hosts:
+#      - chart-example.local
+
+##########################################################
+# Gateway API - httproute.yaml
+##########################################################
+# Gateway API HTTPRoute for GKE
+# ref: https://cloud.google.com/kubernetes-engine/docs/concepts/gateway-api
+# ref: https://gateway-api.sigs.k8s.io/
+gateway:
+  # -- Enable creation of HTTPRoute
+  enabled: false
+  # -- Annotations to add to the HTTPRoute
+  annotations: {}
+  # -- Additional labels for HTTPRoute
+  additionalLabels: {}
+  # -- Parent Gateway references
+  # For GKE, the Gateway should be created separately (cluster-wide or per-namespace)
+  # Common GKE Gateway classes:
+  #   - gke-l7-global-external-managed (Global external Application Load Balancer)
+  #   - gke-l7-regional-external-managed (Regional external Application Load Balancer)
+  #   - gke-l7-rilb (Regional internal Application Load Balancer)
+  #   - gke-l7-gxlb (Classic Global external Application Load Balancer)
+  parentRefs: []
+  #  - name: my-gateway
+  #    namespace: default
+  #    sectionName: https  # optional: specific listener on the gateway
+  # -- Hostnames to match for this route
+  hostnames: []
+  #  - "example.com"
+  #  - "*.example.com"
+  # -- Backend service port (used in default rule if rules not specified)
+  backendPort: 80
+  # -- HTTPRoute rules (if not specified, a default rule routing to the service is created)
+  # ref: https://gateway-api.sigs.k8s.io/reference/spec/#gateway.networking.k8s.io/v1.HTTPRouteRule
+  rules: []
+  #  - matches:
+  #      - path:
+  #          type: PathPrefix
+  #          value: /api
+  #      - headers:
+  #          - name: version
+  #            value: v2
+  #    backendRefs:
+  #      - name: my-service
+  #        port: 80
+  #        weight: 100
+  #    filters:
+  #      - type: RequestHeaderModifier
+  #        requestHeaderModifier:
+  #          add:
+  #            - name: X-Custom-Header
+  #              value: custom-value
+
+##########################################################
+# GKE BackendConfig - backendconfig.yaml
+##########################################################
+# GKE BackendConfig for advanced load balancer configuration
+# ref: https://cloud.google.com/kubernetes-engine/docs/how-to/ingress-features
+backendConfig:
+  # -- Enable creation of BackendConfig
+  enabled: false
+  # -- Name override for BackendConfig (defaults to fullname)
+  name: ""
+  # -- Annotations to add to the BackendConfig
+  annotations: {}
+  # -- Additional labels for BackendConfig
+  additionalLabels: {}
+  # -- Backend timeout in seconds
+  # timeoutSec: 30
+  # -- Connection draining configuration
+  # connectionDraining:
+  #   drainingTimeoutSec: 60
+  # -- Session affinity configuration
+  # sessionAffinity:
+  #   affinityType: "GENERATED_COOKIE"
+  #   affinityCookieTtlSec: 50
+  # -- CDN configuration
+  # cdn:
+  #   enabled: true
+  #   cachePolicy:
+  #     includeHost: true
+  #     includeProtocol: true
+  #     includeQueryString: true
+  # -- Cloud Armor security policy
+  # securityPolicy:
+  #   name: "my-security-policy"
+  # -- Logging configuration
+  # logging:
+  #   enable: true
+  #   sampleRate: 0.5
+  # -- Health check configuration
+  # healthCheck:
+  #   checkIntervalSec: 15
+  #   timeoutSec: 15
+  #   healthyThreshold: 1
+  #   unhealthyThreshold: 2
+  #   type: HTTP
+  #   requestPath: /health
+  #   port: 8080
+  # -- Identity-Aware Proxy (IAP) configuration
+  # iap:
+  #   enabled: true
+  #   oauthclientCredentials:
+  #     secretName: my-iap-secret
+  # -- Custom request headers
+  # customRequestHeaders:
+  #   headers:
+  #     - "X-Custom-Header: value"
+  # -- Custom response headers
+  # customResponseHeaders:
+  #   headers:
+  #     - "X-Custom-Response: value"
+
+##########################################################
+# PodDisruptionBudget- pdb.yaml
+##########################################################
+# -- See `kubectl explain poddisruptionbudget.spec` for more
+# ref: https://kubernetes.io/docs/tasks/run-application/configure-pdb/
+podDisruptionBudget: {}
+  # minAvailable: 1
+  # maxUnavailable: 1
+
+##########################################################
+# HPA- hpa.yaml
+##########################################################
+# ref: https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/
+autoscaling:
+  enabled: false
+  # -- Minimum number of pods
+  minReplicas: 1
+  # -- Maximum number of pods
+  maxReplicas: 30
+  # -- Target CPU utilization percentage
+  targetCPUUtilizationPercentage: 80
+  # targetMemoryUtilizationPercentage: 80
+
+##########################################################
+# KEDA autoscaling - keda-scaledobject.yaml
+# Event-driven autoscaling (preferred over plain HPA for Viro workloads).
+# Use cpu/memory triggers for steady workloads; use an external trigger
+# (http via the KEDA HTTP add-on, kafka, prometheus, cron, ...) to enable
+# scale-to-zero of idle tenant workloads (set minReplicaCount: 0).
+# Do NOT enable both autoscaling.enabled and keda.enabled at once.
+##########################################################
+keda:
+  # -- Enable a KEDA ScaledObject for this workload
+  enabled: false
+  # -- Kind of the scale target (Deployment or StatefulSet)
+  scaleTargetKind: Deployment
+  # -- Minimum replicas. Set 0 for scale-to-zero (requires an external trigger).
+  minReplicaCount: 1
+  # -- Maximum replicas
+  maxReplicaCount: 5
+  # -- Replicas while idle (scaled-to-zero); null to disable
+  idleReplicaCount: null
+  # -- How often (s) KEDA evaluates triggers
+  pollingInterval: 30
+  # -- Wait (s) after the last trigger before scaling down
+  cooldownPeriod: 300
+  # -- Annotations on the ScaledObject (e.g. autoscaling.keda.sh/paused)
+  annotations: {}
+  # -- Advanced scaling behaviour (HPA scaling policies, etc.)
+  advanced: {}
+  # -- Scaling triggers. Default: CPU utilization. Override per workload.
+  triggers:
+    - type: cpu
+      metricType: Utilization
+      metadata:
+        value: "80"
+
+##########################################################
+# Service Monitor- servicemonitor.yaml
+##########################################################
+# -- If enabled, create service monitor of Prometheus-Operator
+# ref: https://github.com/prometheus-operator/prometheus-operator/blob/main/Documentation/user-guides/getting-started.md#include-servicemonitors
+serviceMonitor:
+  # -- Enables Service Monitor
+  enabled: false
+  # -- Annotations to assign to the ServiceMonitor
+  annotations: {}
+  # -- List of endpoints of service which Prometheus scrapes
+  endpoints:
+  - path: /internal/metrics
+    port: http
+    interval: 1m
+    scheme: http
+    scrapeTimeout: 30s
+    honorLabels: true
+
+  # -- Propagate certain service labels to Prometheus.
+  targetLabels: []
+
+##########################################################
+# Cron Job- cronjob.yaml
+##########################################################
+cronjob:
+  enabled: false
+  jobs:
+
+##########################################################
+# Secrets- secrets.yaml
+##########################################################
+# -- Creates a secret resource
+# The value must be base64 encoded
+secrets: {}
+# admin: <base64-encoded>
+# https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/
+privateRegistry: {}
+#  dockerconfigjson: <base64-encoded>
+
+
+##########################################################
+# External Secrets
+##########################################################
+externalSecret:
+  enabled: false
+
+  # Default SecretStore for all externalsecrets defines which SecretStore to use when fetching the secret data
+  secretStore:
+    name: example-secret-store
+    # kind: ClusterSecretStore # Defaults to SecretStore if not specified
+  # RefreshInterval is the amount of time before the values reading again from the SecretStore provider
+  refreshInterval: "10s"
+  files:
+
+##########################################################
+# PersistentVolumeClaim - pvc.yaml
+##########################################################
+persistence:
+  # -- Enable creation of PVC
+  enabled: false
+  # -- Use existing PVC instead of creating one
+  # existingClaim: my-existing-pvc
+  # -- Name override for PVC (defaults to <fullname>-pvc)
+  # name: custom-pvc-name
+  # -- Storage class name
+  storageClassName: standard-rwo
+  # -- Access modes
+  accessModes:
+    - ReadWriteOnce
+  # -- Storage size
+  size: 10Gi
+  # -- Annotations for PVC
+  annotations: {}
+  # -- Additional labels for PVC
+  additionalLabels: {}
+  # -- Bind to specific PV
+  # volumeName: my-pv
+
+##########################################################
+# VPA- vpa.yaml
+##########################################################
+# ref: https://github.com/kubernetes/autoscaler/blob/master/vertical-pod-autoscaler/README.md
+vpaRecommender:
+  enabled: false
+
+##########################################################
+# volume claim parameters for StatefulSet
+##########################################################
+volumeClaimTemplates: []
+# - name: data
+#   accessModes: [ "ReadWriteOnce" ]
+#   resources:
+#     requests:
+#       storage: 1Gi
+#   volumeMode: Filesystem
+
+persistentVolumeClaimRetentionPolicy:
+  whenDeleted: Delete
+  whenScaled: Delete
+
+##########################################################
+# Job
+##########################################################
+job:
+  enabled: false
+
+
+##########################################################
+# Datadog Agent
+##########################################################
+datadogAgent:
+  enabled: false
+##########################################################
+# Defaults added for Viro: disable optional integrations so the chart renders
+# out-of-the-box. Enable + configure per workload as needed.
+##########################################################
+clusterSecretStore:
+  enabled: false
+frontendConfig:
+  enabled: false
+managedCertificate:
+  enabled: false

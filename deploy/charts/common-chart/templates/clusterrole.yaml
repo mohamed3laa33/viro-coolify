@@ -1,0 +1,17 @@
+{{- if .Values.clusterRole.enabled -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ default (include "common-chart.fullname" .) .Values.clusterRole.name }}
+  labels:
+    {{- include "common-chart.labels" . | nindent 4 }}
+    {{- with .Values.clusterRole.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.clusterRole.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+rules:
+  {{- toYaml .Values.clusterRole.rules | nindent 2 }}
+{{- end }}

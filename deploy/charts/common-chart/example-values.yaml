@@ -1,0 +1,331 @@
+fullnameOverride: nginx-example-app
+
+nameOverride: nginx-example
+
+##########################################################
+# Deployment
+##########################################################
+
+# Enable the deployment
+deployment:
+  enabled: true
+  stateful: false
+  lifecycle:
+    preStop:
+      enabled: true
+      command: [ "/bin/sh", "-c", "sleep 40" ]
+  # Set termination grace period to allow for graceful shutdown
+  terminationGracePeriodSeconds: 90
+  # Define the image to use for the nginx application
+  image:
+    repository: nginx
+    pullPolicy: IfNotPresent
+    tag: "1.21.6"
+
+  # Specifies the strategy used to replace old Pods by new ones.
+  strategySpec:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 25%
+      maxSurge: 25%
+
+  # Define number of replicas for the pod if .Values.autoscaling.enable = false
+  replicas: 4
+
+  # Reference to one or more secrets to be used when pulling images
+  #imagePullSecrets:
+  #  - name: my-registry-secret
+
+  # Annotations to add to the pod
+  additionalPodAnnotations:
+    environment: dev
+    owner: dev-team
+
+  annotations:
+    reloader.stakater.com/auto: "true"
+
+  # Define environment variables
+  env:
+    NGINX_ENV: "development"
+    LOG_LEVEL: "debug"
+    EXAMPLE:
+      valueFrom:
+        secretKeyRef:
+          name: nginx-chart-example-secret
+          key: aws-secretsmanager
+
+  ## Define environment variables from secrets or configmaps
+  envFrom:
+  - configMapRef:
+      name: nginx
+  # Define resource limits and requests
+  resources:
+    limits:
+      cpu: 200m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+  # Define liveness probe configuration
+  livenessProbe:
+    httpGet:
+      path: /
+      port: 80
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+    successThreshold: 1
+
+  # Define readiness probe configuration
+  readinessProbe:
+    httpGet:
+      path: /
+      port: 80
+    initialDelaySeconds: 15
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+    successThreshold: 1
+
+  # Define startup probe configuration
+  startupProbe:
+    httpGet:
+      path: /
+      port: 80
+    initialDelaySeconds: 0
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 30
+    successThreshold: 1
+
+  # Define node selector
+  nodeSelector:
+    node.kubernetes.io/instance-type: t3.large
+
+  # Define tolerations for node taints
+  tolerations:
+  - key: "dedicated"
+    operator: "Equal"
+    value: "example-app"
+    effect: "NoExecute"
+  # Define affinity rules
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: kubernetes.io/os
+            operator: In
+            values:
+            - linux
+  # Additional volumes and volume mounts
+  extraVolumes:
+  - name: nginx-configmap
+    configMap:
+      name: nginx
+
+##########################################################
+# Service
+##########################################################
+service:
+  enabled: true
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8080
+    protocol: TCP
+
+##########################################################
+# Autoscaling
+##########################################################
+# Enable autoscaling
+autoscaling:
+  enabled: true
+  # Minimum number of pods
+  minReplicas: 3
+  # Maximum number of pods
+  maxReplicas: 10
+  # Target CPU utilization percentage
+  targetCPUUtilizationPercentage: 75
+  # Target Memory utilization percentage
+  targetMemoryUtilizationPercentage: 80
+
+##########################################################
+# ConfigMap
+##########################################################
+config:
+  nginx.conf: |
+    server {
+      listen       80;
+      server_name  localhost;
+
+      location / {
+        root   /usr/share/nginx/html;
+        index  index.html index.htm;
+      }
+
+      error_page   500 502 503 504  /50x.html;
+      location = /50x.html {
+        root   /usr/share/nginx/html;
+      }
+    }
+
+##########################################################
+# PodDisruptionBudget
+##########################################################
+podDisruptionBudget:
+  minAvailable: 1
+
+##########################################################
+# serviceaccount.yaml
+##########################################################
+serviceAccount:
+  enabled: true
+  name: example-sa
+
+  # Additional Labels on service account
+  additionalLabels:
+    environment: dev
+
+##########################################################
+# Secrets
+##########################################################
+secrets:
+  admin: "examplevalue"
+
+##########################################################
+# Ingress
+##########################################################
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    kubernetes.io/tls-acme: "true"
+  rules:
+  - host: nginx.example.com
+    http:
+      paths:
+      - path: /
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: nginx
+            port:
+              number: 80
+  tls:
+  - secretName: nginx-tls
+    hosts:
+    - nginx.example.com
+
+##########################################################
+# Gateway API (GKE)
+##########################################################
+# Note: Gateway API is the successor to Ingress API
+# You need to have a Gateway resource created first (usually cluster-wide)
+# Example Gateway creation (not part of this chart):
+#   apiVersion: gateway.networking.k8s.io/v1
+#   kind: Gateway
+#   metadata:
+#     name: external-gateway
+#   spec:
+#     gatewayClassName: gke-l7-global-external-managed
+#     listeners:
+#       - name: https
+#         protocol: HTTPS
+#         port: 443
+#         tls:
+#           mode: Terminate
+#           certificateRefs:
+#             - name: my-cert
+gateway:
+  enabled: true
+  annotations:
+    networking.gke.io/app-protocols: '{"http":"HTTP"}'
+  parentRefs:
+    - name: external-gateway
+      namespace: gateway-infra
+      sectionName: https
+  hostnames:
+    - "nginx.example.com"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: nginx-example-app
+          port: 80
+
+##########################################################
+# GKE BackendConfig (for IAP, CDN, Cloud Armor, etc.)
+##########################################################
+backendConfig:
+  enabled: true
+  name: nginx-backend-config
+  healthCheck:
+    checkIntervalSec: 15
+    timeoutSec: 15
+    healthyThreshold: 1
+    unhealthyThreshold: 2
+    type: HTTP
+    requestPath: /health
+    port: 8080
+  # Enable IAP authentication
+  iap:
+    enabled: true
+    oauthclientCredentials:
+      secretName: my-iap-oauth-secret
+  # Enable Cloud Armor
+  securityPolicy:
+    name: my-cloud-armor-policy
+  # Connection draining for graceful shutdown
+  connectionDraining:
+    drainingTimeoutSec: 60
+
+##########################################################
+# Cron Job
+##########################################################
+cronjob:
+  enabled: true
+  jobs:
+    example-job:
+      schedule: "*/5 * * * *"
+      activeDeadlineSeconds: 700
+      env:
+        KEY:
+          value: VALUE
+      image:
+        repository: nginx
+        tag: "1.21.6"
+        digest: '' # if set to a non empty value, digest takes precedence on the tag
+        imagePullPolicy: IfNotPresent
+      command: [ "/bin/bash" ]
+      timeZone: UTC
+      args: [ "-c", "sleep 360" ]
+      resources:
+        requests:
+          memory: 1Gi
+          cpu: 1
+
+# ExternalSecrets
+externalSecret:
+  enabled: true
+
+  #SecretStore defines which SecretStore to use when fetching the secret data
+  secretStore:
+    name: example-store # Create a cluster secret store with this name
+    kind: ClusterSecretStore # or SecretStore
+
+  # RefreshInterval is the amount of time before the values reading again from the SecretStore provider
+  refreshInterval: "10s"
+  files:
+    example-secret:
+      #Data defines the connection between the Kubernetes Secret keys and the Provider data
+      data:
+        aws-secretsmanager:
+          remoteRef:
+            key: example-secret
+            property: example_key

@@ -1,0 +1,79 @@
+
+{{- if .Values.job.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Values.job.name | default (include "common-chart.fullname" .) }}-job
+  namespace: {{ template "common-chart.namespace" . }}
+  labels:
+    {{- include "common-chart.labels" . | nindent 4 }}
+{{- if .Values.job.additionalLabels }}
+{{ toYaml .Values.job.additionalLabels | indent 4 }}
+{{- end }}
+{{- with .Values.job.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+{{- end }}
+spec:
+  backoffLimit: {{ .Values.job.backoffLimit }}
+  ttlSecondsAfterFinished: {{ .Values.job.ttlSecondsAfterFinished }}
+  activeDeadlineSeconds: {{ .Values.job.activeDeadlineSeconds }} #NOTE:.spec.activeDeadlineSeconds takes precedence over its .spec.backoffLimit
+  template:
+    metadata:
+      annotations:
+        {{- if .Values.job.additionalJobAnnotations }}
+        {{ toYaml .Values.job.additionalJobAnnotations | indent 8 }}
+        {{- end }}
+      labels:
+        {{- include "common-chart.selectorLabels" . | nindent 8 }}
+        {{- if .Values.job.podLabels }}
+        {{ toYaml .Values.job.podLabels | indent 8 }}
+        {{- end }}
+    spec:
+      containers:
+      - name: {{ .Values.job.name | default (include "common-chart.fullname" .) }}-job
+        securityContext:
+          {{- toYaml .Values.job.containerSecurityContext | nindent 12 }}
+        image: "{{ .Values.deployment.image.repository }}:{{ .Values.deployment.image.tag | default .Chart.AppVersion }}"
+        imagePullPolicy: {{ .Values.deployment.image.pullPolicy }}
+        {{- with .Values.job.command }}
+        command: {{- toYaml . | nindent 12 }}
+        {{- end }}
+        {{- with .Values.job.args }}
+        args: {{- toYaml . | nindent 12 }}
+        {{- end }}
+        env:
+        {{- range $key, $value := .Values.deployment.env }}
+          - name: "{{ $key }}"
+            {{- if eq (typeOf $value) "string" }}
+            value: "{{ $value }}"
+            {{- else }}
+            {{- toYaml $value | nindent 14 }}
+            {{- end }}
+        {{- end }}
+        {{- with .Values.deployment.envFrom }}
+        envFrom:
+          {{- toYaml . | nindent 12 }}
+        {{- end }}
+        {{- with .Values.job.volumeMounts }}
+        volumeMounts:
+          {{- toYaml . | nindent 12 }}
+        {{- end }}
+    {{- with .Values.job.volumes }}
+      volumes:
+        {{- toYaml . | nindent 8 }}
+    {{- end }}
+    {{- with .Values.job.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 12 }}
+    {{- end }}
+    {{- with .Values.job.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 12 }}
+    {{- end }}
+    {{- with .Values.job.affinity }}
+      affinity:
+        {{- toYaml . | nindent 12 }}
+    {{- end }}
+      restartPolicy: {{ .Values.job.restartPolicy }}
+{{- end -}}

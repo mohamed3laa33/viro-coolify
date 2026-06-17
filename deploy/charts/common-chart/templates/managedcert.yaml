@@ -1,0 +1,14 @@
+{{- if and .Values.ingress.enabled .Values.managedCertificate.enabled }}
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: {{ .Values.managedCertificate.name | quote }}
+  namespace: {{ template "common-chart.namespace" . }}
+  labels:
+    {{- include "common-chart.labels" . | nindent 4 }}
+spec:
+  domains:
+  {{- range .Values.managedCertificate.domains }}
+    - {{ . | quote }}
+  {{- end }}
+{{- end }}

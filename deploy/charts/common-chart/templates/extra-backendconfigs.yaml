@@ -1,0 +1,19 @@
+{{- range $backendConfig := .Values.extraBackendConfigs }}
+---
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: {{ required "extraBackendConfigs[].name is required" $backendConfig.name }}
+  namespace: {{ template "common-chart.namespace" $ }}
+  labels:
+    {{- include "common-chart.labels" $ | nindent 4 }}
+{{- if $backendConfig.additionalLabels }}
+{{ toYaml $backendConfig.additionalLabels | indent 4 }}
+{{- end }}
+  {{- with $backendConfig.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- include "common-chart.backendConfigSpec" $backendConfig | trim | nindent 2 }}
+{{- end }}

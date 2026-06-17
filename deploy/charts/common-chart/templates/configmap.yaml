@@ -1,0 +1,14 @@
+{{- if .Values.config }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ template "common-chart.fullname" . }}
+  namespace: {{ template "common-chart.namespace" . }}
+  labels:
+    {{- include "common-chart.labels" . | nindent 4 }}
+data:
+{{- range $key, $val := .Values.config }}
+  {{ $key }}: {{ $val | quote }}
+{{- end -}}
+{{- end }}

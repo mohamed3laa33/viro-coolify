@@ -1,0 +1,26 @@
+{{- if .Values.serviceMonitor.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "common-chart.fullname" . }}
+  namespace: {{ template "common-chart.namespace" . }}
+  labels:
+    {{- include "common-chart.labels" . | nindent 4 }}
+  {{- if .Values.serviceMonitor.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  endpoints:
+{{ toYaml .Values.serviceMonitor.endpoints | indent 4 }}
+  jobLabel: "{{ .Release.Name }}"
+  selector:
+    matchLabels:
+      {{- include "common-chart.selectorLabels" . | nindent 6 }}
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  targetLabels:
+{{ toYaml .Values.serviceMonitor.targetLabels | indent 4 }}
+{{- end }}

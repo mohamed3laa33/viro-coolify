@@ -1,0 +1,19 @@
+{{- if .Values.backendConfig.enabled -}}
+{{- $fullName := include "common-chart.fullname" . -}}
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: {{ default $fullName .Values.backendConfig.name }}
+  namespace: {{ template "common-chart.namespace" . }}
+  labels:
+    {{- include "common-chart.labels" . | nindent 4 }}
+{{- if .Values.backendConfig.additionalLabels }}
+{{ toYaml .Values.backendConfig.additionalLabels | indent 4 }}
+{{- end }}
+  {{- with .Values.backendConfig.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- include "common-chart.backendConfigSpec" .Values.backendConfig | trim | nindent 2 }}
+{{- end }}

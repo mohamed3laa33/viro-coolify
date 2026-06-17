@@ -1,0 +1,27 @@
+{{- range $svc := .Values.extraServices }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ required "extraServices[].name is required" $svc.name }}
+  namespace: {{ template "common-chart.namespace" $ }}
+  labels:
+    {{- include "common-chart.labels" $ | nindent 4 }}
+  {{- with $svc.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ $svc.type | default "ClusterIP" }}
+  {{- with $svc.sessionAffinity }}
+  sessionAffinity: {{ . }}
+  {{- end }}
+  ports:
+    {{- toYaml (required "extraServices[].ports is required" $svc.ports) | nindent 4 }}
+  selector:
+    {{- if $svc.selector }}
+    {{- toYaml $svc.selector | nindent 4 }}
+    {{- else }}
+    {{- include "common-chart.selectorLabels" $ | nindent 4 }}
+    {{- end }}
+{{- end }}

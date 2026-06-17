@@ -1,0 +1,82 @@
+fullnameOverride: nginx-minimal-app
+
+nameOverride: nginx-example
+
+##########################################################
+# Deployment
+##########################################################
+
+# Enable the deployment
+deployment:
+  enabled: true
+  stateful: false
+  # Define the image to use for the nginx application
+  image:
+    repository: nginx
+    pullPolicy: IfNotPresent
+    tag: "1.21.6"
+
+  # Define number of replicas for the pod if .Values.autoscaling.enable = false
+  replicas: 2
+
+  # Reference to one or more secrets to be used when pulling images
+  #imagePullSecrets:
+  #  - name: my-registry-secret
+
+  # Annotations to add to the pod
+  additionalPodAnnotations:
+    environment: dev
+    owner: dev-team
+
+  annotations:
+    reloader.stakater.com/auto: "true"
+
+  # Define resource limits and requests
+  resources:
+    limits:
+      cpu: 200m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+  # Define node selector
+  nodeSelector:
+    node.kubernetes.io/instance-type: t3.large
+
+##########################################################
+# Service- service.yaml
+##########################################################
+service:
+  enabled: true
+  # -- Annotations to add to the Service resource
+  annotations: {}
+  # -- Service type
+  type: ClusterIP
+  # -- Session Affinitiy type
+  sessionAffinity: ""
+  # -- Ports to expose on the service
+  ports:
+     - name: http
+       port: 80
+       targetPort: 80
+       protocol: TCP
+    # - name: rpc
+    #   port: 9090
+    #   targetPort: 9090
+    #   protocol: TCP
+
+#SECTION TO ADD OBJECTS THAT YOU WANT TO TEST#####################
+
+##########################################################
+# Job
+##########################################################
+job:
+  enabled: true
+  name: db-migration
+  annotations:
+    "helm.sh/hook": pre-upgrade
+  restartPolicy: Never
+  backoffLimit: 3
+  command: ["/bin/sh", "-c"]
+  args: ["pwd; whoami; echo hello world"]

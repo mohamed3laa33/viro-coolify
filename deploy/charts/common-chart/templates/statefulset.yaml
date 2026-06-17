@@ -1,0 +1,123 @@
+{{- if and .Values.deployment.enabled .Values.deployment.stateful }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ template "common-chart.fullname" . }}
+  namespace: {{ template "common-chart.namespace" . }}
+  labels:
+    {{- include "common-chart.labels" . | nindent 4 }}
+{{- if .Values.deployment.additionalLabels }}
+{{ toYaml .Values.deployment.additionalLabels | indent 4 }}
+{{- end }}
+{{- with .Values.deployment.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+{{- end }}
+spec:
+  replicas: {{ .Values.deployment.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "common-chart.selectorLabels" . | nindent 6 }}
+  serviceName: {{ template "common-chart.fullname" . }}-headless
+  template:
+    metadata:
+      labels:
+        {{- include "common-chart.selectorLabels" . | nindent 8 }}
+        {{- if .Values.deployment.podLabels }}
+{{ toYaml .Values.deployment.podLabels | indent 8 }}
+        {{- end }}
+      annotations:
+        {{- if .Values.config }}
+        checksum/config: {{ print .Values.config | sha256sum }}
+        {{- end }}
+        {{- if .Values.deployment.additionalPodAnnotations }}
+{{ toYaml .Values.deployment.additionalPodAnnotations | indent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.deployment.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.serviceAccount.enabled }}
+      {{- if .Values.serviceAccount.name }}
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      {{- else }}
+      serviceAccountName: {{ template "common-chart.name" $ }}
+      {{- end }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.deployment.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ template "common-chart.fullname" . }}
+          image: "{{ .Values.deployment.image.repository }}:{{ .Values.deployment.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.deployment.image.pullPolicy }}
+          ports:
+          {{- range .Values.deployment.ports }}
+            - name: {{ .name }}
+              containerPort: {{ .containerPort }}
+              protocol: {{ .protocol }}
+          {{- end }}
+          env:
+          {{- range $key, $value := .Values.deployment.env }}
+            - name: "{{ $key }}"
+              {{- if eq (typeOf $value) "string" }}
+              value: "{{ $value }}"
+              {{- else }}
+              {{- toYaml $value | nindent 14 }}
+              {{- end }}
+          {{- end }}
+          {{- with .Values.deployment.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            {{- with .Values.deployment.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.deployment.resources | nindent 12 }}
+      {{ if .Values.deployment.topologySpreadConstraints.enabled }}
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            {{- include "common-chart.selectorLabels" . | nindent 12 }}
+      {{- end }}
+      {{- with .Values.deployment.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.deployment.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.deployment.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+      {{- with .Values.deployment.extraVolumes }}
+      {{- toYaml . | nindent 8 }}
+      {{- end }}
+  volumeClaimTemplates:
+  {{- range .Values.volumeClaimTemplates }}
+    - metadata:
+        name: {{ .name }}
+        labels:
+          {{- include "common-chart.labels" $ | nindent 10 }}
+      spec:
+        accessModes:
+          {{- toYaml .accessModes | nindent 12 }}
+        resources:
+          requests:
+            storage: {{ .resources.requests.storage }}
+        {{- with .volumeMode }}
+        volumeMode: {{ . }}
+        {{- end }}
+  {{- end }}
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: {{ .Values.persistentVolumeClaimRetentionPolicy.whenDeleted }}
+    whenScaled: {{ .Values.persistentVolumeClaimRetentionPolicy.whenScaled }}
+{{- end }}
