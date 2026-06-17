@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
-import { Check, Copy, Loader2 } from "lucide-react";
+import { Check, Copy } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import {
   api,
@@ -18,9 +18,8 @@ import {
   mockProjects,
   mockSettings,
 } from "@/lib/mock";
-import { isDemoMode } from "@/lib/demo";
 import { useResource } from "@/lib/use-resource";
-import { cn, initials } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import { PageHeader } from "@/components/page-header";
 import {
   Card,
@@ -32,8 +31,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import { Notice } from "@/components/ui/notice";
-import { Tabs } from "@/components/ui/tabs";
 import { Badge, type BadgeVariant } from "@/components/ui/badge";
 
 const TABS = ["General", "Team", "Billing"] as const;
@@ -45,8 +44,14 @@ const ROLE_VARIANT: Record<MemberRole, BadgeVariant> = {
   member: "outline",
 };
 
-const SELECT_CLASS =
-  "flex h-10 w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-ring disabled:cursor-not-allowed disabled:opacity-50";
+function initials(name: string): string {
+  return name
+    .split(" ")
+    .map((p) => p[0])
+    .join("")
+    .slice(0, 2)
+    .toUpperCase();
+}
 
 export default function SettingsPage() {
   const [tab, setTab] = useState<Tab>("General");
@@ -58,7 +63,25 @@ export default function SettingsPage() {
         description="Manage your organization, team, and billing."
       />
 
-      <Tabs tabs={TABS} active={tab} onChange={setTab} />
+      <div className="border-b border-border">
+        <nav className="-mb-px flex gap-6">
+          {TABS.map((t) => (
+            <button
+              key={t}
+              type="button"
+              onClick={() => setTab(t)}
+              className={cn(
+                "border-b-2 px-1 pb-3 text-sm font-medium transition-colors",
+                tab === t
+                  ? "border-primary text-foreground"
+                  : "border-transparent text-muted-foreground hover:text-foreground",
+              )}
+            >
+              {t}
+            </button>
+          ))}
+        </nav>
+      </div>
 
       {tab === "General" && <GeneralTab />}
 
@@ -76,13 +99,18 @@ function GeneralTab() {
 
   // The default region is platform config; show it but only let admins edit it
   // on the admin settings page. Falls back to mock settings when unreachable.
-  const { data: settings } = useResource(
+  const { data: settings, error: settingsError } = useResource(
     user?.isAdmin
       ? () => authedCall((token, on) => api.getSettings(token, on))
       : null,
-    isDemoMode() ? mockSettings : null,
+    mockSettings,
     [user?.isAdmin],
   );
+
+  // TODO(backend): add org update route (PATCH /v1/orgs/:id). Until it exists,
+  // org name/slug/billing-email are read-only and Save is disabled. Don't wire
+  // these inputs to a fake handler — keep the control honest (invariant #6).
+  const editingDisabledNote = "Org settings editing is coming soon";
 
   return (
     <Card>
@@ -93,6 +121,12 @@ function GeneralTab() {
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
+        {settingsError && (
+          <Notice variant="error">
+            Couldn&apos;t load platform settings. Showing the last known
+            defaults.
+          </Notice>
+        )}
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="space-y-2">
             <Label htmlFor="org-name">Organization name</Label>
@@ -100,6 +134,9 @@ function GeneralTab() {
               id="org-name"
               key={`name-${activeOrg?.id ?? "none"}`}
               defaultValue={activeOrg?.name ?? ""}
+              readOnly
+              title={editingDisabledNote}
+              aria-label={editingDisabledNote}
             />
           </div>
           <div className="space-y-2">
@@ -108,6 +145,9 @@ function GeneralTab() {
               id="org-slug"
               key={`slug-${activeOrg?.id ?? "none"}`}
               defaultValue={activeOrg?.slug ?? ""}
+              readOnly
+              title={editingDisabledNote}
+              aria-label={editingDisabledNote}
             />
           </div>
           <div className="space-y-2">
@@ -117,20 +157,26 @@ function GeneralTab() {
               type="email"
               key={`email-${user?.id ?? "none"}`}
               defaultValue={user?.email ?? ""}
+              readOnly
+              title={editingDisabledNote}
+              aria-label={editingDisabledNote}
             />
           </div>
           <div className="space-y-2">
             <Label htmlFor="region">Default region</Label>
             <Input
               id="region"
-              key={`region-${settings?.defaultRegion ?? "none"}`}
-              defaultValue={settings?.defaultRegion ?? ""}
+              key={`region-${settings.defaultRegion}`}
+              defaultValue={settings.defaultRegion}
               readOnly
             />
           </div>
         </div>
-        <div className="flex justify-end">
-          <Button>Save changes</Button>
+        <div className="flex items-center justify-end gap-3">
+          <p className="text-xs text-muted-foreground">{editingDisabledNote}.</p>
+          <Button disabled title={editingDisabledNote} aria-label={editingDisabledNote}>
+            Save changes
+          </Button>
         </div>
       </CardContent>
     </Card>
@@ -148,22 +194,26 @@ function projectLabel(
 function TeamTab() {
   const { activeOrgId, authedCall } = useAuth();
 
-  const { data: membersData } = useResource(
+  const { data: membersData, error: membersError } = useResource(
     activeOrgId
       ? () => authedCall((token, on) => api.listMembers(activeOrgId, token, on))
       : null,
-    { data: isDemoMode() ? mockMembers : [] },
+    { data: mockMembers },
     [activeOrgId],
   );
 
-  const { data: invitesData, refetch: refetchInvites } = useResource(
+  const {
+    data: invitesData,
+    refetch: refetchInvites,
+    error: invitesError,
+  } = useResource(
     activeOrgId
       ? () =>
           authedCall((token, on) =>
             api.listInvitations(activeOrgId, token, on),
           )
       : null,
-    { data: isDemoMode() ? mockInvitations : [] },
+    { data: mockInvitations },
     [activeOrgId],
   );
 
@@ -171,7 +221,7 @@ function TeamTab() {
     activeOrgId
       ? () => authedCall((token, on) => api.listProjects(activeOrgId, token, on))
       : null,
-    { data: isDemoMode() ? mockProjects : [] },
+    { data: mockProjects },
     [activeOrgId],
   );
 
@@ -191,7 +241,7 @@ function TeamTab() {
     const trimmed = email.trim();
     if (!trimmed) return;
     if (!activeOrgId) {
-      setNotice("Invite unavailable — no active organization.");
+      setNotice("Invite unavailable — no active organization (demo mode).");
       return;
     }
     setPending(true);
@@ -214,7 +264,7 @@ function TeamTab() {
       setProjectId("");
       refetchInvites();
     } catch {
-      setNotice("Could not send the invitation — the API is unreachable.");
+      setNotice("Invitation queued locally (API unreachable — demo mode).");
     } finally {
       setPending(false);
     }
@@ -238,7 +288,13 @@ function TeamTab() {
 
   return (
     <div className="space-y-6">
-      {notice && <Notice>{notice}</Notice>}
+      {notice && <Notice variant="info">{notice}</Notice>}
+
+      {(membersError || invitesError) && (
+        <Notice variant="error">
+          Couldn&apos;t load team data. Showing the last known values.
+        </Notice>
+      )}
 
       <Card>
         <CardHeader>
@@ -247,12 +303,10 @@ function TeamTab() {
             People with access to this organization.
           </CardDescription>
         </CardHeader>
+        {/* TODO(backend): role change / member removal need API routes
+            (PATCH/DELETE /v1/orgs/:id/members/:userId). Until they exist this
+            list stays read-only — don't add no-op edit/remove controls. */}
         <CardContent className="p-0">
-          {members.length === 0 ? (
-            <p className="px-6 py-4 text-sm text-muted-foreground">
-              No team members yet.
-            </p>
-          ) : (
           <ul className="divide-y divide-border">
             {members.map((m) => (
               <li
@@ -274,7 +328,6 @@ function TeamTab() {
               </li>
             ))}
           </ul>
-          )}
         </CardContent>
       </Card>
 
@@ -303,22 +356,20 @@ function TeamTab() {
             </div>
             <div className="space-y-2">
               <Label htmlFor="invite-role">Role</Label>
-              <select
+              <Select
                 id="invite-role"
-                className={SELECT_CLASS}
                 value={role}
                 onChange={(e) => setRole(e.target.value as MemberRole)}
               >
                 <option value="member">Member</option>
                 <option value="admin">Admin</option>
                 <option value="owner">Owner</option>
-              </select>
+              </Select>
             </div>
             <div className="space-y-2">
               <Label htmlFor="invite-project">Project (optional)</Label>
-              <select
+              <Select
                 id="invite-project"
-                className={SELECT_CLASS}
                 value={projectId}
                 onChange={(e) => setProjectId(e.target.value)}
               >
@@ -328,10 +379,9 @@ function TeamTab() {
                     {p.name}
                   </option>
                 ))}
-              </select>
+              </Select>
             </div>
-            <Button type="submit" disabled={pending}>
-              {pending && <Loader2 className="h-4 w-4 animate-spin" />}
+            <Button type="submit" loading={pending}>
               Send invite
             </Button>
           </form>
@@ -345,6 +395,9 @@ function TeamTab() {
             Share the invite link manually until email delivery is enabled.
           </CardDescription>
         </CardHeader>
+        {/* TODO(backend): revoke pending invitation needs an API route
+            (DELETE /v1/orgs/:id/invitations/:inviteId). Until it exists we
+            only surface copy-link — no fake revoke control. */}
         <CardContent className="p-0">
           {invitations.length === 0 ? (
             <p className="px-6 py-4 text-sm text-muted-foreground">
@@ -421,32 +474,35 @@ function BillingTab() {
   const [pendingPlan, setPendingPlan] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
-  const { data: plansData } = useResource(
+  const { data: plansData, error: plansError } = useResource(
     () => api.getPlans(),
-    { data: isDemoMode() ? mockPlans : [], provider: "stripe" },
+    { data: mockPlans, provider: "stripe" },
     [],
   );
   const plans = plansData.data;
 
-  const { data: billing, refetch } = useResource(
+  const {
+    data: billing,
+    refetch,
+    error: billingError,
+  } = useResource(
     activeOrgId
       ? () => authedCall((token, on) => api.getBilling(activeOrgId, token, on))
       : null,
-    isDemoMode() ? mockBilling : null,
+    mockBilling,
     [activeOrgId],
   );
 
-  const currentPlanId =
-    billing?.plan?.id ?? billing?.subscription?.planId ?? null;
-  const usedHours = computeHoursUsed(billing?.usage);
-  const totalHours = billing?.plan?.includedHours ?? 0;
+  const currentPlanId = billing.plan?.id ?? billing.subscription?.planId ?? null;
+  const usedHours = computeHoursUsed(billing.usage);
+  const totalHours = billing.plan?.includedHours ?? 0;
   const overageHours = Math.max(0, usedHours - totalHours);
   const usagePct =
     totalHours > 0 ? Math.min(100, Math.round((usedHours / totalHours) * 100)) : 0;
 
   async function subscribe(planId: string) {
     if (!activeOrgId) {
-      setNotice("Subscribe unavailable — no active organization.");
+      setNotice("Subscribe unavailable — no active organization (demo mode).");
       return;
     }
     setPendingPlan(planId);
@@ -462,7 +518,7 @@ function BillingTab() {
       setNotice(`Subscription updated — status: ${res.subscription.status}`);
       refetch();
     } catch {
-      setNotice("Could not update the subscription — the API is unreachable.");
+      setNotice("Subscription queued locally (API unreachable — demo mode).");
     } finally {
       setPendingPlan(null);
     }
@@ -470,14 +526,20 @@ function BillingTab() {
 
   return (
     <div className="space-y-6">
-      {notice && <Notice>{notice}</Notice>}
+      {notice && <Notice variant="info">{notice}</Notice>}
+
+      {(plansError || billingError) && (
+        <Notice variant="error">
+          Couldn&apos;t load billing data. Showing the last known values.
+        </Notice>
+      )}
 
       <Card>
         <CardHeader>
           <CardTitle>Usage this month</CardTitle>
           <CardDescription>
             Resets on the 1st. Overages are billed per-unit.
-            {billing?.plan && (
+            {billing.plan && (
               <Badge variant="info" className="ml-2 align-middle">
                 {billing.plan.name}
               </Badge>
@@ -504,14 +566,6 @@ function BillingTab() {
           )}
         </CardContent>
       </Card>
-
-      {plans.length === 0 && (
-        <Card className="flex flex-col items-center justify-center py-12 text-center">
-          <p className="text-sm text-muted-foreground">
-            No plans available right now.
-          </p>
-        </Card>
-      )}
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {plans.map((plan) => {
@@ -554,11 +608,9 @@ function BillingTab() {
                   className="w-full"
                   variant={isCurrent ? "secondary" : "primary"}
                   disabled={isCurrent || pendingPlan !== null}
+                  loading={pendingPlan === plan.id}
                   onClick={() => subscribe(plan.id)}
                 >
-                  {pendingPlan === plan.id && (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  )}
                   {isCurrent ? "Current plan" : `Switch to ${plan.name}`}
                 </Button>
               </CardContent>

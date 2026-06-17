@@ -49,7 +49,11 @@ const config: Config = {
           700: "#6d28d9",
           800: "#5b21b6",
           900: "#4c1d95",
-          violet: "hsl(var(--brand-violet))",
+          // Brand gradient stops. Magenta is a CSS token in globals.css;
+          // violet mirrors the 400-ish balloon hue used by the SVG mark.
+          // TODO(design): promote --brand-violet to a CSS var in globals.css
+          // once that file is owned here, then switch this to hsl(var(--brand-violet)).
+          violet: "#9D4EDD",
           magenta: "hsl(var(--brand-magenta))",
         },
       },
@@ -63,8 +67,10 @@ const config: Config = {
         mono: ["var(--font-mono)", "monospace"],
       },
       backgroundImage: {
+        // Drives the same violet→magenta balloon gradient, but the magenta
+        // stop now tracks the --brand-magenta CSS token instead of a raw hex.
         "brand-balloon":
-          "linear-gradient(135deg,hsl(var(--brand-violet)),hsl(var(--brand-magenta)))",
+          "linear-gradient(135deg,#9D4EDD,hsl(var(--brand-magenta)))",
       },
       keyframes: {
         "accordion-down": {

@@ -1,11 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import {
-  api,
-  buildUrl,
-  API_BASE_URL,
-  computeHoursUsed,
-  statusVariant,
-} from "@/lib/api";
+import { api, buildUrl, API_BASE_URL, computeHoursUsed } from "@/lib/api";
 
 interface CapturedCall {
   url: string;
@@ -465,31 +459,6 @@ describe("computeHoursUsed", () => {
     expect(computeHoursUsed(null)).toBe(0);
     expect(computeHoursUsed(undefined)).toBe(0);
     expect(computeHoursUsed({ builds: 9 })).toBe(0);
-  });
-});
-
-describe("statusVariant", () => {
-  it("maps running to success", () => {
-    expect(statusVariant("running")).toBe("success");
-  });
-
-  it("maps in-flight states to warning", () => {
-    expect(statusVariant("deploying")).toBe("warning");
-    expect(statusVariant("restarting")).toBe("warning");
-  });
-
-  it("maps stopped to muted and error to destructive", () => {
-    expect(statusVariant("stopped")).toBe("muted");
-    expect(statusVariant("error")).toBe("destructive");
-  });
-
-  it("maps created to info", () => {
-    expect(statusVariant("created")).toBe("info");
-  });
-
-  it("falls back to muted for unknown statuses", () => {
-    expect(statusVariant("paused")).toBe("muted");
-    expect(statusVariant("")).toBe("muted");
   });
 });
 

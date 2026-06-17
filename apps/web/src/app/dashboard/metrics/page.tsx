@@ -36,7 +36,7 @@ export default function MetricsPage() {
       <div className="space-y-6">
         <PageHeader
           title="Metrics"
-          description="Real-time resource usage across all your machines."
+          description="Resource usage across your machines. Org-wide aggregation isn't available yet."
         />
         <Card className="flex flex-col items-center justify-center py-16 text-center">
           <p className="text-sm text-muted-foreground">
@@ -52,7 +52,7 @@ export default function MetricsPage() {
     <div className="space-y-6">
       <PageHeader
         title="Metrics"
-        description="Real-time resource usage across all your machines."
+        description="Sample resource usage (a static snapshot, not live data)."
         actions={<Badge variant="outline">Demo</Badge>}
       />
 

@@ -1,11 +1,10 @@
 "use client";
 
 import { useEffect, useState, type FormEvent } from "react";
-import { Loader2, X } from "lucide-react";
+import { X } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { api, type Settings } from "@/lib/api";
 import { mockPlans, mockSettings } from "@/lib/mock";
-import { isDemoMode } from "@/lib/demo";
 import { useResource } from "@/lib/use-resource";
 import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
@@ -19,44 +18,34 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-
-const SELECT_CLASS =
-  "flex h-10 w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-ring disabled:cursor-not-allowed disabled:opacity-50";
+import { Notice } from "@/components/ui/notice";
+import { Select } from "@/components/ui/select";
 
 function pctLabel(factor: number): string {
   return `${Math.round(factor * 100)}%`;
 }
 
-const EMPTY_SETTINGS: Settings = {
-  defaultCpu: 1,
-  defaultMemoryMb: 512,
-  defaultPlanId: "",
-  cpuOvercommitFactor: 1,
-  memoryOvercommitFactor: 1,
-  defaultRegion: "",
-  regions: [],
-};
-
 export default function AdminSettingsPage() {
   const { authedCall } = useAuth();
-  const demo = isDemoMode();
 
   const { data: settings, usingFallback } = useResource(
     () => authedCall((token, on) => api.getSettings(token, on)),
-    demo ? mockSettings : EMPTY_SETTINGS,
+    mockSettings,
     [],
   );
 
   const { data: plansData } = useResource(
     () => authedCall((token, on) => api.listAdminPlans(token, on)),
-    { data: demo ? mockPlans : [] },
+    { data: mockPlans },
     [],
   );
   const plans = plansData.data;
 
   const [form, setForm] = useState<Settings>(settings);
   const [pending, setPending] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<
+    { variant: "success" | "error"; message: string } | null
+  >(null);
   const [regionDraft, setRegionDraft] = useState("");
 
   // Sync local form state once the resource resolves (fetch or fallback).
@@ -93,9 +82,12 @@ export default function AdminSettingsPage() {
     setNotice(null);
     try {
       await authedCall((token, on) => api.updateSettings(form, token, on));
-      setNotice("Settings saved.");
+      setNotice({ variant: "success", message: "Settings saved." });
     } catch {
-      setNotice("Save failed — the API is unreachable.");
+      setNotice({
+        variant: "error",
+        message: "Save failed (API unreachable — demo mode).",
+      });
     } finally {
       setPending(false);
     }
@@ -108,17 +100,13 @@ export default function AdminSettingsPage() {
         description="Defaults, resource overcommit, and regions for the whole platform."
       />
 
-      {usingFallback && demo && (
-        <div className="rounded-md border border-warning/30 bg-warning/10 px-4 py-2 text-sm text-warning">
+      {usingFallback && (
+        <Notice variant="warning">
           Showing demo data — admin API unreachable. Edits won&apos;t persist.
-        </div>
+        </Notice>
       )}
 
-      {notice && (
-        <div className="rounded-md border border-primary/30 bg-primary/10 px-4 py-2 text-sm text-primary">
-          {notice}
-        </div>
-      )}
+      {notice && <Notice variant={notice.variant}>{notice.message}</Notice>}
 
       <form onSubmit={onSubmit} className="space-y-6">
         <Card>
@@ -157,9 +145,8 @@ export default function AdminSettingsPage() {
               </div>
               <div className="space-y-2">
                 <Label htmlFor="default-plan">Default plan</Label>
-                <select
+                <Select
                   id="default-plan"
-                  className={SELECT_CLASS}
                   value={form.defaultPlanId}
                   onChange={(e) => set("defaultPlanId", e.target.value)}
                 >
@@ -169,7 +156,7 @@ export default function AdminSettingsPage() {
                       {p.name} ({p.id})
                     </option>
                   ))}
-                </select>
+                </Select>
               </div>
             </div>
           </CardContent>
@@ -237,9 +224,8 @@ export default function AdminSettingsPage() {
           <CardContent className="space-y-4">
             <div className="space-y-2">
               <Label htmlFor="default-region">Default region</Label>
-              <select
+              <Select
                 id="default-region"
-                className={SELECT_CLASS}
                 value={form.defaultRegion}
                 onChange={(e) => set("defaultRegion", e.target.value)}
               >
@@ -251,7 +237,7 @@ export default function AdminSettingsPage() {
                     {r}
                   </option>
                 ))}
-              </select>
+              </Select>
             </div>
 
             <div className="space-y-2">
@@ -308,8 +294,7 @@ export default function AdminSettingsPage() {
         </Card>
 
         <div className="flex justify-end">
-          <Button type="submit" disabled={pending}>
-            {pending && <Loader2 className="h-4 w-4 animate-spin" />}
+          <Button type="submit" loading={pending}>
             Save settings
           </Button>
         </div>

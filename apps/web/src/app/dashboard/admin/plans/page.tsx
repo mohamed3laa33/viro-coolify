@@ -1,11 +1,10 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
-import { Loader2, Pencil, Plus, Trash2 } from "lucide-react";
+import { Pencil, Plus, Trash2 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { api, type AdminPlan, type AdminPlanInput } from "@/lib/api";
 import { mockPlans } from "@/lib/mock";
-import { isDemoMode } from "@/lib/demo";
 import { useResource } from "@/lib/use-resource";
 import { cn } from "@/lib/utils";
 import { PageHeader } from "@/components/page-header";
@@ -14,6 +13,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
+import { Notice } from "@/components/ui/notice";
 
 const EMPTY_PLAN: AdminPlanInput = {
   id: "",
@@ -49,7 +49,7 @@ export default function AdminPlansPage() {
 
   const { data, refetch, usingFallback } = useResource(
     () => authedCall((token, on) => api.listAdminPlans(token, on)),
-    { data: isDemoMode() ? mockPlans : [] },
+    { data: mockPlans },
     [],
   );
   const plans = data.data;
@@ -96,17 +96,13 @@ export default function AdminPlansPage() {
         }
       />
 
-      {usingFallback && isDemoMode() && (
-        <div className="rounded-md border border-warning/30 bg-warning/10 px-4 py-2 text-sm text-warning">
+      {usingFallback && (
+        <Notice variant="warning">
           Showing demo data — admin API unreachable. Edits won&apos;t persist.
-        </div>
+        </Notice>
       )}
 
-      {notice && (
-        <div className="rounded-md border border-primary/30 bg-primary/10 px-4 py-2 text-sm text-primary">
-          {notice}
-        </div>
-      )}
+      {notice && <Notice variant="error">{notice}</Notice>}
 
       {editing === "new" && (
         <PlanForm
@@ -131,7 +127,8 @@ export default function AdminPlansPage() {
 
       <Card>
         <CardContent className="p-0">
-          <table className="w-full text-sm">
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-border text-left text-xs uppercase tracking-wide text-muted-foreground">
                 <th className="px-6 py-3 font-medium">Plan</th>
@@ -208,7 +205,8 @@ export default function AdminPlansPage() {
                 </tr>
               ))}
             </tbody>
-          </table>
+            </table>
+          </div>
         </CardContent>
       </Card>
 
@@ -410,8 +408,7 @@ function PlanForm({
           </div>
 
           <div className="flex items-center gap-2">
-            <Button type="submit" disabled={pending}>
-              {pending && <Loader2 className="h-4 w-4 animate-spin" />}
+            <Button type="submit" loading={pending}>
               Save plan
             </Button>
             <Button type="button" variant="ghost" onClick={onCancel}>

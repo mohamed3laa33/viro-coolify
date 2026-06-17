@@ -7,6 +7,9 @@ import { mockPlans } from "@/lib/mock";
 import { isDemoMode } from "@/lib/demo";
 import { useResource } from "@/lib/use-resource";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
+import { cn } from "@/lib/utils";
 
 function priceLabel(plan: Plan): { price: string; period: string } {
   if (plan.priceCents <= 0) return { price: "$0", period: "/mo" };
@@ -23,8 +26,11 @@ function planFeatures(plan: Plan): string[] {
   const features: string[] = [];
   features.push(`${plan.includedHours.toLocaleString()} included machine-hours`);
   if (typeof plan.maxApps === "number") {
+    // A non-positive maxApps (0 or negative) is the "unlimited" sentinel;
+    // any positive value is the real per-org app cap to display.
+    const unlimited = plan.maxApps <= 0;
     features.push(
-      plan.maxApps >= 100
+      unlimited
         ? "Unlimited apps"
         : `Up to ${plan.maxApps} app${plan.maxApps === 1 ? "" : "s"}`,
     );
@@ -43,8 +49,10 @@ function planFeatures(plan: Plan): string[] {
 }
 
 export function PricingPlans() {
-  const { data } = useResource(
+  const { data, loading } = useResource(
     () => api.getPlans(),
+    // Only fall back to mock plans in demo mode; otherwise show a real empty
+    // state. Plans always come from the API — never hardcoded (invariant #1).
     { data: isDemoMode() ? mockPlans : [], provider: "stripe" },
     [],
   );
@@ -54,7 +62,33 @@ export function PricingPlans() {
     .filter((p) => p.active !== false)
     .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
 
-  if (plans.length === 0) return null;
+  if (loading) {
+    return (
+      <div className="mt-14 grid gap-6 lg:grid-cols-3">
+        {Array.from({ length: 3 }).map((_, i) => (
+          <Card key={i} className="p-8">
+            <Skeleton className="h-6 w-24" />
+            <Skeleton className="mt-4 h-10 w-32" />
+            <Skeleton className="mt-3 h-4 w-full" />
+            <div className="mt-6 space-y-3">
+              <Skeleton className="h-4 w-3/4" />
+              <Skeleton className="h-4 w-2/3" />
+              <Skeleton className="h-4 w-1/2" />
+            </div>
+            <Skeleton className="mt-8 h-10 w-full" />
+          </Card>
+        ))}
+      </div>
+    );
+  }
+
+  if (plans.length === 0) {
+    return (
+      <p className="mt-14 text-center text-sm text-muted-foreground">
+        No plans are available right now.
+      </p>
+    );
+  }
 
   // Mark the middle plan as featured for emphasis.
   const featuredIndex = plans.length > 1 ? 1 : 0;
@@ -65,13 +99,12 @@ export function PricingPlans() {
         const featured = i === featuredIndex;
         const { price, period } = priceLabel(plan);
         return (
-          <div
+          <Card
             key={plan.id}
-            className={
-              featured
-                ? "relative rounded-2xl border border-primary/50 bg-card p-8 glow-violet"
-                : "relative rounded-2xl border border-border bg-card p-8"
-            }
+            className={cn(
+              "relative p-8",
+              featured && "border-primary/50 glow-violet",
+            )}
           >
             {featured && (
               <span className="absolute right-6 top-6 rounded-full bg-brand-balloon px-2.5 py-0.5 text-xs font-medium text-white">
@@ -102,7 +135,7 @@ export function PricingPlans() {
                 {plan.priceCents <= 0 ? "Start free" : `Start with ${plan.name}`}
               </Button>
             </Link>
-          </div>
+          </Card>
         );
       })}
     </div>

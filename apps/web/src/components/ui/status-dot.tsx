@@ -35,7 +35,7 @@ export function StatusDot({
     <span className={cn("inline-flex items-center gap-2", className)}>
       <span className="relative flex h-2.5 w-2.5">
         {animate && (
-          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success/60" />
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success/60 motion-reduce:animate-none" />
         )}
         <span
           className={cn(

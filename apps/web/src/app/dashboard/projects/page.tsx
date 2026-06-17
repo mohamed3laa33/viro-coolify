@@ -7,7 +7,6 @@ import {
   ChevronRight,
   FolderGit2,
   GitBranch,
-  Loader2,
   Package,
   Plus,
 } from "lucide-react";
@@ -17,6 +16,7 @@ import { mockApps, mockProjects } from "@/lib/mock";
 import { isDemoMode } from "@/lib/demo";
 import { useResource } from "@/lib/use-resource";
 import { PageHeader } from "@/components/page-header";
+import { EmptyState } from "@/components/empty-state";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -27,12 +27,13 @@ import { StatusDot } from "@/components/ui/status-dot";
 
 export default function ProjectsPage() {
   const { activeOrgId, authedCall } = useAuth();
+  const demo = isDemoMode();
 
-  const { data, refetch } = useResource(
+  const { data, error, refetch } = useResource(
     activeOrgId
       ? () => authedCall((token, on) => api.listProjects(activeOrgId, token, on))
       : null,
-    { data: isDemoMode() ? mockProjects : [] },
+    { data: demo ? mockProjects : [] },
     [activeOrgId],
   );
 
@@ -82,6 +83,18 @@ export default function ProjectsPage() {
 
       {notice && <Notice>{notice}</Notice>}
 
+      {error && !demo && (
+        <Notice
+          variant="error"
+          className="items-center justify-between gap-4"
+        >
+          <span>Couldn’t load projects — the API is unreachable.</span>
+          <Button size="sm" variant="secondary" onClick={refetch}>
+            Retry
+          </Button>
+        </Notice>
+      )}
+
       {creating && (
         <Card>
           <CardContent className="pt-6">
@@ -101,8 +114,7 @@ export default function ProjectsPage() {
                 />
               </div>
               <div className="flex items-center gap-2">
-                <Button type="submit" disabled={pending}>
-                  {pending && <Loader2 className="h-4 w-4 animate-spin" />}
+                <Button type="submit" loading={pending}>
                   Create
                 </Button>
                 <Button
@@ -127,12 +139,18 @@ export default function ProjectsPage() {
         ))}
       </div>
 
-      {projects.length === 0 && (
-        <Card className="flex flex-col items-center justify-center py-16 text-center">
-          <p className="text-sm text-muted-foreground">
-            No projects yet. Create your first project to get started.
-          </p>
-        </Card>
+      {projects.length === 0 && !(error && !demo) && (
+        <EmptyState
+          icon={FolderGit2}
+          title="No projects yet"
+          description="Create your first project to group apps and scope team access."
+          action={
+            <Button onClick={() => setCreating(true)}>
+              <Plus className="h-4 w-4" />
+              New Project
+            </Button>
+          }
+        />
       )}
     </div>
   );
@@ -157,12 +175,15 @@ function ProjectRow({ project }: { project: Project }) {
   );
 
   const apps: App[] = open ? data.data : [];
+  const appsListId = `project-apps-${project.id}`;
 
   return (
     <Card>
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-controls={appsListId}
         className="flex w-full items-center justify-between px-6 py-4 text-left"
       >
         <div className="flex items-center gap-3">
@@ -185,7 +206,7 @@ function ProjectRow({ project }: { project: Project }) {
       </button>
 
       {open && (
-        <CardContent className="border-t border-border p-0">
+        <CardContent id={appsListId} className="border-t border-border p-0">
           {loading && (
             <p className="px-6 py-4 text-sm text-muted-foreground">
               Loading apps…

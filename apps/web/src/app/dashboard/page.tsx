@@ -12,11 +12,18 @@ import { StatCard } from "@/components/stat-card";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { StatusDot } from "@/components/ui/status-dot";
+import { Notice } from "@/components/ui/notice";
+import { Skeleton } from "@/components/ui/skeleton";
 
 export default function DashboardOverview() {
   const { user, activeOrgId, authedCall } = useAuth();
 
-  const { data } = useResource(
+  const {
+    data,
+    loading: appsLoading,
+    error: appsError,
+    refetch: refetchApps,
+  } = useResource(
     activeOrgId
       ? () => authedCall((token, on) => api.listApps(activeOrgId, token, on))
       : null,
@@ -25,7 +32,12 @@ export default function DashboardOverview() {
   );
   const apps = data.data;
 
-  const { data: dbData } = useResource(
+  const {
+    data: dbData,
+    loading: dbLoading,
+    error: dbError,
+    refetch: refetchDatabases,
+  } = useResource(
     activeOrgId
       ? () => authedCall((token, on) => api.listDatabases(activeOrgId, token, on))
       : null,
@@ -48,6 +60,18 @@ export default function DashboardOverview() {
   const running = apps.filter((a) => a.status === "running").length;
   const firstName = (user?.name ?? "there").split(" ")[0];
 
+  // Surface real failures instead of silently rendering empty/zero stats.
+  // In demo mode the hook falls back to mock data, so don't alarm there.
+  const demo = isDemoMode();
+  const fetchFailed = !demo && (appsError || dbError);
+  // Initial load: no data yet and the fetchers are still in flight.
+  const initialLoading = appsLoading || dbLoading;
+
+  const retry = () => {
+    if (appsError) refetchApps();
+    if (dbError) refetchDatabases();
+  };
+
   return (
     <div className="space-y-8">
       <PageHeader
@@ -63,29 +87,59 @@ export default function DashboardOverview() {
         }
       />
 
+      {fetchFailed ? (
+        <Notice variant="error">
+          <div className="flex items-start justify-between gap-3">
+            <span>
+              We couldn&apos;t load your dashboard stats. Some figures may be
+              missing or out of date.
+            </span>
+            <Button
+              variant="secondary"
+              size="sm"
+              className="shrink-0"
+              onClick={retry}
+            >
+              Retry
+            </Button>
+          </div>
+        </Notice>
+      ) : null}
+
       <div className="grid gap-4 sm:grid-cols-3">
-        <StatCard
-          label="Apps"
-          value={apps.length}
-          icon={Boxes}
-          hint={`${running} running`}
-        />
-        <StatCard
-          label="Databases"
-          value={databases.length}
-          icon={Database}
-          hint={`${databases.filter((d) => d.status === "running").length} running`}
-        />
-        <StatCard
-          label="Regions"
-          value={regions.length}
-          icon={Globe2}
-          hint={
-            regions.length > 0
-              ? regions.slice(0, 3).join(", ") + (regions.length > 3 ? "…" : "")
-              : "—"
-          }
-        />
+        {initialLoading ? (
+          <>
+            <Skeleton className="h-28 w-full" />
+            <Skeleton className="h-28 w-full" />
+            <Skeleton className="h-28 w-full" />
+          </>
+        ) : (
+          <>
+            <StatCard
+              label="Apps"
+              value={apps.length}
+              icon={Boxes}
+              hint={`${running} running`}
+            />
+            <StatCard
+              label="Databases"
+              value={databases.length}
+              icon={Database}
+              hint={`${databases.filter((d) => d.status === "running").length} running`}
+            />
+            <StatCard
+              label="Regions"
+              value={regions.length}
+              icon={Globe2}
+              hint={
+                regions.length > 0
+                  ? regions.slice(0, 3).join(", ") +
+                    (regions.length > 3 ? "…" : "")
+                  : "—"
+              }
+            />
+          </>
+        )}
       </div>
 
       <Card>

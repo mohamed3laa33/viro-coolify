@@ -21,9 +21,14 @@ interface ResourceState<T> {
  * The `fallback` is whatever the caller decides to show on failure: in demo
  * mode that is mock data, and in production it is a real empty/error state.
  * Gating belongs at the call site (see `isDemoMode()`); the hook stays neutral.
+ *
+ * Each effect run creates a fresh AbortController and passes its `signal` to
+ * the fetcher, then aborts it on cleanup — giving true request cancellation
+ * (e.g. forwarded into `authedCall(fn, signal)`) on top of the stale-result
+ * guard. The fetcher may ignore the signal for backwards compatibility.
  */
 export function useResource<T>(
-  fetcher: (() => Promise<T>) | null,
+  fetcher: ((signal: AbortSignal) => Promise<T>) | null,
   fallback: T,
   deps: ReadonlyArray<unknown> = [],
 ): ResourceState<T> {
@@ -47,17 +52,23 @@ export function useResource<T>(
       return;
     }
 
+    const controller = new AbortController();
+
     setLoading(true);
 
-    fetcher()
+    fetcher(controller.signal)
       .then((result) => {
         if (!active) return;
         setData(result);
         setUsingFallback(false);
         setError(false);
       })
-      .catch(() => {
+      .catch((err: unknown) => {
         if (!active) return;
+        // A deliberate cancellation (cleanup/unmount) is not an error state.
+        if (controller.signal.aborted || (err instanceof DOMException && err.name === "AbortError")) {
+          return;
+        }
         setData(fallback);
         setUsingFallback(true);
         setError(true);
@@ -68,6 +79,7 @@ export function useResource<T>(
 
     return () => {
       active = false;
+      controller.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [...deps, nonce]);

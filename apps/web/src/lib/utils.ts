@@ -59,3 +59,30 @@ export function buildAppFqdn(
     orgSlug,
   )}.${VORTEX_BASE_DOMAIN}`;
 }
+
+/**
+ * Default landing path used when an internal redirect target is missing or
+ * unsafe.
+ */
+export const DEFAULT_NEXT_PATH = "/dashboard";
+
+/**
+ * Sanitize a `next` redirect parameter so it can only point at an in-app path.
+ *
+ * Returns `param` only when it is a same-origin absolute path: it must start
+ * with a single "/" (not "//", which is protocol-relative and would navigate
+ * off-site) and must not contain ":" (which would allow `javascript:` or
+ * absolute URLs like `http://evil.com`). Anything else falls back to
+ * {@link DEFAULT_NEXT_PATH}.
+ */
+export function safeNextPath(param: string | null): string {
+  if (
+    param &&
+    param.startsWith("/") &&
+    !param.startsWith("//") &&
+    !param.includes(":")
+  ) {
+    return param;
+  }
+  return DEFAULT_NEXT_PATH;
+}

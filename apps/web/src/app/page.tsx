@@ -158,7 +158,7 @@ export default function LandingPage() {
             </ul>
           </div>
 
-          <div className="overflow-hidden rounded-xl border border-border bg-background shadow-2xl">
+          <div className="overflow-hidden rounded-xl border border-border bg-[#0c0c0f] shadow-2xl">
             <div className="flex items-center gap-2 border-b border-border px-4 py-3">
               <span className="h-3 w-3 rounded-full bg-destructive/70" />
               <span className="h-3 w-3 rounded-full bg-warning/70" />

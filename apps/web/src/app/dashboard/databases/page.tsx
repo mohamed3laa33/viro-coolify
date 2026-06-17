@@ -1,16 +1,18 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
-import { Plus, Database as DatabaseIcon, Loader2 } from "lucide-react";
+import { Plus, Database as DatabaseIcon } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { api, type Template } from "@/lib/api";
 import { mockDatabases, mockTemplates } from "@/lib/mock";
 import { isDemoMode } from "@/lib/demo";
 import { useResource } from "@/lib/use-resource";
 import { PageHeader } from "@/components/page-header";
+import { EmptyState } from "@/components/empty-state";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import {
   Card,
   CardContent,
@@ -37,11 +39,12 @@ function engineAccent(key: string): string {
 export default function DatabasesPage() {
   const { activeOrgId, authedCall } = useAuth();
 
-  const { data, refetch } = useResource(
+  const demo = isDemoMode();
+  const { data, error, refetch } = useResource(
     activeOrgId
       ? () => authedCall((token, on) => api.listDatabases(activeOrgId, token, on))
       : null,
-    { data: isDemoMode() ? mockDatabases : [] },
+    { data: demo ? mockDatabases : [] },
     [activeOrgId],
   );
   const databases = data.data;
@@ -49,7 +52,7 @@ export default function DatabasesPage() {
   // Engine catalog is driven by the public services catalog (kind "database").
   const { data: templatesData } = useResource(
     () => api.getServiceCatalog(),
-    { data: isDemoMode() ? mockTemplates : [] },
+    { data: demo ? mockTemplates : [] },
     [],
   );
   const engineTemplates: Template[] = templatesData.data
@@ -118,7 +121,7 @@ export default function DatabasesPage() {
             <CardTitle>Create database</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
-            {notice && <Notice>{notice}</Notice>}
+            {notice && <Notice variant="error">{notice}</Notice>}
             <form
               onSubmit={onCreate}
               className="grid gap-4 sm:grid-cols-[1fr_1fr_auto] sm:items-end"
@@ -136,9 +139,8 @@ export default function DatabasesPage() {
               </div>
               <div className="space-y-2">
                 <Label htmlFor="db-engine">Engine</Label>
-                <select
+                <Select
                   id="db-engine"
-                  className="flex h-10 w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-ring"
                   value={engine}
                   onChange={(e) => setEngine(e.target.value)}
                 >
@@ -150,11 +152,10 @@ export default function DatabasesPage() {
                       {tpl.name}
                     </option>
                   ))}
-                </select>
+                </Select>
               </div>
               <div className="flex items-center gap-2">
-                <Button type="submit" disabled={pending}>
-                  {pending && <Loader2 className="h-4 w-4 animate-spin" />}
+                <Button type="submit" loading={pending}>
                   Create
                 </Button>
                 <Button
@@ -200,44 +201,65 @@ export default function DatabasesPage() {
         ))}
       </div>
 
-      <Card>
-        <CardContent className="p-0">
-          {databases.length === 0 ? (
-            <p className="px-6 py-10 text-center text-sm text-muted-foreground">
-              No databases yet. Create one to get started.
-            </p>
-          ) : (
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-border text-left text-xs uppercase tracking-wide text-muted-foreground">
-                <th className="px-6 py-3 font-medium">Name</th>
-                <th className="px-6 py-3 font-medium">Engine</th>
-                <th className="px-6 py-3 font-medium">Status</th>
-                <th className="px-6 py-3 font-medium">ID</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border">
-              {databases.map((db) => {
-                return (
-                  <tr key={db.id} className="hover:bg-muted/40">
-                    <td className="px-6 py-4 font-medium">{db.name}</td>
-                    <td className="px-6 py-4">
-                      <Badge variant="outline">{engineLabel(db.engine)}</Badge>
-                    </td>
-                    <td className="px-6 py-4">
-                      <StatusDot status={db.status} showLabel />
-                    </td>
-                    <td className="px-6 py-4 font-mono text-xs text-muted-foreground">
-                      {db.id}
-                    </td>
+      {error && !demo ? (
+        <Notice variant="error">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <span>Could not load databases — the API is unreachable.</span>
+            <Button variant="secondary" size="sm" onClick={refetch}>
+              Retry
+            </Button>
+          </div>
+        </Notice>
+      ) : databases.length === 0 ? (
+        <EmptyState
+          icon={DatabaseIcon}
+          title="No databases yet"
+          description="Spin up a managed Postgres, Redis, MySQL, or MongoDB database with automated backups."
+          action={
+            <Button onClick={() => startCreate()}>
+              <Plus className="h-4 w-4" />
+              Create database
+            </Button>
+          }
+        />
+      ) : (
+        <Card>
+          <CardContent className="p-0">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-border text-left text-xs uppercase tracking-wide text-muted-foreground">
+                    <th className="px-6 py-3 font-medium">Name</th>
+                    <th className="px-6 py-3 font-medium">Engine</th>
+                    <th className="px-6 py-3 font-medium">Status</th>
+                    <th className="px-6 py-3 font-medium">ID</th>
                   </tr>
-                );
-              })}
-            </tbody>
-          </table>
-          )}
-        </CardContent>
-      </Card>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {databases.map((db) => {
+                    return (
+                      <tr key={db.id} className="hover:bg-muted/40">
+                        <td className="px-6 py-4 font-medium">{db.name}</td>
+                        <td className="px-6 py-4">
+                          <Badge variant="outline">
+                            {engineLabel(db.engine)}
+                          </Badge>
+                        </td>
+                        <td className="px-6 py-4">
+                          <StatusDot status={db.status} showLabel />
+                        </td>
+                        <td className="px-6 py-4 font-mono text-xs text-muted-foreground">
+                          {db.id}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

@@ -1,22 +1,36 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Plus, Search, GitBranch, Package, Loader2, X } from "lucide-react";
+import { Plus, Search, GitBranch, Package, X, Rocket } from "lucide-react";
 import { useAuth } from "@/lib/auth";
-import { api, statusVariant, type CreateAppInput } from "@/lib/api";
+import { api, ApiError, statusVariant, type CreateAppInput } from "@/lib/api";
 import { mockApps } from "@/lib/mock";
 import { isDemoMode } from "@/lib/demo";
 import { useResource } from "@/lib/use-resource";
 import { PageHeader } from "@/components/page-header";
+import { EmptyState } from "@/components/empty-state";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Notice } from "@/components/ui/notice";
 import { StatusDot } from "@/components/ui/status-dot";
 import { Badge, type BadgeVariant } from "@/components/ui/badge";
+
+// Build packs the backend recognizes. Surfaced as a dropdown rather than a
+// free-text field so we only ever submit a supported value.
+const BUILD_PACKS = ["nixpacks", "dockerfile", "static"] as const;
+
+// Extract a human-readable message from an unknown thrown value, preferring the
+// real ApiError message over a generic fallback.
+function errorMessage(err: unknown, fallback: string): string {
+  if (err instanceof ApiError) return err.message;
+  if (err instanceof Error && err.message) return err.message;
+  return fallback;
+}
 
 // The status helper can yield "muted", which the Badge renders as "outline".
 function statusBadgeVariant(status: string): BadgeVariant {
@@ -29,14 +43,36 @@ export default function AppsPage() {
   const [query, setQuery] = useState("");
   const [creating, setCreating] = useState(false);
 
-  const { data, refetch } = useResource(
+  // useResource only reports a boolean `error`; capture the actual failure here
+  // so we can show the real ApiError message instead of a misleading empty state.
+  const fetchErrorRef = useRef<string | null>(null);
+
+  const { data, error, refetch } = useResource(
     activeOrgId
-      ? () => authedCall((token, on) => api.listApps(activeOrgId, token, on))
+      ? (signal) =>
+          authedCall(
+            (token, on) =>
+              api
+                .listApps(activeOrgId, token, on, { signal })
+                .then((res) => {
+                  fetchErrorRef.current = null;
+                  return res;
+                })
+                .catch((err: unknown) => {
+                  fetchErrorRef.current = errorMessage(
+                    err,
+                    "Failed to load apps.",
+                  );
+                  throw err;
+                }),
+            signal,
+          )
       : null,
     { data: isDemoMode() ? mockApps : [] },
     [activeOrgId],
   );
 
+  const showError = error && !isDemoMode();
   const apps = data.data.filter((a) =>
     a.name.toLowerCase().includes(query.toLowerCase()),
   );
@@ -62,6 +98,19 @@ export default function AppsPage() {
             refetch();
           }}
         />
+      )}
+
+      {showError && (
+        <Notice variant="error">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <span>
+              {fetchErrorRef.current ?? "Failed to load apps."}
+            </span>
+            <Button size="sm" variant="secondary" onClick={refetch}>
+              Retry
+            </Button>
+          </div>
+        </Notice>
       )}
 
       <div className="relative max-w-sm">
@@ -109,15 +158,27 @@ export default function AppsPage() {
         ))}
       </div>
 
-      {apps.length === 0 && (
-        <Card className="flex flex-col items-center justify-center py-16 text-center">
-          <p className="text-sm text-muted-foreground">
-            {query
-              ? `No apps match “${query}”.`
-              : "No apps yet. Create your first app to get started."}
-          </p>
-        </Card>
-      )}
+      {apps.length === 0 &&
+        !showError &&
+        (query ? (
+          <Card className="flex flex-col items-center justify-center py-16 text-center">
+            <p className="text-sm text-muted-foreground">
+              No apps match “{query}”.
+            </p>
+          </Card>
+        ) : (
+          <EmptyState
+            icon={Rocket}
+            title="No apps yet"
+            description="Deploy your first application from a Git repository to get started."
+            action={
+              <Button onClick={() => setCreating(true)}>
+                <Plus className="h-4 w-4" />
+                Create your first app
+              </Button>
+            }
+          />
+        ))}
     </div>
   );
 }
@@ -134,7 +195,10 @@ function CreateAppForm({
   const [name, setName] = useState("");
   const [gitRepository, setGitRepository] = useState("");
   const [gitBranch, setGitBranch] = useState("main");
-  const [buildPack, setBuildPack] = useState("nixpacks");
+  const [buildPack, setBuildPack] = useState<string>(BUILD_PACKS[0]);
+  // Requested resources; left blank to let the backend apply platform defaults.
+  const [cpu, setCpu] = useState("");
+  const [memoryMb, setMemoryMb] = useState("");
   const [pending, setPending] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -150,8 +214,17 @@ function CreateAppForm({
       name: trimmed,
       gitRepository: gitRepository.trim(),
       gitBranch: gitBranch.trim() || "main",
-      buildPack: buildPack.trim() || "nixpacks",
+      buildPack: buildPack.trim() || BUILD_PACKS[0],
     };
+    // Only send resources the user actually specified; blank => platform default.
+    const cpuValue = Number(cpu);
+    if (cpu.trim() && Number.isFinite(cpuValue) && cpuValue > 0) {
+      input.cpu = cpuValue;
+    }
+    const memValue = Number(memoryMb);
+    if (memoryMb.trim() && Number.isFinite(memValue) && memValue > 0) {
+      input.memoryMb = memValue;
+    }
     setPending(true);
     setNotice(null);
     try {
@@ -160,8 +233,8 @@ function CreateAppForm({
       );
       onCreated();
       router.push(`/dashboard/apps/${app.id}`);
-    } catch {
-      setNotice("Could not create the app — the API is unreachable.");
+    } catch (err) {
+      setNotice(errorMessage(err, "Could not create the app."));
     } finally {
       setPending(false);
     }
@@ -176,7 +249,7 @@ function CreateAppForm({
         </Button>
       </CardHeader>
       <CardContent className="space-y-4">
-        {notice && <Notice>{notice}</Notice>}
+        {notice && <Notice variant="error">{notice}</Notice>}
         <form onSubmit={onSubmit} className="space-y-4">
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-2">
@@ -212,12 +285,44 @@ function CreateAppForm({
             </div>
             <div className="space-y-2">
               <Label htmlFor="app-buildpack">Build pack</Label>
-              <Input
+              <Select
                 id="app-buildpack"
-                className="font-mono"
-                placeholder="nixpacks"
                 value={buildPack}
                 onChange={(e) => setBuildPack(e.target.value)}
+              >
+                {BUILD_PACKS.map((bp) => (
+                  <option key={bp} value={bp}>
+                    {bp}
+                  </option>
+                ))}
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="app-cpu">CPU (vCPU)</Label>
+              <Input
+                id="app-cpu"
+                type="number"
+                inputMode="decimal"
+                min="0"
+                step="0.1"
+                className="font-mono"
+                placeholder="Platform default"
+                value={cpu}
+                onChange={(e) => setCpu(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="app-memory">Memory (MB)</Label>
+              <Input
+                id="app-memory"
+                type="number"
+                inputMode="numeric"
+                min="0"
+                step="64"
+                className="font-mono"
+                placeholder="Platform default"
+                value={memoryMb}
+                onChange={(e) => setMemoryMb(e.target.value)}
               />
             </div>
           </div>
@@ -225,12 +330,8 @@ function CreateAppForm({
             <Button type="button" variant="ghost" onClick={onClose}>
               Cancel
             </Button>
-            <Button type="submit" disabled={pending}>
-              {pending ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Plus className="h-4 w-4" />
-              )}
+            <Button type="submit" loading={pending}>
+              {!pending && <Plus className="h-4 w-4" />}
               Create app
             </Button>
           </div>

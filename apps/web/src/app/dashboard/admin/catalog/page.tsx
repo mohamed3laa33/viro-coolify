@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
-import { Loader2, Pencil, Plus, Trash2 } from "lucide-react";
+import { Pencil, Plus, Trash2 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import {
   api,
@@ -10,7 +10,6 @@ import {
   type TemplateKind,
 } from "@/lib/api";
 import { mockTemplates } from "@/lib/mock";
-import { isDemoMode } from "@/lib/demo";
 import { useResource } from "@/lib/use-resource";
 import { cn } from "@/lib/utils";
 import { PageHeader } from "@/components/page-header";
@@ -19,9 +18,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
-
-const SELECT_CLASS =
-  "flex h-10 w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-ring disabled:cursor-not-allowed disabled:opacity-50";
+import { Notice } from "@/components/ui/notice";
+import { Select } from "@/components/ui/select";
 
 const KINDS: TemplateKind[] = ["service", "database", "app"];
 
@@ -42,7 +40,7 @@ export default function AdminCatalogPage() {
 
   const { data, refetch, usingFallback } = useResource(
     () => authedCall((token, on) => api.listTemplates(token, on)),
-    { data: isDemoMode() ? mockTemplates : [] },
+    { data: mockTemplates },
     [],
   );
   const templates = data.data;
@@ -89,16 +87,12 @@ export default function AdminCatalogPage() {
       />
 
       {usingFallback && (
-        <div className="rounded-md border border-warning/30 bg-warning/10 px-4 py-2 text-sm text-warning">
+        <Notice variant="warning">
           Showing demo data — admin API unreachable. Edits won&apos;t persist.
-        </div>
+        </Notice>
       )}
 
-      {notice && (
-        <div className="rounded-md border border-primary/30 bg-primary/10 px-4 py-2 text-sm text-primary">
-          {notice}
-        </div>
-      )}
+      {notice && <Notice variant="error">{notice}</Notice>}
 
       {editing === "new" && (
         <TemplateForm
@@ -123,7 +117,8 @@ export default function AdminCatalogPage() {
 
       <Card>
         <CardContent className="p-0">
-          <table className="w-full text-sm">
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-border text-left text-xs uppercase tracking-wide text-muted-foreground">
                 <th className="px-6 py-3 font-medium">Template</th>
@@ -185,7 +180,8 @@ export default function AdminCatalogPage() {
                 </tr>
               ))}
             </tbody>
-          </table>
+            </table>
+          </div>
         </CardContent>
       </Card>
 
@@ -294,9 +290,8 @@ function TemplateForm({
             </div>
             <div className="space-y-2">
               <Label htmlFor="tpl-kind">Kind</Label>
-              <select
+              <Select
                 id="tpl-kind"
-                className={SELECT_CLASS}
                 value={form.kind}
                 onChange={(e) => set("kind", e.target.value as TemplateKind)}
               >
@@ -305,7 +300,7 @@ function TemplateForm({
                     {k}
                   </option>
                 ))}
-              </select>
+              </Select>
             </div>
           </div>
 
@@ -364,8 +359,7 @@ function TemplateForm({
           </div>
 
           <div className="flex items-center gap-2">
-            <Button type="submit" disabled={pending}>
-              {pending && <Loader2 className="h-4 w-4 animate-spin" />}
+            <Button type="submit" loading={pending}>
               Save template
             </Button>
             <Button type="button" variant="ghost" onClick={onCancel}>

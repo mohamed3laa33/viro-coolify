@@ -35,4 +35,20 @@ describe("Button", () => {
     const btn = screen.getByRole("button", { name: "Safe" });
     expect(btn).toHaveAttribute("type", "button");
   });
+
+  it("forwards the disabled prop", () => {
+    render(<Button disabled>Off</Button>);
+    expect(screen.getByRole("button", { name: "Off" })).toBeDisabled();
+  });
+
+  it("shows a spinner and disables the button when loading", () => {
+    render(<Button loading>Deploying</Button>);
+    const btn = screen.getByRole("button", { name: "Deploying" });
+    expect(btn).toBeDisabled();
+    expect(btn).toHaveAttribute("aria-busy", "true");
+    // Loader2 renders an svg with the spin animation.
+    const spinner = btn.querySelector("svg");
+    expect(spinner).not.toBeNull();
+    expect(spinner?.getAttribute("class")).toContain("animate-spin");
+  });
 });

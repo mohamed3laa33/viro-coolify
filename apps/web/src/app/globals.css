@@ -13,8 +13,7 @@
     --muted-foreground: 240 5% 65%;
     --primary: 262 83% 58%;
     --primary-foreground: 0 0% 100%;
-    /* Balloon gradient stops: violet (#9d4edd) → magenta (#e0218a). */
-    --brand-violet: 271 65% 59%;
+    /* Brand magenta (#e0218a) — second stop of the balloon gradient. */
     --brand-magenta: 327 75% 50%;
     --ring: 262 83% 58%;
     --success: 142 71% 45%;
@@ -42,6 +41,20 @@
 
   ::selection {
     background-color: hsl(var(--primary) / 0.35);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    html {
+      scroll-behavior: auto;
+    }
+
+    *,
+    *::before,
+    *::after {
+      animation: none !important;
+      transition: none !important;
+      scroll-behavior: auto !important;
+    }
   }
 }
 

@@ -30,7 +30,9 @@ export function Logo({ className, size = 28, withWordmark = false }: LogoProps) 
             y2="26"
             gradientUnits="userSpaceOnUse"
           >
-            <stop stopColor="hsl(var(--brand-violet))" />
+            {/* brand tokens: violet has no CSS var yet (see tailwind brand.violet);
+                magenta tracks the --brand-magenta token in globals.css. */}
+            <stop stopColor="#9D4EDD" />
             <stop offset="1" stopColor="hsl(var(--brand-magenta))" />
           </linearGradient>
         </defs>
