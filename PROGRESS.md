@@ -37,15 +37,21 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
 ## Milestone 5 — Billing & usage (Stripe test-mode) ⬜
 - ⬜ Plans, subscriptions, usage metering, webhooks (feature-flagged); unit tests
 
-## Milestone 6 — Web UI (fly.io look) ⬜
-- ⬜ Next.js + Tailwind + shadcn/ui, fly.io theme (violet/near-black/mono)
-- ⬜ Auth pages, dashboard, apps list/detail, deploy flow, logs/metrics
-- ⬜ Databases, domains, team settings, billing; component tests
+## Milestone 6 — Web UI (fly.io look) ✅
+- ✅ Next.js 15 (App Router, RSC) + Tailwind + fly.io theme (violet #7C3AED / near-black / mono)
+- ✅ Balloon logo (violet→magenta gradient), marketing landing, login/signup
+- ✅ Dashboard shell (sidebar + topbar), overview, apps list + app detail (Overview/Logs/Metrics/Env/Settings tabs)
+- ✅ Databases, domains, metrics, settings (General/Team/Billing) pages
+- ✅ Typed API client + AuthProvider; graceful mock fallback when API is down
+- ✅ `npm run build` green (12 routes); vitest 17/17 passing
+- ✅ Security: upgraded Next 15.1.6 → **15.5.19** (patched CVE-2025-66478)
 
-## Milestone 7 — Local dev & DO deployment (prepared) ⬜
-- ⬜ Dockerfiles + `docker-compose` for full local stack
-- ⬜ Helm chart + k8s manifests; Terraform for DOKS; `doctl` deploy scripts
-- ⬜ GitHub Actions CI (build + test)
+## Milestone 7 — Local dev & DO deployment (prepared) ✅
+- ✅ Dockerfiles (API: distroless static; Web: Next standalone) + full-stack `docker-compose.full.yml`
+- ✅ Helm chart (`deploy/helm/viro`): api/web deployments+services, ingress, secret, values
+- ✅ Terraform for DOKS (cluster, VPC, registry, managed Postgres) + `doctl` scripts (provision/build/deploy/teardown)
+- ✅ GitHub Actions CI (Go vet/test/build + web install/test/build); `deploy/README.md`
+- ⬜ (Live run deferred to tomorrow with your DO credentials — by design)
 
 ## Milestone 8 — Verification ⬜
 - ⬜ Judge-agent review after each milestone; end-to-end `make test` green
