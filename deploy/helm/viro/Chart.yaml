@@ -1,0 +1,8 @@
+apiVersion: v2
+name: viro
+description: Viro — a fly.io-style hosting platform over Coolify (control-plane API + web UI)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+maintainers:
+  - name: Mohamed Abdelshakor

@@ -1,0 +1,59 @@
+# Full local stack: Postgres + Redis + Viro API + Viro web.
+# Run from the repo root:
+#   docker compose -f docker/docker-compose.full.yml up --build
+#
+# Point at a real Coolify instance via VIRO_COOLIFY_BASE_URL / VIRO_COOLIFY_TOKEN.
+# Without them the API runs in demo mode (no outbound Coolify calls).
+
+name: viro
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: viro
+      POSTGRES_PASSWORD: viro
+      POSTGRES_DB: viro
+    ports: ["5432:5432"]
+    volumes: ["viro_pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U viro"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports: ["6379:6379"]
+    volumes: ["viro_redisdata:/data"]
+
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.api
+    environment:
+      VIRO_ENV: development
+      VIRO_HTTP_ADDR: ":8080"
+      VIRO_DATABASE_URL: postgres://viro:viro@postgres:5432/viro?sslmode=disable
+      VIRO_JWT_SECRET: dev-insecure-secret-change-me
+      VIRO_CORS_ORIGINS: http://localhost:3000
+      VIRO_COOLIFY_BASE_URL: ${VIRO_COOLIFY_BASE_URL:-}
+      VIRO_COOLIFY_TOKEN: ${VIRO_COOLIFY_TOKEN:-}
+    ports: ["8080:8080"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.web
+    environment:
+      NEXT_PUBLIC_VIRO_API_URL: http://localhost:8080
+    ports: ["3000:3000"]
+    depends_on: [api]
+
+volumes:
+  viro_pgdata:
+  viro_redisdata:

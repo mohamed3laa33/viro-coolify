@@ -1,0 +1,8 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored.
+do_token     = "dop_v1_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+region       = "fra1"
+cluster_name = "viro"
+node_size    = "s-2vcpu-4gb"
+min_nodes    = 2
+max_nodes    = 5
+create_managed_postgres = true

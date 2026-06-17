@@ -1,0 +1,25 @@
+# Viro control-plane API — multi-stage build producing a tiny static image.
+# Build context is the repo root:  docker build -f docker/Dockerfile.api .
+# syntax=docker/dockerfile:1
+
+FROM golang:1.26-alpine AS build
+WORKDIR /src
+RUN apk add --no-cache ca-certificates
+COPY apps/api/go.mod apps/api/go.sum ./
+RUN go mod download
+COPY apps/api/ ./
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_TIME=unknown
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
+    -ldflags="-s -w \
+      -X github.com/mohamed3laa33/viro-coolify/apps/api/internal/version.Version=${VERSION} \
+      -X github.com/mohamed3laa33/viro-coolify/apps/api/internal/version.Commit=${COMMIT} \
+      -X github.com/mohamed3laa33/viro-coolify/apps/api/internal/version.BuildTime=${BUILD_TIME}" \
+    -o /out/viro-api ./cmd/api
+
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=build /out/viro-api /viro-api
+EXPOSE 8080
+USER nonroot:nonroot
+ENTRYPOINT ["/viro-api"]
