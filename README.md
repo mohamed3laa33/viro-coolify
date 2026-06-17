@@ -82,9 +82,9 @@ Tenant apps are reachable at **`<app>.<project>.<org>.vortex.v60ai.com`**; the p
   govulncheck), the web app (vitest, build, npm audit), and SAST (Semgrep). Security scanning
   (Trivy + gitleaks) runs on demand and via `./scripts/security-scan.sh`.
 
-> **Roadmap / in progress:** code-to-image builder (Kaniko/BuildKit), real metrics/logs pipeline
-> (Prometheus/Loki), scale-to-zero idle detection + KEDA HTTP wake, the `vortex` CLI, and
-> multi-region (deferred). See [`PROGRESS.md`](PROGRESS.md).
+> **Roadmap / in progress:** code-to-image builder (Kaniko/BuildKit) so git-based apps deploy,
+> real metrics/logs pipeline (Prometheus/Loki), scale-to-zero idle detection + KEDA HTTP wake, and
+> multi-region (deferred). See [`PROGRESS.md`](PROGRESS.md). The `vortex` CLI is in `apps/cli`.
 
 ## Monorepo layout
 
@@ -92,7 +92,7 @@ Tenant apps are reachable at **`<app>.<project>.<org>.vortex.v60ai.com`**; the p
 |------|------|
 | `apps/api` | Go 1.26 control-plane API. Packages: `auth`, `identity`, `httpx`, `platform`, `billing`, `kube`, `store` (memory + postgres), `catalog`, `domain`, `config`, `notify`, `version`. |
 | `apps/web` | Next.js 15 dashboard (TypeScript, Tailwind, fly.io theme) + admin panel. |
-| `apps/cli` | The `vortex` CLI (flyctl-equivalent). *In progress.* |
+| `apps/cli` | The `vortex` CLI (flyctl-equivalent) — auth, orgs/projects/apps, services, secrets, plans. |
 | `deploy/`  | `helmfile.yaml`, Helm charts (`helm/viro`, `charts/*`), raw `k8s/` manifests, and `terraform/` for DOKS. |
 | `docker/`  | Dockerfiles (`Dockerfile.api`, `Dockerfile.web`) + `docker-compose` for local dev. |
 | `docs/`    | Architecture and reference docs. |

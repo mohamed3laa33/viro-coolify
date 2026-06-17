@@ -125,6 +125,7 @@ Local dev: `make dev-up` (Postgres/Redis), `make api-run`, `make web-dev`. Set
   revocation (today refresh tokens are stateless for up to 30 days) and a logout path.
 - **Platform:** code-to-image builder (Kaniko/BuildKit), real metrics/logs pipeline (Prometheus/
   Loki), scale-to-zero idle detection + KEDA HTTP wake, multi-region (deferred).
-- **CLI:** `apps/cli` (`vortex`) is in progress.
+- **CLI:** `apps/cli` (`vortex`) exists (auth, orgs/projects/apps, services, secrets, plans, config
+  context, `--json`). Keep its API client in sync with `httpx` routes when endpoints change.
 
 When you finish a feature, update `PROGRESS.md` and this file if an invariant or structure changed.
