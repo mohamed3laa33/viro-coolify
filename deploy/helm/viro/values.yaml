@@ -4,10 +4,15 @@ nameOverride: ""
 fullnameOverride: ""
 
 image:
-  # Set registry to your DigitalOcean Container Registry, e.g. registry.digitalocean.com/viro
-  registry: registry.digitalocean.com/viro
+  # Images are published to the GitHub Container Registry by
+  # .github/workflows/images.yml. Override per-environment with --set if needed.
+  registry: ghcr.io/mohamed3laa33
   pullPolicy: IfNotPresent
-  tag: "0.1.0"
+  tag: "latest"
+  # Name of a pre-created docker-registry Secret granting pull access to GHCR.
+  # Leave empty if the packages are public; the deploy workflow creates one
+  # named "ghcr-pull" when a token is available.
+  pullSecret: ""
 
 api:
   name: api

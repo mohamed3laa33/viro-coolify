@@ -17,6 +17,10 @@ spec:
         {{- include "viro.labels" . | nindent 8 }}
         app.kubernetes.io/component: web
     spec:
+      {{- if .Values.image.pullSecret }}
+      imagePullSecrets:
+        - name: {{ .Values.image.pullSecret }}
+      {{- end }}
       containers:
         - name: web
           image: "{{ .Values.image.registry }}/{{ .Values.web.image }}:{{ .Values.image.tag }}"
