@@ -69,39 +69,55 @@ export default function AppDetailPage({
 }: {
   params: Promise<{ uuid: string }>;
 }) {
-  const { uuid } = use(params);
-  const { accessToken } = useAuth();
+  // The route folder is named [uuid] for historical reasons; the param is the
+  // app id.
+  const { uuid: appId } = use(params);
+  const { activeOrgId, authedCall } = useAuth();
 
   const fallback = useMemo<App>(
-    () => mockApps.find((a) => a.uuid === uuid) ?? mockApps[0],
-    [uuid],
+    () => mockApps.find((a) => a.id === appId) ?? mockApps[0],
+    [appId],
   );
 
-  const { data: app, loading } = useResource(
-    () => api.getApp(uuid, accessToken ?? ""),
+  const { data: fetched, loading } = useResource(
+    activeOrgId
+      ? () => authedCall((token, on) => api.getApp(activeOrgId, appId, token, on))
+      : null,
     fallback,
-    [uuid, accessToken],
+    [activeOrgId, appId],
   );
+
+  // Local override so action results (which return the updated App) reflect
+  // immediately without a refetch.
+  const [override, setOverride] = useState<App | null>(null);
+  const app = override ?? fetched;
 
   const [tab, setTab] = useState<Tab>("Overview");
   const [pending, setPending] = useState<ActionKind | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
-  const cpu = useMemo(() => makeSeries(uuid.length + 3), [uuid]);
-  const mem = useMemo(() => makeSeries(uuid.length + 11), [uuid]);
+  const cpu = useMemo(() => makeSeries(appId.length + 3), [appId]);
+  const mem = useMemo(() => makeSeries(appId.length + 11), [appId]);
 
   async function runAction(kind: ActionKind) {
+    if (!activeOrgId) {
+      setNotice(
+        `${capitalize(kind)} unavailable — no active organization (demo mode).`,
+      );
+      return;
+    }
     setPending(kind);
     setNotice(null);
-    const token = accessToken ?? "";
     try {
-      const res =
+      const updated = await authedCall((token, on) =>
         kind === "deploy"
-          ? await api.deployApp(uuid, token)
+          ? api.deployApp(activeOrgId, appId, token, on)
           : kind === "stop"
-            ? await api.stopApp(uuid, token)
-            : await api.restartApp(uuid, token);
-      setNotice(`${capitalize(kind)} requested — status: ${res.status}`);
+            ? api.stopApp(activeOrgId, appId, token, on)
+            : api.restartApp(activeOrgId, appId, token, on),
+      );
+      setOverride(updated);
+      setNotice(`${capitalize(kind)} requested — status: ${updated.status}`);
     } catch {
       setNotice(
         `${capitalize(kind)} queued locally (API unreachable — running in demo mode).`,
@@ -129,13 +145,10 @@ export default function AppDetailPage({
             <h1 className="text-2xl font-semibold tracking-tight">
               {app.name}
             </h1>
-            <a
-              href={`https://${app.fqdn}`}
-              className="inline-flex items-center gap-1 font-mono text-sm text-muted-foreground hover:text-primary"
-            >
+            <span className="inline-flex items-center gap-1 font-mono text-sm text-muted-foreground">
               <Globe className="h-3.5 w-3.5" />
-              {app.fqdn}
-            </a>
+              {app.gitRepository}
+            </span>
           </div>
         </div>
 
@@ -216,18 +229,18 @@ export default function AppDetailPage({
             <StatusDot status={app.status} showLabel />
           </InfoCard>
           <InfoCard title="Repository">
-            <span className="font-mono text-sm">{app.git_repository}</span>
+            <span className="font-mono text-sm">{app.gitRepository}</span>
           </InfoCard>
           <InfoCard title="Branch">
             <span className="inline-flex items-center gap-1.5 font-mono text-sm">
               <GitBranch className="h-3.5 w-3.5 text-muted-foreground" />
-              {app.git_branch}
+              {app.gitBranch}
             </span>
           </InfoCard>
           <InfoCard title="Build pack">
             <span className="inline-flex items-center gap-1.5 font-mono text-sm">
               <Package className="h-3.5 w-3.5 text-muted-foreground" />
-              {app.build_pack}
+              {app.buildPack}
             </span>
           </InfoCard>
         </div>

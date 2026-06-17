@@ -13,12 +13,14 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { StatusDot } from "@/components/ui/status-dot";
 
 export default function DashboardOverview() {
-  const { accessToken, user } = useAuth();
+  const { user, activeOrgId, authedCall } = useAuth();
 
   const { data } = useResource(
-    () => api.listApps(accessToken ?? ""),
+    activeOrgId
+      ? () => authedCall((token, on) => api.listApps(activeOrgId, token, on))
+      : null,
     { data: mockApps },
-    [accessToken],
+    [activeOrgId],
   );
   const apps = data.data;
 
@@ -74,9 +76,9 @@ export default function DashboardOverview() {
         <CardContent className="p-0">
           <ul className="divide-y divide-border">
             {apps.slice(0, 5).map((app) => (
-              <li key={app.uuid}>
+              <li key={app.id}>
                 <Link
-                  href={`/dashboard/apps/${app.uuid}`}
+                  href={`/dashboard/apps/${app.id}`}
                   className="flex items-center justify-between px-6 py-4 transition-colors hover:bg-muted/50"
                 >
                   <div className="flex items-center gap-3">
@@ -84,13 +86,13 @@ export default function DashboardOverview() {
                     <div>
                       <p className="text-sm font-medium">{app.name}</p>
                       <p className="font-mono text-xs text-muted-foreground">
-                        {app.fqdn}
+                        {app.gitRepository}
                       </p>
                     </div>
                   </div>
                   <div className="flex items-center gap-4">
                     <span className="hidden font-mono text-xs text-muted-foreground sm:inline">
-                      {app.git_branch}
+                      {app.gitBranch}
                     </span>
                     <ArrowUpRight className="h-4 w-4 text-muted-foreground" />
                   </div>

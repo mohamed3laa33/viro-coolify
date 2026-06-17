@@ -6,14 +6,15 @@ import { ChevronDown, LogOut, Check } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/lib/auth";
 import { mockOrgs } from "@/lib/mock";
-import type { Org } from "@/lib/api";
 
 export function Topbar() {
   const router = useRouter();
-  const { user, logout } = useAuth();
+  const { user, logout, orgs: realOrgs, activeOrgId, setActiveOrgId } = useAuth();
 
-  const [orgs] = useState<Org[]>(mockOrgs);
-  const [activeOrg, setActiveOrg] = useState<Org>(mockOrgs[0]);
+  // Fall back to mock orgs when the API hasn't returned any (demo mode).
+  const orgs = realOrgs.length > 0 ? realOrgs : mockOrgs;
+  const activeOrg =
+    orgs.find((o) => o.id === activeOrgId) ?? orgs[0];
   const [orgOpen, setOrgOpen] = useState(false);
   const [userOpen, setUserOpen] = useState(false);
 
@@ -73,7 +74,7 @@ export function Topbar() {
                 key={org.id}
                 type="button"
                 onClick={() => {
-                  setActiveOrg(org);
+                  setActiveOrgId(org.id);
                   setOrgOpen(false);
                 }}
                 className="flex w-full items-center justify-between rounded-md px-2 py-2 text-sm text-foreground hover:bg-muted"

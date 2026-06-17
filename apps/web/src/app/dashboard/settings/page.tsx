@@ -1,8 +1,11 @@
 "use client";
 
 import { useState } from "react";
-import { Check } from "lucide-react";
+import { Check, Loader2 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
+import { api, type Plan } from "@/lib/api";
+import { mockBilling, mockPlans } from "@/lib/mock";
+import { useResource } from "@/lib/use-resource";
 import { cn } from "@/lib/utils";
 import { PageHeader } from "@/components/page-header";
 import {
@@ -151,99 +154,160 @@ export default function SettingsPage() {
   );
 }
 
+function formatPrice(plan: Plan): string {
+  const amount = (plan.priceCents / 100).toLocaleString(undefined, {
+    style: "currency",
+    currency: (plan.currency || "usd").toUpperCase(),
+    minimumFractionDigits: plan.priceCents % 100 === 0 ? 0 : 2,
+  });
+  return `${amount} / month`;
+}
+
 function BillingTab() {
-  const usage = [
-    { label: "Compute (machine-hours)", used: 412, total: 750, unit: "h" },
-    { label: "Bandwidth", used: 84, total: 200, unit: "GB" },
-    { label: "Postgres storage", used: 12, total: 40, unit: "GB" },
-  ];
+  const { activeOrgId, authedCall } = useAuth();
+  const [pendingPlan, setPendingPlan] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const { data: plansData } = useResource(
+    () => api.getPlans(),
+    { data: mockPlans, provider: "stripe" },
+    [],
+  );
+  const plans = plansData.data;
+
+  const { data: billing, refetch } = useResource(
+    activeOrgId
+      ? () => authedCall((token, on) => api.getBilling(activeOrgId, token, on))
+      : null,
+    mockBilling,
+    [activeOrgId],
+  );
+
+  const currentPlanId = billing.plan?.id ?? billing.subscription?.planId ?? null;
+  const usage = billing.usage;
+  const usedHours = usage?.hoursUsed ?? 0;
+  const totalHours = usage?.includedHours ?? billing.plan?.includedHours ?? 0;
+  const usagePct =
+    totalHours > 0 ? Math.min(100, Math.round((usedHours / totalHours) * 100)) : 0;
+
+  async function subscribe(planId: string) {
+    if (!activeOrgId) {
+      setNotice("Subscribe unavailable — no active organization (demo mode).");
+      return;
+    }
+    setPendingPlan(planId);
+    setNotice(null);
+    try {
+      const res = await authedCall((token, on) =>
+        api.subscribe(activeOrgId, planId, token, on),
+      );
+      if (res.checkoutUrl && typeof window !== "undefined") {
+        window.location.href = res.checkoutUrl;
+        return;
+      }
+      setNotice(`Subscription updated — status: ${res.subscription.status}`);
+      refetch();
+    } catch {
+      setNotice("Subscription queued locally (API unreachable — demo mode).");
+    } finally {
+      setPendingPlan(null);
+    }
+  }
 
   return (
-    <div className="grid gap-6 lg:grid-cols-3">
-      <div className="space-y-6 lg:col-span-2">
-        <Card>
-          <CardHeader>
-            <CardTitle>Usage this month</CardTitle>
-            <CardDescription>
-              Resets on the 1st. Overages are billed per-unit.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-5">
-            {usage.map((u) => {
-              const pct = Math.round((u.used / u.total) * 100);
-              return (
-                <div key={u.label}>
-                  <div className="flex items-center justify-between text-sm">
-                    <span className="text-foreground">{u.label}</span>
-                    <span className="text-muted-foreground">
-                      {u.used}
-                      {u.unit} / {u.total}
-                      {u.unit}
-                    </span>
-                  </div>
-                  <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-muted">
-                    <div
-                      className="h-full rounded-full bg-brand-balloon"
-                      style={{ width: `${pct}%` }}
-                    />
-                  </div>
-                </div>
-              );
-            })}
-          </CardContent>
-        </Card>
+    <div className="space-y-6">
+      {notice && (
+        <div className="rounded-md border border-primary/30 bg-primary/10 px-4 py-2 text-sm text-primary">
+          {notice}
+        </div>
+      )}
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Payment method</CardTitle>
-            <CardDescription>
-              Billing is handled by Stripe.{" "}
-              <Badge variant="warning" className="ml-1 align-middle">
-                Test mode
-              </Badge>
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <span className="flex h-9 w-12 items-center justify-center rounded-md border border-border bg-surface-2 font-mono text-xs">
-                VISA
-              </span>
-              <span className="text-sm text-muted-foreground">
-                •••• 4242 — exp 12/29
-              </span>
-            </div>
-            <Button variant="secondary" size="sm">
-              Update
-            </Button>
-          </CardContent>
-        </Card>
-      </div>
-
-      <Card className="h-fit glow-violet">
+      <Card>
         <CardHeader>
-          <CardTitle>Launch plan</CardTitle>
-          <CardDescription>$29 / month</CardDescription>
+          <CardTitle>Usage this month</CardTitle>
+          <CardDescription>
+            Resets on the 1st. Overages are billed per-unit.
+            {billing.plan && (
+              <Badge variant="info" className="ml-2 align-middle">
+                {billing.plan.name}
+              </Badge>
+            )}
+          </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-4">
-          <ul className="space-y-2 text-sm">
-            {[
-              "Unlimited apps",
-              "Autoscaling machines",
-              "Managed Postgres",
-              "Email support",
-            ].map((f) => (
-              <li key={f} className="flex items-center gap-2">
-                <Check className="h-4 w-4 text-success" />
-                <span className="text-muted-foreground">{f}</span>
-              </li>
-            ))}
-          </ul>
-          <Button className="w-full">Upgrade to Scale</Button>
-          <p className="text-center text-xs text-muted-foreground">
-            Next invoice June 30, 2026
-          </p>
+        <CardContent className="space-y-3">
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-foreground">Compute (machine-hours)</span>
+            <span className="text-muted-foreground">
+              {usedHours}h / {totalHours}h
+            </span>
+          </div>
+          <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+            <div
+              className="h-full rounded-full bg-brand-balloon"
+              style={{ width: `${usagePct}%` }}
+            />
+          </div>
+          {usage && usage.overageHours > 0 && (
+            <p className="text-sm text-warning">
+              {usage.overageHours}h over your included hours this period.
+            </p>
+          )}
         </CardContent>
       </Card>
+
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {plans.map((plan) => {
+          const isCurrent = plan.id === currentPlanId;
+          return (
+            <Card
+              key={plan.id}
+              className={cn("flex flex-col", isCurrent && "glow-violet")}
+            >
+              <CardHeader>
+                <div className="flex items-center justify-between">
+                  <CardTitle>{plan.name}</CardTitle>
+                  {isCurrent && <Badge variant="success">Current</Badge>}
+                </div>
+                <CardDescription>{formatPrice(plan)}</CardDescription>
+              </CardHeader>
+              <CardContent className="flex flex-1 flex-col justify-between space-y-4">
+                <ul className="space-y-2 text-sm">
+                  <li className="flex items-center gap-2">
+                    <Check className="h-4 w-4 text-success" />
+                    <span className="text-muted-foreground">
+                      {plan.includedHours} included hours
+                    </span>
+                  </li>
+                  <li className="flex items-center gap-2">
+                    <Check className="h-4 w-4 text-success" />
+                    <span className="text-muted-foreground">
+                      {(plan.overagePerHourCents / 100).toLocaleString(undefined, {
+                        style: "currency",
+                        currency: (plan.currency || "usd").toUpperCase(),
+                      })}{" "}
+                      / overage hour
+                    </span>
+                  </li>
+                  {plan.description && (
+                    <li className="text-muted-foreground">{plan.description}</li>
+                  )}
+                </ul>
+                <Button
+                  className="w-full"
+                  variant={isCurrent ? "secondary" : "primary"}
+                  disabled={isCurrent || pendingPlan !== null}
+                  onClick={() => subscribe(plan.id)}
+                >
+                  {pendingPlan === plan.id && (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  )}
+                  {isCurrent ? "Current plan" : `Switch to ${plan.name}`}
+                </Button>
+              </CardContent>
+            </Card>
+          );
+        })}
+      </div>
     </div>
   );
 }

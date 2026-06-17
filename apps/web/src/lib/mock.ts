@@ -1,7 +1,14 @@
 // Mock data used as a graceful fallback when the API is unreachable, so the
 // dashboard renders standalone without a running control-plane.
 
-import type { App, Database, Org, User } from "@/lib/api";
+import type {
+  App,
+  BillingResponse,
+  Database,
+  Org,
+  Plan,
+  User,
+} from "@/lib/api";
 
 export const mockUser: User = {
   id: "usr_demo",
@@ -26,78 +33,142 @@ export const mockOrgs: Org[] = [
 
 export const mockApps: App[] = [
   {
-    uuid: "app_7f3a",
+    id: "app_7f3a",
+    orgId: "org_acme",
+    coolifyUuid: "cool_7f3a",
     name: "marketing-site",
-    fqdn: "marketing-site.viro.app",
+    gitRepository: "github.com/acme/marketing",
+    gitBranch: "main",
+    buildPack: "nixpacks",
     status: "running",
-    git_repository: "github.com/acme/marketing",
-    git_branch: "main",
-    build_pack: "nixpacks",
+    createdAt: "2026-03-01T10:00:00Z",
   },
   {
-    uuid: "app_2b91",
+    id: "app_2b91",
+    orgId: "org_acme",
+    coolifyUuid: "cool_2b91",
     name: "api-gateway",
-    fqdn: "api-gateway.viro.app",
+    gitRepository: "github.com/acme/gateway",
+    gitBranch: "main",
+    buildPack: "dockerfile",
     status: "running",
-    git_repository: "github.com/acme/gateway",
-    git_branch: "main",
-    build_pack: "dockerfile",
+    createdAt: "2026-03-04T10:00:00Z",
   },
   {
-    uuid: "app_44de",
+    id: "app_44de",
+    orgId: "org_acme",
+    coolifyUuid: "cool_44de",
     name: "worker-queue",
-    fqdn: "worker-queue.viro.app",
+    gitRepository: "github.com/acme/worker",
+    gitBranch: "production",
+    buildPack: "nixpacks",
     status: "stopped",
-    git_repository: "github.com/acme/worker",
-    git_branch: "production",
-    build_pack: "nixpacks",
+    createdAt: "2026-03-09T10:00:00Z",
   },
   {
-    uuid: "app_9c10",
+    id: "app_9c10",
+    orgId: "org_acme",
+    coolifyUuid: "cool_9c10",
     name: "image-resizer",
-    fqdn: "image-resizer.viro.app",
+    gitRepository: "github.com/acme/resizer",
+    gitBranch: "main",
+    buildPack: "dockerfile",
     status: "error",
-    git_repository: "github.com/acme/resizer",
-    git_branch: "main",
-    build_pack: "dockerfile",
+    createdAt: "2026-03-12T10:00:00Z",
   },
   {
-    uuid: "app_1aa2",
+    id: "app_1aa2",
+    orgId: "org_acme",
+    coolifyUuid: "cool_1aa2",
     name: "analytics-edge",
-    fqdn: "analytics-edge.viro.app",
+    gitRepository: "github.com/acme/analytics",
+    gitBranch: "main",
+    buildPack: "static",
     status: "running",
-    git_repository: "github.com/acme/analytics",
-    git_branch: "main",
-    build_pack: "static",
+    createdAt: "2026-03-15T10:00:00Z",
   },
 ];
 
 export const mockDatabases: Database[] = [
   {
-    uuid: "db_pg_01",
+    id: "db_pg_01",
+    orgId: "org_acme",
     name: "primary-postgres",
-    type: "postgres",
+    engine: "postgresql",
     status: "running",
+    createdAt: "2026-03-01T10:00:00Z",
   },
   {
-    uuid: "db_redis_01",
+    id: "db_redis_01",
+    orgId: "org_acme",
     name: "session-cache",
-    type: "redis",
+    engine: "redis",
     status: "running",
+    createdAt: "2026-03-02T10:00:00Z",
   },
   {
-    uuid: "db_mysql_01",
+    id: "db_mysql_01",
+    orgId: "org_acme",
     name: "legacy-mysql",
-    type: "mysql",
+    engine: "mysql",
     status: "stopped",
+    createdAt: "2026-03-03T10:00:00Z",
   },
   {
-    uuid: "db_mongo_01",
+    id: "db_mongo_01",
+    orgId: "org_acme",
     name: "events-mongo",
-    type: "mongo",
+    engine: "mongodb",
     status: "running",
+    createdAt: "2026-03-04T10:00:00Z",
   },
 ];
+
+export const mockPlans: Plan[] = [
+  {
+    id: "plan_hobby",
+    name: "Hobby",
+    description: "For side projects and experiments.",
+    priceCents: 0,
+    currency: "usd",
+    includedHours: 100,
+    overagePerHourCents: 2,
+  },
+  {
+    id: "plan_launch",
+    name: "Launch",
+    description: "For production apps and small teams.",
+    priceCents: 2900,
+    currency: "usd",
+    includedHours: 750,
+    overagePerHourCents: 2,
+  },
+  {
+    id: "plan_scale",
+    name: "Scale",
+    description: "For high-traffic apps with autoscaling.",
+    priceCents: 9900,
+    currency: "usd",
+    includedHours: 3000,
+    overagePerHourCents: 1,
+  },
+];
+
+export const mockBilling: BillingResponse = {
+  subscription: {
+    id: "sub_demo",
+    orgId: "org_acme",
+    planId: "plan_launch",
+    status: "active",
+    currentPeriodEnd: "2026-06-30T00:00:00Z",
+  },
+  plan: mockPlans[1],
+  usage: {
+    hoursUsed: 412,
+    includedHours: 750,
+    overageHours: 0,
+  },
+};
 
 export const mockRegions = [
   "iad",

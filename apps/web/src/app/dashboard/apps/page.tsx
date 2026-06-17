@@ -4,7 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { Plus, Search, GitBranch, Package } from "lucide-react";
 import { useAuth } from "@/lib/auth";
-import { api } from "@/lib/api";
+import { api, statusVariant } from "@/lib/api";
 import { mockApps } from "@/lib/mock";
 import { useResource } from "@/lib/use-resource";
 import { PageHeader } from "@/components/page-header";
@@ -12,16 +12,24 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
 import { StatusDot } from "@/components/ui/status-dot";
-import { Badge } from "@/components/ui/badge";
+import { Badge, type BadgeVariant } from "@/components/ui/badge";
+
+// The status helper can yield "muted", which the Badge renders as "outline".
+function statusBadgeVariant(status: string): BadgeVariant {
+  const v = statusVariant(status);
+  return v === "muted" ? "outline" : v;
+}
 
 export default function AppsPage() {
-  const { accessToken } = useAuth();
+  const { activeOrgId, authedCall } = useAuth();
   const [query, setQuery] = useState("");
 
   const { data } = useResource(
-    () => api.listApps(accessToken ?? ""),
+    activeOrgId
+      ? () => authedCall((token, on) => api.listApps(activeOrgId, token, on))
+      : null,
     { data: mockApps },
-    [accessToken],
+    [activeOrgId],
   );
 
   const apps = data.data.filter((a) =>
@@ -53,13 +61,13 @@ export default function AppsPage() {
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {apps.map((app) => (
-          <Link key={app.uuid} href={`/dashboard/apps/${app.uuid}`}>
+          <Link key={app.id} href={`/dashboard/apps/${app.id}`}>
             <Card className="h-full p-5 transition-colors hover:border-primary/40">
               <div className="flex items-start justify-between">
                 <div className="min-w-0">
                   <p className="truncate font-medium">{app.name}</p>
                   <p className="truncate font-mono text-xs text-muted-foreground">
-                    {app.fqdn}
+                    {app.gitRepository}
                   </p>
                 </div>
                 <StatusDot status={app.status} />
@@ -68,16 +76,18 @@ export default function AppsPage() {
               <div className="mt-5 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                 <span className="inline-flex items-center gap-1">
                   <GitBranch className="h-3.5 w-3.5" />
-                  {app.git_branch}
+                  {app.gitBranch}
                 </span>
                 <span className="inline-flex items-center gap-1">
                   <Package className="h-3.5 w-3.5" />
-                  {app.build_pack}
+                  {app.buildPack}
                 </span>
               </div>
 
               <div className="mt-4">
-                <Badge variant="outline">{app.git_repository}</Badge>
+                <Badge variant={statusBadgeVariant(app.status)} className="capitalize">
+                  {app.status}
+                </Badge>
               </div>
             </Card>
           </Link>

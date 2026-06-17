@@ -1,25 +1,22 @@
 import { cn } from "@/lib/utils";
-import type { AppStatus } from "@/lib/api";
+import { statusVariant, type StatusVariant } from "@/lib/api";
 
-type StatusKind = "success" | "muted" | "destructive" | "warning";
-
-const STATUS_MAP: Record<string, { kind: StatusKind; label: string }> = {
-  running: { kind: "success", label: "Running" },
-  stopped: { kind: "muted", label: "Stopped" },
-  error: { kind: "destructive", label: "Error" },
-  deploying: { kind: "warning", label: "Deploying" },
-};
-
-const kindClasses: Record<StatusKind, string> = {
+const kindClasses: Record<StatusVariant, string> = {
   success: "bg-success shadow-[0_0_0_3px_hsl(var(--success)/0.2)]",
   muted: "bg-muted-foreground shadow-[0_0_0_3px_hsl(var(--muted)/0.5)]",
   destructive:
     "bg-destructive shadow-[0_0_0_3px_hsl(var(--destructive)/0.2)]",
   warning: "bg-warning shadow-[0_0_0_3px_hsl(var(--warning)/0.2)]",
+  info: "bg-info shadow-[0_0_0_3px_hsl(var(--info)/0.2)]",
 };
 
+function label(status: string): string {
+  if (!status) return "Unknown";
+  return status.charAt(0).toUpperCase() + status.slice(1);
+}
+
 export interface StatusDotProps {
-  status: AppStatus | string;
+  status: string;
   showLabel?: boolean;
   className?: string;
   pulse?: boolean;
@@ -31,8 +28,8 @@ export function StatusDot({
   className,
   pulse = true,
 }: StatusDotProps) {
-  const meta = STATUS_MAP[status] ?? { kind: "muted", label: status };
-  const animate = pulse && meta.kind === "success";
+  const kind = statusVariant(status);
+  const animate = pulse && kind === "success";
 
   return (
     <span className={cn("inline-flex items-center gap-2", className)}>
@@ -43,12 +40,12 @@ export function StatusDot({
         <span
           className={cn(
             "relative inline-flex h-2.5 w-2.5 rounded-full",
-            kindClasses[meta.kind],
+            kindClasses[kind],
           )}
         />
       </span>
       {showLabel && (
-        <span className="text-sm text-muted-foreground">{meta.label}</span>
+        <span className="text-sm text-muted-foreground">{label(status)}</span>
       )}
     </span>
   );
