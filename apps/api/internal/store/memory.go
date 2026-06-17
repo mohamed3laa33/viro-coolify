@@ -15,6 +15,8 @@ type MemoryStore struct {
 	usersByEmail  map[string]string      // email -> id
 	organizations map[string]domain.Organization
 	memberships   map[string]domain.Membership // key: orgID + "\x00" + userID
+	apps          map[string]domain.App        // by id
+	databases     map[string]domain.Database   // by id
 }
 
 // NewMemoryStore returns an empty in-memory store.
@@ -24,6 +26,8 @@ func NewMemoryStore() *MemoryStore {
 		usersByEmail:  make(map[string]string),
 		organizations: make(map[string]domain.Organization),
 		memberships:   make(map[string]domain.Membership),
+		apps:          make(map[string]domain.App),
+		databases:     make(map[string]domain.Database),
 	}
 }
 
@@ -129,6 +133,80 @@ func (s *MemoryStore) ListMemberships(_ context.Context, orgID string) ([]domain
 	for _, m := range s.memberships {
 		if m.OrgID == orgID {
 			out = append(out, m)
+		}
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) CreateApp(_ context.Context, a *domain.App) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.apps[a.ID]; exists {
+		return ErrConflict
+	}
+	s.apps[a.ID] = *a
+	return nil
+}
+
+func (s *MemoryStore) GetApp(_ context.Context, id string) (*domain.App, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	a, ok := s.apps[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return &a, nil
+}
+
+func (s *MemoryStore) ListAppsByOrg(_ context.Context, orgID string) ([]domain.App, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]domain.App, 0)
+	for _, a := range s.apps {
+		if a.OrgID == orgID {
+			out = append(out, a)
+		}
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) UpdateApp(_ context.Context, a *domain.App) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.apps[a.ID]; !ok {
+		return ErrNotFound
+	}
+	s.apps[a.ID] = *a
+	return nil
+}
+
+func (s *MemoryStore) DeleteApp(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.apps[id]; !ok {
+		return ErrNotFound
+	}
+	delete(s.apps, id)
+	return nil
+}
+
+func (s *MemoryStore) CreateDatabase(_ context.Context, d *domain.Database) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.databases[d.ID]; exists {
+		return ErrConflict
+	}
+	s.databases[d.ID] = *d
+	return nil
+}
+
+func (s *MemoryStore) ListDatabasesByOrg(_ context.Context, orgID string) ([]domain.Database, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]domain.Database, 0)
+	for _, d := range s.databases {
+		if d.OrgID == orgID {
+			out = append(out, d)
 		}
 	}
 	return out, nil

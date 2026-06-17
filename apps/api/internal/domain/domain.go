@@ -56,3 +56,29 @@ type Membership struct {
 	UserID string `json:"userId"`
 	Role   Role   `json:"role"`
 }
+
+// App is a Viro application owned by an organization. It mirrors a Coolify
+// application (CoolifyUUID) but is the tenant-scoped record Viro authorizes against.
+type App struct {
+	ID            string    `json:"id"`
+	OrgID         string    `json:"orgId"`
+	CoolifyUUID   string    `json:"coolifyUuid,omitempty"`
+	Name          string    `json:"name"`
+	GitRepository string    `json:"gitRepository,omitempty"`
+	GitBranch     string    `json:"gitBranch,omitempty"`
+	BuildPack     string    `json:"buildPack,omitempty"`
+	Status        string    `json:"status"`
+	CreatedAt     time.Time `json:"createdAt"`
+}
+
+// Database is a Viro managed database owned by an organization, mirroring a
+// Coolify standalone database.
+type Database struct {
+	ID          string    `json:"id"`
+	OrgID       string    `json:"orgId"`
+	CoolifyUUID string    `json:"coolifyUuid,omitempty"`
+	Name        string    `json:"name"`
+	Engine      string    `json:"engine"`
+	Status      string    `json:"status"`
+	CreatedAt   time.Time `json:"createdAt"`
+}

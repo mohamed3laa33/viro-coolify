@@ -1,0 +1,53 @@
+import { forwardRef } from "react";
+import { cn } from "@/lib/utils";
+
+export type ButtonVariant =
+  | "primary"
+  | "secondary"
+  | "ghost"
+  | "destructive";
+export type ButtonSize = "sm" | "md" | "lg" | "icon";
+
+const variantClasses: Record<ButtonVariant, string> = {
+  primary:
+    "bg-primary text-primary-foreground hover:bg-primary/90 shadow-sm focus-visible:ring-ring",
+  secondary:
+    "bg-muted text-foreground hover:bg-surface-2 border border-border focus-visible:ring-ring",
+  ghost:
+    "bg-transparent text-foreground hover:bg-muted focus-visible:ring-ring",
+  destructive:
+    "bg-destructive text-white hover:bg-destructive/90 focus-visible:ring-destructive",
+};
+
+const sizeClasses: Record<ButtonSize, string> = {
+  sm: "h-8 px-3 text-xs rounded-md gap-1.5",
+  md: "h-9 px-4 text-sm rounded-md gap-2",
+  lg: "h-11 px-6 text-base rounded-lg gap-2",
+  icon: "h-9 w-9 rounded-md",
+};
+
+export interface ButtonProps
+  extends React.ButtonHTMLAttributes<HTMLButtonElement> {
+  variant?: ButtonVariant;
+  size?: ButtonSize;
+}
+
+export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
+  ({ className, variant = "primary", size = "md", type, ...props }, ref) => {
+    return (
+      <button
+        ref={ref}
+        type={type ?? "button"}
+        className={cn(
+          "inline-flex items-center justify-center whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:pointer-events-none disabled:opacity-50",
+          variantClasses[variant],
+          sizeClasses[size],
+          className,
+        )}
+        {...props}
+      />
+    );
+  },
+);
+
+Button.displayName = "Button";

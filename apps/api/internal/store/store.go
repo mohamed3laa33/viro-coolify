@@ -31,4 +31,15 @@ type Store interface {
 	AddMembership(ctx context.Context, m domain.Membership) error
 	GetMembership(ctx context.Context, orgID, userID string) (*domain.Membership, error)
 	ListMemberships(ctx context.Context, orgID string) ([]domain.Membership, error)
+
+	// Apps (tenant-scoped).
+	CreateApp(ctx context.Context, a *domain.App) error
+	GetApp(ctx context.Context, id string) (*domain.App, error)
+	ListAppsByOrg(ctx context.Context, orgID string) ([]domain.App, error)
+	UpdateApp(ctx context.Context, a *domain.App) error
+	DeleteApp(ctx context.Context, id string) error
+
+	// Databases (tenant-scoped).
+	CreateDatabase(ctx context.Context, d *domain.Database) error
+	ListDatabasesByOrg(ctx context.Context, orgID string) ([]domain.Database, error)
 }

@@ -20,10 +20,15 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
 - ✅ Auth middleware + `Authorize(min role)` org-scoped checks; unit tests green
 - ✅ Folded in M1 judge fixes: prod JWT-secret guard, CORS-wildcard-vs-credentials, bounded upstream body read
 
-## Milestone 3 — App lifecycle & deploys ⬜
-- ⬜ Create app (git/dockerfile/image), deploy/stop/restart/delete via Coolify
-- ⬜ Deployments + status, logs streaming endpoint
-- ⬜ Secrets/env management; unit tests
+## Milestone 3 — App lifecycle, tenant scoping & RBAC enforcement ✅
+- ✅ **Fixed M2 judge P0**: resources are now org-scoped + role-authorized at the HTTP layer
+- ✅ Tenant-scoped `App`/`Database` records (org-owned, linked to Coolify UUID)
+- ✅ `platform` service: create/list/get/deploy/stop/restart/delete apps; create/list databases
+  (works in demo mode with no Coolify; calls Coolify when configured)
+- ✅ Routes nested under `/v1/orgs/{orgID}/...`; `orgAuthz(role)` middleware (member reads, admin mutates)
+- ✅ HTTP + service tests: cross-tenant read → 403, cross-tenant resource → 404, member cannot mutate → 403
+- ✅ Folded M2 judge P1: password max-length (72-byte) guard
+- ⬜ Deployments history + live logs streaming (next pass)
 
 ## Milestone 4 — Databases, domains, metrics ⬜
 - ⬜ Managed databases (Postgres/Redis/MySQL/Mongo) via Coolify

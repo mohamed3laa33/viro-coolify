@@ -1,0 +1,18 @@
+# Keep build contexts small and reproducible.
+.git
+_clone
+reference
+**/node_modules
+**/.next
+**/dist
+**/bin
+**/tmp
+**/coverage*
+**/*.test
+.env
+.env.*
+!.env.example
+.claude
+docs
+*.md
+!apps/web/README.md

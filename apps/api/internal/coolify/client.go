@@ -60,6 +60,11 @@ func NewClient(baseURL, token string, opts ...Option) *Client {
 	return c
 }
 
+// Configured reports whether the client has a token and can talk to a real
+// Coolify backend. When false, the control-plane runs in local/demo mode and
+// skips outbound Coolify calls.
+func (c *Client) Configured() bool { return c.token != "" }
+
 // APIError represents a non-2xx response from the Coolify API.
 type APIError struct {
 	StatusCode int

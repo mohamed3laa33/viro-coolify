@@ -11,7 +11,9 @@ import (
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/auth"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/config"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/coolify"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/domain"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/identity"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/platform"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/store"
 )
 
@@ -23,6 +25,7 @@ type Server struct {
 	store    store.Store
 	tokens   *auth.TokenManager
 	identity *identity.Service
+	platform *platform.Service
 	router   chi.Router
 }
 
@@ -38,13 +41,15 @@ func NewServer(cfg *config.Config, logger *slog.Logger) *Server {
 		time.Duration(cfg.JWTAccessTTL)*time.Minute,
 		time.Duration(cfg.JWTRefreshTTL)*time.Hour,
 	)
+	cool := coolify.NewClient(cfg.CoolifyBaseURL, cfg.CoolifyToken)
 	s := &Server{
 		cfg:      cfg,
 		logger:   logger,
-		coolify:  coolify.NewClient(cfg.CoolifyBaseURL, cfg.CoolifyToken),
+		coolify:  cool,
 		store:    st,
 		tokens:   tokens,
 		identity: identity.NewService(st, tokens),
+		platform: platform.NewService(st, cool),
 	}
 	s.router = s.routes()
 	return s
@@ -81,17 +86,26 @@ func (s *Server) routes() chi.Router {
 			r.Route("/orgs", func(r chi.Router) {
 				r.Get("/", s.handleListOrgs)
 				r.Post("/", s.handleCreateOrg)
-			})
 
-			r.Route("/apps", func(r chi.Router) {
-				r.Get("/", s.handleListApps)
-				r.Get("/{uuid}", s.handleGetApp)
-				r.Post("/{uuid}/deploy", s.handleDeployApp)
-				r.Post("/{uuid}/stop", s.handleStopApp)
-				r.Post("/{uuid}/restart", s.handleRestartApp)
-			})
+				// Org-scoped resources. Reads require membership (member+);
+				// mutations require admin+.
+				r.Route("/{orgID}", func(r chi.Router) {
+					r.Route("/apps", func(r chi.Router) {
+						r.With(s.orgAuthz(domain.RoleMember)).Get("/", s.handleListApps)
+						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/", s.handleCreateApp)
+						r.With(s.orgAuthz(domain.RoleMember)).Get("/{appID}", s.handleGetApp)
+						r.With(s.orgAuthz(domain.RoleAdmin)).Delete("/{appID}", s.handleDeleteApp)
+						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/{appID}/deploy", s.handleDeployApp)
+						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/{appID}/stop", s.handleStopApp)
+						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/{appID}/restart", s.handleRestartApp)
+					})
 
-			r.Get("/databases", s.handleListDatabases)
+					r.Route("/databases", func(r chi.Router) {
+						r.With(s.orgAuthz(domain.RoleMember)).Get("/", s.handleListDatabases)
+						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/", s.handleCreateDatabase)
+					})
+				})
+			})
 		})
 	})
 

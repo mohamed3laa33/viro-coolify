@@ -1,6 +1,7 @@
 package httpx
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/config"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/domain"
 )
 
 // newTestServer builds a Server whose Coolify client points at the given upstream URL.
@@ -72,48 +74,115 @@ func TestVersionEndpoint(t *testing.T) {
 	}
 }
 
-func TestListAppsProxiesCoolify(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/applications" {
-			t.Errorf("unexpected upstream path: %s", r.URL.Path)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[{"uuid":"abc","name":"web"}]`))
-	}))
-	defer upstream.Close()
-
-	s := newTestServer(t, upstream.URL)
-	token := signup(t, s, "apps-list@example.com")
-	rec := doJSON(t, s, http.MethodGet, "/v1/apps/", "", token)
-
+// firstOrgID returns the id of the user's first (personal) organization.
+func firstOrgID(t *testing.T, s *Server, token string) string {
+	t.Helper()
+	rec := doJSON(t, s, http.MethodGet, "/v1/orgs/", "", token)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		t.Fatalf("list orgs: %d", rec.Code)
 	}
-	var body struct {
+	var resp struct {
 		Data []struct {
-			UUID string `json:"uuid"`
-			Name string `json:"name"`
+			ID string `json:"id"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
-		t.Fatalf("decode: %v", err)
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode orgs: %v", err)
 	}
-	if len(body.Data) != 1 || body.Data[0].UUID != "abc" {
-		t.Fatalf("unexpected body: %+v", body)
+	if len(resp.Data) == 0 {
+		t.Fatal("expected at least one org")
+	}
+	return resp.Data[0].ID
+}
+
+func TestAppLifecycleOrgScoped(t *testing.T) {
+	s := newTestServer(t, "http://unused")
+	token := signup(t, s, "owner-apps@example.com")
+	org := firstOrgID(t, s, token)
+
+	rec := doJSON(t, s, http.MethodPost, "/v1/orgs/"+org+"/apps", `{"name":"web"}`, token)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create app: %d %s", rec.Code, rec.Body.String())
+	}
+	var app struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	}
+	_ = json.NewDecoder(rec.Body).Decode(&app)
+	if app.ID == "" || app.Status != "created" {
+		t.Fatalf("unexpected app: %+v", app)
+	}
+
+	rec = doJSON(t, s, http.MethodGet, "/v1/orgs/"+org+"/apps", "", token)
+	var list struct {
+		Data []json.RawMessage `json:"data"`
+	}
+	_ = json.NewDecoder(rec.Body).Decode(&list)
+	if len(list.Data) != 1 {
+		t.Fatalf("expected 1 app, got %d", len(list.Data))
+	}
+
+	rec = doJSON(t, s, http.MethodPost, "/v1/orgs/"+org+"/apps/"+app.ID+"/deploy", "", token)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("deploy: %d %s", rec.Code, rec.Body.String())
+	}
+	var deployed struct {
+		Status string `json:"status"`
+	}
+	_ = json.NewDecoder(rec.Body).Decode(&deployed)
+	if deployed.Status != "deploying" {
+		t.Fatalf("status = %q", deployed.Status)
 	}
 }
 
-func TestListAppsUpstreamErrorReturns502(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer upstream.Close()
+func TestAppsAreTenantScoped(t *testing.T) {
+	s := newTestServer(t, "http://unused")
+	a := signup(t, s, "tenant-a@example.com")
+	orgA := firstOrgID(t, s, a)
+	b := signup(t, s, "tenant-b@example.com")
+	orgB := firstOrgID(t, s, b)
 
-	s := newTestServer(t, upstream.URL)
-	token := signup(t, s, "apps-err@example.com")
-	rec := doJSON(t, s, http.MethodGet, "/v1/apps/", "", token)
+	if rec := doJSON(t, s, http.MethodPost, "/v1/orgs/"+orgA+"/apps", `{"name":"secret"}`, a); rec.Code != http.StatusCreated {
+		t.Fatalf("create app in A: %d", rec.Code)
+	}
 
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502", rec.Code)
+	// B's own org shows none of A's apps.
+	rec := doJSON(t, s, http.MethodGet, "/v1/orgs/"+orgB+"/apps", "", b)
+	var list struct {
+		Data []json.RawMessage `json:"data"`
+	}
+	_ = json.NewDecoder(rec.Body).Decode(&list)
+	if len(list.Data) != 0 {
+		t.Fatalf("expected 0 apps in B's org, got %d", len(list.Data))
+	}
+
+	// B cannot read A's org at all (not a member).
+	if rec := doJSON(t, s, http.MethodGet, "/v1/orgs/"+orgA+"/apps", "", b); rec.Code != http.StatusForbidden {
+		t.Fatalf("cross-tenant read = %d, want 403", rec.Code)
+	}
+}
+
+func TestMemberCanReadButCannotMutate(t *testing.T) {
+	s := newTestServer(t, "http://unused")
+	owner := signup(t, s, "owner2@example.com")
+	org := firstOrgID(t, s, owner)
+	member := signup(t, s, "member2@example.com")
+
+	meRec := doJSON(t, s, http.MethodGet, "/v1/me", "", member)
+	var me struct {
+		ID string `json:"id"`
+	}
+	_ = json.NewDecoder(meRec.Body).Decode(&me)
+	if err := s.store.AddMembership(context.Background(), domain.Membership{OrgID: org, UserID: me.ID, Role: domain.RoleMember}); err != nil {
+		t.Fatalf("add membership: %v", err)
+	}
+
+	// Member (read) can list.
+	if rec := doJSON(t, s, http.MethodGet, "/v1/orgs/"+org+"/apps", "", member); rec.Code != http.StatusOK {
+		t.Fatalf("member read = %d, want 200", rec.Code)
+	}
+	// Member cannot create (needs admin).
+	if rec := doJSON(t, s, http.MethodPost, "/v1/orgs/"+org+"/apps", `{"name":"x"}`, member); rec.Code != http.StatusForbidden {
+		t.Fatalf("member create = %d, want 403", rec.Code)
 	}
 }

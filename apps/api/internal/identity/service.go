@@ -56,6 +56,11 @@ func (s *Service) Signup(ctx context.Context, email, name, password string) (*Au
 	if len(password) < 8 {
 		return nil, fmt.Errorf("%w: password must be at least 8 characters", ErrValidation)
 	}
+	// bcrypt silently ignores bytes beyond 72; reject rather than truncate so the
+	// failure is explicit (a 400, not a surprising 500 from the hasher).
+	if len(password) > 72 {
+		return nil, fmt.Errorf("%w: password must be at most 72 bytes", ErrValidation)
+	}
 	if name == "" {
 		name = strings.SplitN(email, "@", 2)[0]
 	}
