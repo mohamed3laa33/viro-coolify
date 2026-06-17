@@ -56,8 +56,26 @@ The platform layer talks to a `DeployBackend` interface; the Kubernetes implemen
    (via the Helm Go SDK or shelling out to `helm`).
 4. Reads status/logs/metrics back via the K8s API (client-go) for the UI tabs.
 
-Cluster prerequisites (install once): ingress-nginx (or Gateway API), cert-manager,
-**KEDA**, metrics-server, and optionally a Postgres operator (CloudNativePG) for managed DBs.
+## Edge routing — Gateway API, ONE LoadBalancer (cost)
+
+> ⚠️ `ingress-nginx` (kubernetes/ingress-nginx) is **retired**
+> (<https://kubernetes.io/blog/2025/11/11/ingress-nginx-retirement/>) — Vortex does **not**
+> use it. Routing is the **Gateway API**.
+
+- **One shared `Gateway`** (`deploy/k8s/gateway.yaml`, backed by **Envoy Gateway**) = exactly
+  **one cloud LoadBalancer** for the whole platform. Its HTTPS listener allows routes from all
+  namespaces.
+- **Each app = one `HTTPRoute`** in its org-project namespace, attached to the shared Gateway
+  via `parentRefs`, with `hostnames: [<app>.<project>.<org>.vortex.v60ai.com]`. Adding apps
+  never adds LoadBalancers — cost stays flat.
+- **Namespace per org-project** (`vortex-<org>-<project>`): admins can list orgs/projects as
+  namespaces; tenants have no K8s access.
+- **TLS** via cert-manager **DNS-01** (DigitalOcean) wildcard certs — per-org
+  `*.<org>.vortex.v60ai.com`, managed by the control plane as orgs are created.
+
+Cluster prerequisites (install once, all current/non-deprecated): **Gateway API CRDs + Envoy
+Gateway**, cert-manager, **KEDA**, metrics-server, and optionally a Postgres operator
+(CloudNativePG) for managed DBs. Installed by `deploy/scripts/01-provision-doks.sh`.
 
 > Status: chart vendored + KEDA added + renders clean (`helm lint` passes). The Go
 > `KubernetesBackend` and the namespace/quota controller are the next build step.

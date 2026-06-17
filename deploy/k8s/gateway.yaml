@@ -1,0 +1,88 @@
+# Vortex shared edge: ONE Gateway = ONE LoadBalancer for the whole platform.
+# Every tenant app gets its own HTTPRoute (in its org-project namespace) that
+# attaches to THIS Gateway via parentRefs — so adding apps never adds LBs.
+#
+# Replaces the retired ingress-nginx with the Gateway API + Envoy Gateway.
+# Edit the domain + DigitalOcean token secret, then: kubectl apply -f deploy/k8s/gateway.yaml
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vortex-system
+---
+# GatewayClass backed by Envoy Gateway (installed by 01-provision-doks.sh).
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: vortex
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+---
+# cert-manager DNS-01 issuer using DigitalOcean DNS (required for WILDCARD certs).
+# Create the token secret first:
+#   kubectl -n vortex-system create secret generic do-dns \
+#     --from-literal=access-token=dop_v1_xxxxxxxx
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: vortex-letsencrypt
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: admin@v60ai.com
+    privateKeySecretRef:
+      name: vortex-letsencrypt-account
+    solvers:
+      - dns01:
+          digitalocean:
+            tokenSecretRef:
+              name: do-dns
+              key: access-token
+---
+# Wildcard certificate for every tenant subdomain: *.<...>.vortex.v60ai.com.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: vortex-wildcard
+  namespace: vortex-system
+spec:
+  secretName: vortex-wildcard-tls
+  issuerRef:
+    name: vortex-letsencrypt
+    kind: ClusterIssuer
+  dnsNames:
+    - "vortex.v60ai.com"
+    - "*.vortex.v60ai.com"
+    # Tenant apps are <app>.<project>.<org>.vortex.v60ai.com — that is a 4th-level
+    # label, so a single wildcard is not enough. Either issue a wildcard per active
+    # org (*.<org>.vortex.v60ai.com) on org creation, or use a wildcard CNAME +
+    # per-host certs. The control plane manages these certs as orgs are created.
+---
+# The single shared Gateway. allowedRoutes: All lets per-tenant-namespace
+# HTTPRoutes attach, so one LB fronts every app.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: vortex
+  namespace: vortex-system
+spec:
+  gatewayClassName: vortex
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      hostname: "*.vortex.v60ai.com"
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: vortex-wildcard-tls
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: All
