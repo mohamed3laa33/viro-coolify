@@ -25,11 +25,11 @@ jobs:
         run: go test -race -count=1 -coverprofile=coverage.out ./...
       - name: Build
         run: go build ./...
-      - name: Lint (golangci-lint — gosec SAST, dupl, gocritic, staticcheck)
-        uses: golangci/golangci-lint-action@v6
-        with:
-          version: v2.12.2
-          working-directory: apps/api
+      - name: Lint (golangci-lint v2 — gosec SAST, dupl, gocritic, staticcheck)
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
+            | sh -s -- -b "$(go env GOPATH)/bin" v2.12.2
+          golangci-lint run --timeout 5m ./...
       - name: Vulnerability & deprecation scan (govulncheck)
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
@@ -63,7 +63,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Trivy — dependency & secret scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.33.1
         with:
           scan-type: fs
           scanners: vuln,secret
@@ -72,7 +72,7 @@ jobs:
           exit-code: "1"
           skip-dirs: _ref-volo,_ref-viro-app,_clone
       - name: Trivy — IaC/K8s misconfig scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.33.1
         with:
           scan-type: config
           severity: HIGH,CRITICAL

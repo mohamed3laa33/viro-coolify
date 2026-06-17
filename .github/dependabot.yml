@@ -15,6 +15,17 @@ updates:
     groups:
       npm-deps:
         patterns: ["*"]
+    # Major bumps of these need a deliberate migration (Tailwind v4 / Next 16 /
+    # React 20 change build/config); don't auto-PR them and break the build.
+    ignore:
+      - dependency-name: next
+        update-types: ["version-update:semver-major"]
+      - dependency-name: tailwindcss
+        update-types: ["version-update:semver-major"]
+      - dependency-name: react
+        update-types: ["version-update:semver-major"]
+      - dependency-name: react-dom
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /
