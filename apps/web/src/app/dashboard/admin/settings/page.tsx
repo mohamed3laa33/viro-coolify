@@ -5,6 +5,7 @@ import { Loader2, X } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { api, type Settings } from "@/lib/api";
 import { mockPlans, mockSettings } from "@/lib/mock";
+import { isDemoMode } from "@/lib/demo";
 import { useResource } from "@/lib/use-resource";
 import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
@@ -26,18 +27,29 @@ function pctLabel(factor: number): string {
   return `${Math.round(factor * 100)}%`;
 }
 
+const EMPTY_SETTINGS: Settings = {
+  defaultCpu: 1,
+  defaultMemoryMb: 512,
+  defaultPlanId: "",
+  cpuOvercommitFactor: 1,
+  memoryOvercommitFactor: 1,
+  defaultRegion: "",
+  regions: [],
+};
+
 export default function AdminSettingsPage() {
   const { authedCall } = useAuth();
+  const demo = isDemoMode();
 
   const { data: settings, usingFallback } = useResource(
     () => authedCall((token, on) => api.getSettings(token, on)),
-    mockSettings,
+    demo ? mockSettings : EMPTY_SETTINGS,
     [],
   );
 
   const { data: plansData } = useResource(
     () => authedCall((token, on) => api.listAdminPlans(token, on)),
-    { data: mockPlans },
+    { data: demo ? mockPlans : [] },
     [],
   );
   const plans = plansData.data;
@@ -83,7 +95,7 @@ export default function AdminSettingsPage() {
       await authedCall((token, on) => api.updateSettings(form, token, on));
       setNotice("Settings saved.");
     } catch {
-      setNotice("Save failed (API unreachable — demo mode).");
+      setNotice("Save failed — the API is unreachable.");
     } finally {
       setPending(false);
     }
@@ -96,7 +108,7 @@ export default function AdminSettingsPage() {
         description="Defaults, resource overcommit, and regions for the whole platform."
       />
 
-      {usingFallback && (
+      {usingFallback && demo && (
         <div className="rounded-md border border-warning/30 bg-warning/10 px-4 py-2 text-sm text-warning">
           Showing demo data — admin API unreachable. Edits won&apos;t persist.
         </div>

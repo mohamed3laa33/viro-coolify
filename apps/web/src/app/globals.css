@@ -13,6 +13,9 @@
     --muted-foreground: 240 5% 65%;
     --primary: 262 83% 58%;
     --primary-foreground: 0 0% 100%;
+    /* Balloon gradient stops: violet (#9d4edd) → magenta (#e0218a). */
+    --brand-violet: 271 65% 59%;
+    --brand-magenta: 327 75% 50%;
     --ring: 262 83% 58%;
     --success: 142 71% 45%;
     --warning: 38 92% 50%;

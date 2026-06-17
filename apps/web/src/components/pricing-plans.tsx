@@ -4,6 +4,7 @@ import Link from "next/link";
 import { Check } from "lucide-react";
 import { api, type Plan } from "@/lib/api";
 import { mockPlans } from "@/lib/mock";
+import { isDemoMode } from "@/lib/demo";
 import { useResource } from "@/lib/use-resource";
 import { Button } from "@/components/ui/button";
 
@@ -44,7 +45,7 @@ function planFeatures(plan: Plan): string[] {
 export function PricingPlans() {
   const { data } = useResource(
     () => api.getPlans(),
-    { data: mockPlans, provider: "stripe" },
+    { data: isDemoMode() ? mockPlans : [], provider: "stripe" },
     [],
   );
 
@@ -52,6 +53,8 @@ export function PricingPlans() {
   const plans = [...data.data]
     .filter((p) => p.active !== false)
     .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
+
+  if (plans.length === 0) return null;
 
   // Mark the middle plan as featured for emphasis.
   const featuredIndex = plans.length > 1 ? 1 : 0;

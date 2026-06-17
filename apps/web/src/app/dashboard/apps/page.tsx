@@ -1,16 +1,20 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type FormEvent } from "react";
 import Link from "next/link";
-import { Plus, Search, GitBranch, Package } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { Plus, Search, GitBranch, Package, Loader2, X } from "lucide-react";
 import { useAuth } from "@/lib/auth";
-import { api, statusVariant } from "@/lib/api";
+import { api, statusVariant, type CreateAppInput } from "@/lib/api";
 import { mockApps } from "@/lib/mock";
+import { isDemoMode } from "@/lib/demo";
 import { useResource } from "@/lib/use-resource";
 import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Card } from "@/components/ui/card";
+import { Label } from "@/components/ui/label";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Notice } from "@/components/ui/notice";
 import { StatusDot } from "@/components/ui/status-dot";
 import { Badge, type BadgeVariant } from "@/components/ui/badge";
 
@@ -23,12 +27,13 @@ function statusBadgeVariant(status: string): BadgeVariant {
 export default function AppsPage() {
   const { activeOrgId, authedCall } = useAuth();
   const [query, setQuery] = useState("");
+  const [creating, setCreating] = useState(false);
 
-  const { data } = useResource(
+  const { data, refetch } = useResource(
     activeOrgId
       ? () => authedCall((token, on) => api.listApps(activeOrgId, token, on))
       : null,
-    { data: mockApps },
+    { data: isDemoMode() ? mockApps : [] },
     [activeOrgId],
   );
 
@@ -42,12 +47,22 @@ export default function AppsPage() {
         title="Apps"
         description="Deploy and manage your applications across regions."
         actions={
-          <Button>
+          <Button onClick={() => setCreating((v) => !v)}>
             <Plus className="h-4 w-4" />
             New App
           </Button>
         }
       />
+
+      {creating && (
+        <CreateAppForm
+          onClose={() => setCreating(false)}
+          onCreated={() => {
+            setCreating(false);
+            refetch();
+          }}
+        />
+      )}
 
       <div className="relative max-w-sm">
         <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
@@ -97,10 +112,130 @@ export default function AppsPage() {
       {apps.length === 0 && (
         <Card className="flex flex-col items-center justify-center py-16 text-center">
           <p className="text-sm text-muted-foreground">
-            No apps match “{query}”.
+            {query
+              ? `No apps match “${query}”.`
+              : "No apps yet. Create your first app to get started."}
           </p>
         </Card>
       )}
     </div>
+  );
+}
+
+function CreateAppForm({
+  onClose,
+  onCreated,
+}: {
+  onClose: () => void;
+  onCreated: () => void;
+}) {
+  const { activeOrgId, authedCall } = useAuth();
+  const router = useRouter();
+  const [name, setName] = useState("");
+  const [gitRepository, setGitRepository] = useState("");
+  const [gitBranch, setGitBranch] = useState("main");
+  const [buildPack, setBuildPack] = useState("nixpacks");
+  const [pending, setPending] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  async function onSubmit(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    if (!activeOrgId) {
+      setNotice("Create unavailable — no active organization.");
+      return;
+    }
+    const input: CreateAppInput = {
+      name: trimmed,
+      gitRepository: gitRepository.trim(),
+      gitBranch: gitBranch.trim() || "main",
+      buildPack: buildPack.trim() || "nixpacks",
+    };
+    setPending(true);
+    setNotice(null);
+    try {
+      const app = await authedCall((token, on) =>
+        api.createApp(activeOrgId, input, token, on),
+      );
+      onCreated();
+      router.push(`/dashboard/apps/${app.id}`);
+    } catch {
+      setNotice("Could not create the app — the API is unreachable.");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader className="flex-row items-center justify-between space-y-0">
+        <CardTitle>New app</CardTitle>
+        <Button variant="ghost" size="icon" onClick={onClose} aria-label="Close">
+          <X className="h-4 w-4" />
+        </Button>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {notice && <Notice>{notice}</Notice>}
+        <form onSubmit={onSubmit} className="space-y-4">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="app-name">Name</Label>
+              <Input
+                id="app-name"
+                placeholder="marketing-site"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                autoFocus
+                required
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="app-repo">Git repository</Label>
+              <Input
+                id="app-repo"
+                className="font-mono"
+                placeholder="github.com/acme/marketing"
+                value={gitRepository}
+                onChange={(e) => setGitRepository(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="app-branch">Branch</Label>
+              <Input
+                id="app-branch"
+                className="font-mono"
+                placeholder="main"
+                value={gitBranch}
+                onChange={(e) => setGitBranch(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="app-buildpack">Build pack</Label>
+              <Input
+                id="app-buildpack"
+                className="font-mono"
+                placeholder="nixpacks"
+                value={buildPack}
+                onChange={(e) => setBuildPack(e.target.value)}
+              />
+            </div>
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="ghost" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={pending}>
+              {pending ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Plus className="h-4 w-4" />
+              )}
+              Create app
+            </Button>
+          </div>
+        </form>
+      </CardContent>
+    </Card>
   );
 }

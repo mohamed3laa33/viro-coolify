@@ -18,8 +18,9 @@ import {
   mockProjects,
   mockSettings,
 } from "@/lib/mock";
+import { isDemoMode } from "@/lib/demo";
 import { useResource } from "@/lib/use-resource";
-import { cn } from "@/lib/utils";
+import { cn, initials } from "@/lib/utils";
 import { PageHeader } from "@/components/page-header";
 import {
   Card,
@@ -31,6 +32,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Notice } from "@/components/ui/notice";
+import { Tabs } from "@/components/ui/tabs";
 import { Badge, type BadgeVariant } from "@/components/ui/badge";
 
 const TABS = ["General", "Team", "Billing"] as const;
@@ -45,15 +48,6 @@ const ROLE_VARIANT: Record<MemberRole, BadgeVariant> = {
 const SELECT_CLASS =
   "flex h-10 w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-ring disabled:cursor-not-allowed disabled:opacity-50";
 
-function initials(name: string): string {
-  return name
-    .split(" ")
-    .map((p) => p[0])
-    .join("")
-    .slice(0, 2)
-    .toUpperCase();
-}
-
 export default function SettingsPage() {
   const [tab, setTab] = useState<Tab>("General");
 
@@ -64,25 +58,7 @@ export default function SettingsPage() {
         description="Manage your organization, team, and billing."
       />
 
-      <div className="border-b border-border">
-        <nav className="-mb-px flex gap-6">
-          {TABS.map((t) => (
-            <button
-              key={t}
-              type="button"
-              onClick={() => setTab(t)}
-              className={cn(
-                "border-b-2 px-1 pb-3 text-sm font-medium transition-colors",
-                tab === t
-                  ? "border-primary text-foreground"
-                  : "border-transparent text-muted-foreground hover:text-foreground",
-              )}
-            >
-              {t}
-            </button>
-          ))}
-        </nav>
-      </div>
+      <Tabs tabs={TABS} active={tab} onChange={setTab} />
 
       {tab === "General" && <GeneralTab />}
 
@@ -104,7 +80,7 @@ function GeneralTab() {
     user?.isAdmin
       ? () => authedCall((token, on) => api.getSettings(token, on))
       : null,
-    mockSettings,
+    isDemoMode() ? mockSettings : null,
     [user?.isAdmin],
   );
 
@@ -147,8 +123,8 @@ function GeneralTab() {
             <Label htmlFor="region">Default region</Label>
             <Input
               id="region"
-              key={`region-${settings.defaultRegion}`}
-              defaultValue={settings.defaultRegion}
+              key={`region-${settings?.defaultRegion ?? "none"}`}
+              defaultValue={settings?.defaultRegion ?? ""}
               readOnly
             />
           </div>
@@ -176,7 +152,7 @@ function TeamTab() {
     activeOrgId
       ? () => authedCall((token, on) => api.listMembers(activeOrgId, token, on))
       : null,
-    { data: mockMembers },
+    { data: isDemoMode() ? mockMembers : [] },
     [activeOrgId],
   );
 
@@ -187,7 +163,7 @@ function TeamTab() {
             api.listInvitations(activeOrgId, token, on),
           )
       : null,
-    { data: mockInvitations },
+    { data: isDemoMode() ? mockInvitations : [] },
     [activeOrgId],
   );
 
@@ -195,7 +171,7 @@ function TeamTab() {
     activeOrgId
       ? () => authedCall((token, on) => api.listProjects(activeOrgId, token, on))
       : null,
-    { data: mockProjects },
+    { data: isDemoMode() ? mockProjects : [] },
     [activeOrgId],
   );
 
@@ -215,7 +191,7 @@ function TeamTab() {
     const trimmed = email.trim();
     if (!trimmed) return;
     if (!activeOrgId) {
-      setNotice("Invite unavailable — no active organization (demo mode).");
+      setNotice("Invite unavailable — no active organization.");
       return;
     }
     setPending(true);
@@ -238,7 +214,7 @@ function TeamTab() {
       setProjectId("");
       refetchInvites();
     } catch {
-      setNotice("Invitation queued locally (API unreachable — demo mode).");
+      setNotice("Could not send the invitation — the API is unreachable.");
     } finally {
       setPending(false);
     }
@@ -262,11 +238,7 @@ function TeamTab() {
 
   return (
     <div className="space-y-6">
-      {notice && (
-        <div className="rounded-md border border-primary/30 bg-primary/10 px-4 py-2 text-sm text-primary">
-          {notice}
-        </div>
-      )}
+      {notice && <Notice>{notice}</Notice>}
 
       <Card>
         <CardHeader>
@@ -276,6 +248,11 @@ function TeamTab() {
           </CardDescription>
         </CardHeader>
         <CardContent className="p-0">
+          {members.length === 0 ? (
+            <p className="px-6 py-4 text-sm text-muted-foreground">
+              No team members yet.
+            </p>
+          ) : (
           <ul className="divide-y divide-border">
             {members.map((m) => (
               <li
@@ -297,6 +274,7 @@ function TeamTab() {
               </li>
             ))}
           </ul>
+          )}
         </CardContent>
       </Card>
 
@@ -445,7 +423,7 @@ function BillingTab() {
 
   const { data: plansData } = useResource(
     () => api.getPlans(),
-    { data: mockPlans, provider: "stripe" },
+    { data: isDemoMode() ? mockPlans : [], provider: "stripe" },
     [],
   );
   const plans = plansData.data;
@@ -454,20 +432,21 @@ function BillingTab() {
     activeOrgId
       ? () => authedCall((token, on) => api.getBilling(activeOrgId, token, on))
       : null,
-    mockBilling,
+    isDemoMode() ? mockBilling : null,
     [activeOrgId],
   );
 
-  const currentPlanId = billing.plan?.id ?? billing.subscription?.planId ?? null;
-  const usedHours = computeHoursUsed(billing.usage);
-  const totalHours = billing.plan?.includedHours ?? 0;
+  const currentPlanId =
+    billing?.plan?.id ?? billing?.subscription?.planId ?? null;
+  const usedHours = computeHoursUsed(billing?.usage);
+  const totalHours = billing?.plan?.includedHours ?? 0;
   const overageHours = Math.max(0, usedHours - totalHours);
   const usagePct =
     totalHours > 0 ? Math.min(100, Math.round((usedHours / totalHours) * 100)) : 0;
 
   async function subscribe(planId: string) {
     if (!activeOrgId) {
-      setNotice("Subscribe unavailable — no active organization (demo mode).");
+      setNotice("Subscribe unavailable — no active organization.");
       return;
     }
     setPendingPlan(planId);
@@ -483,7 +462,7 @@ function BillingTab() {
       setNotice(`Subscription updated — status: ${res.subscription.status}`);
       refetch();
     } catch {
-      setNotice("Subscription queued locally (API unreachable — demo mode).");
+      setNotice("Could not update the subscription — the API is unreachable.");
     } finally {
       setPendingPlan(null);
     }
@@ -491,18 +470,14 @@ function BillingTab() {
 
   return (
     <div className="space-y-6">
-      {notice && (
-        <div className="rounded-md border border-primary/30 bg-primary/10 px-4 py-2 text-sm text-primary">
-          {notice}
-        </div>
-      )}
+      {notice && <Notice>{notice}</Notice>}
 
       <Card>
         <CardHeader>
           <CardTitle>Usage this month</CardTitle>
           <CardDescription>
             Resets on the 1st. Overages are billed per-unit.
-            {billing.plan && (
+            {billing?.plan && (
               <Badge variant="info" className="ml-2 align-middle">
                 {billing.plan.name}
               </Badge>
@@ -529,6 +504,14 @@ function BillingTab() {
           )}
         </CardContent>
       </Card>
+
+      {plans.length === 0 && (
+        <Card className="flex flex-col items-center justify-center py-12 text-center">
+          <p className="text-sm text-muted-foreground">
+            No plans available right now.
+          </p>
+        </Card>
+      )}
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {plans.map((plan) => {

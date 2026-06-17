@@ -49,7 +49,8 @@ const config: Config = {
           700: "#6d28d9",
           800: "#5b21b6",
           900: "#4c1d95",
-          magenta: "#e0218a",
+          violet: "hsl(var(--brand-violet))",
+          magenta: "hsl(var(--brand-magenta))",
         },
       },
       borderRadius: {
@@ -62,7 +63,8 @@ const config: Config = {
         mono: ["var(--font-mono)", "monospace"],
       },
       backgroundImage: {
-        "brand-balloon": "linear-gradient(135deg,#9D4EDD,#E0218A)",
+        "brand-balloon":
+          "linear-gradient(135deg,hsl(var(--brand-violet)),hsl(var(--brand-magenta)))",
       },
       keyframes: {
         "accordion-down": {

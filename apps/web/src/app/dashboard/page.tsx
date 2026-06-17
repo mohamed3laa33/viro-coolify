@@ -5,6 +5,7 @@ import { Boxes, Rocket, Globe2, ArrowUpRight, Database } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { mockApps, mockDatabases, mockSettings } from "@/lib/mock";
+import { isDemoMode } from "@/lib/demo";
 import { useResource } from "@/lib/use-resource";
 import { PageHeader } from "@/components/page-header";
 import { StatCard } from "@/components/stat-card";
@@ -19,7 +20,7 @@ export default function DashboardOverview() {
     activeOrgId
       ? () => authedCall((token, on) => api.listApps(activeOrgId, token, on))
       : null,
-    { data: mockApps },
+    { data: isDemoMode() ? mockApps : [] },
     [activeOrgId],
   );
   const apps = data.data;
@@ -28,7 +29,7 @@ export default function DashboardOverview() {
     activeOrgId
       ? () => authedCall((token, on) => api.listDatabases(activeOrgId, token, on))
       : null,
-    { data: mockDatabases },
+    { data: isDemoMode() ? mockDatabases : [] },
     [activeOrgId],
   );
   const databases = dbData.data;
@@ -39,10 +40,10 @@ export default function DashboardOverview() {
     user?.isAdmin
       ? () => authedCall((token, on) => api.getSettings(token, on))
       : null,
-    mockSettings,
+    isDemoMode() ? mockSettings : null,
     [user?.isAdmin],
   );
-  const regions = settings.regions ?? [];
+  const regions = settings?.regions ?? [];
 
   const running = apps.filter((a) => a.status === "running").length;
   const firstName = (user?.name ?? "there").split(" ")[0];

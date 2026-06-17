@@ -20,6 +20,7 @@ import { cn } from "@/lib/utils";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { mockApps, mockBilling } from "@/lib/mock";
+import { isDemoMode } from "@/lib/demo";
 import { useResource } from "@/lib/use-resource";
 import { Logo } from "@/components/logo";
 
@@ -130,19 +131,19 @@ export function Sidebar() {
     activeOrgId
       ? () => authedCall((token, on) => api.getBilling(activeOrgId, token, on))
       : null,
-    mockBilling,
+    isDemoMode() ? mockBilling : null,
     [activeOrgId],
   );
   const { data: appsData } = useResource(
     activeOrgId
       ? () => authedCall((token, on) => api.listApps(activeOrgId, token, on))
       : null,
-    { data: mockApps },
+    { data: isDemoMode() ? mockApps : [] },
     [activeOrgId],
   );
 
-  const planName = billing.plan?.name ?? null;
-  const maxApps = billing.plan?.maxApps;
+  const planName = billing?.plan?.name ?? null;
+  const maxApps = billing?.plan?.maxApps;
   const appCount = appsData.data.length;
   const usagePct =
     typeof maxApps === "number" && maxApps > 0

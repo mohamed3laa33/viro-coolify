@@ -3,18 +3,14 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ChevronDown, LogOut, Check } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn, initials } from "@/lib/utils";
 import { useAuth } from "@/lib/auth";
-import { mockOrgs } from "@/lib/mock";
 
 export function Topbar() {
   const router = useRouter();
-  const { user, logout, orgs: realOrgs, activeOrgId, setActiveOrgId } = useAuth();
+  const { user, logout, orgs, activeOrgId, setActiveOrgId } = useAuth();
 
-  // Fall back to mock orgs when the API hasn't returned any (demo mode).
-  const orgs = realOrgs.length > 0 ? realOrgs : mockOrgs;
-  const activeOrg =
-    orgs.find((o) => o.id === activeOrgId) ?? orgs[0];
+  const activeOrg = orgs.find((o) => o.id === activeOrgId) ?? orgs[0] ?? null;
   const [orgOpen, setOrgOpen] = useState(false);
   const [userOpen, setUserOpen] = useState(false);
 
@@ -34,14 +30,11 @@ export function Topbar() {
     return () => document.removeEventListener("mousedown", onClick);
   }, []);
 
-  const displayName = user?.name ?? "Demo User";
-  const displayEmail = user?.email ?? "you@vortex.v60ai.com";
-  const initials = displayName
-    .split(" ")
-    .map((p) => p[0])
-    .join("")
-    .slice(0, 2)
-    .toUpperCase();
+  const displayName = user?.name ?? "Account";
+  const displayEmail = user?.email ?? "";
+  const userInitials = initials(displayName) || "?";
+  const orgLabel = activeOrg?.name ?? "No organization";
+  const orgInitial = activeOrg?.name?.[0] ?? "—";
 
   function handleLogout() {
     logout();
@@ -58,9 +51,9 @@ export function Topbar() {
           className="flex items-center gap-2 rounded-md border border-border bg-surface-2 px-3 py-1.5 text-sm font-medium text-foreground hover:bg-muted"
         >
           <span className="flex h-5 w-5 items-center justify-center rounded bg-brand-balloon text-[10px] font-bold text-white">
-            {activeOrg.name[0]}
+            {orgInitial}
           </span>
-          {activeOrg.name}
+          {orgLabel}
           <ChevronDown className="h-4 w-4 text-muted-foreground" />
         </button>
 
@@ -69,6 +62,11 @@ export function Topbar() {
             <p className="px-2 py-1.5 text-xs font-medium text-muted-foreground">
               Organizations
             </p>
+            {orgs.length === 0 && (
+              <p className="px-2 py-2 text-sm text-muted-foreground">
+                No organizations yet.
+              </p>
+            )}
             {orgs.map((org) => (
               <button
                 key={org.id}
@@ -85,7 +83,7 @@ export function Topbar() {
                   </span>
                   {org.name}
                 </span>
-                {org.id === activeOrg.id && (
+                {org.id === activeOrg?.id && (
                   <Check className="h-4 w-4 text-primary" />
                 )}
               </button>
@@ -102,7 +100,7 @@ export function Topbar() {
           className="flex items-center gap-2 rounded-full p-1 pr-2 hover:bg-muted"
         >
           <span className="flex h-8 w-8 items-center justify-center rounded-full bg-brand-balloon text-xs font-semibold text-white">
-            {initials}
+            {userInitials}
           </span>
           <ChevronDown className="h-4 w-4 text-muted-foreground" />
         </button>
@@ -113,9 +111,11 @@ export function Topbar() {
               <p className="truncate text-sm font-medium text-foreground">
                 {displayName}
               </p>
-              <p className="truncate text-xs text-muted-foreground">
-                {displayEmail}
-              </p>
+              {displayEmail && (
+                <p className="truncate text-xs text-muted-foreground">
+                  {displayEmail}
+                </p>
+              )}
             </div>
             <div className="my-1 h-px bg-border" />
             <button

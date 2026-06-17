@@ -18,6 +18,7 @@ import {
   ShieldCheck,
   ShieldAlert,
 } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 import {
   api,
@@ -32,13 +33,16 @@ import {
   mockEnv,
   mockMetrics,
 } from "@/lib/mock";
+import { isDemoMode } from "@/lib/demo";
 import { useResource } from "@/lib/use-resource";
-import { cn } from "@/lib/utils";
+import { cn, buildAppFqdn, slugify, BRAND_MAGENTA } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { Notice } from "@/components/ui/notice";
+import { Tabs } from "@/components/ui/tabs";
 import { StatusDot } from "@/components/ui/status-dot";
 import { Sparkline } from "@/components/sparkline";
 
@@ -54,7 +58,9 @@ type Tab = (typeof TABS)[number];
 
 type ActionKind = "deploy" | "stop" | "restart";
 
-const MOCK_LOGS = [
+// Placeholder log lines shown only in demo mode. There is no live log endpoint
+// wired yet, so production renders an explicit empty state instead.
+const DEMO_LOGS = [
   "2026-06-17T09:01:02Z [info]  Starting machine 4d891 in iad",
   "2026-06-17T09:01:03Z [info]  Pulling image registry.vortex.v60ai.com/app:v42",
   "2026-06-17T09:01:08Z [info]  Image pulled in 5.1s",
@@ -75,14 +81,18 @@ export default function AppDetailPage({
   // The route folder is named [uuid] for historical reasons; the param is the
   // app id.
   const { uuid: appId } = use(params);
+  const router = useRouter();
   const { activeOrgId, authedCall } = useAuth();
 
-  const fallback = useMemo<App>(
-    () => mockApps.find((a) => a.id === appId) ?? mockApps[0],
+  // In demo mode show a mock app as the fallback; in production there is no
+  // fabricated app, so a failed/absent fetch renders an explicit empty state.
+  const fallback = useMemo<App | null>(
+    () =>
+      isDemoMode() ? mockApps.find((a) => a.id === appId) ?? mockApps[0] : null,
     [appId],
   );
 
-  const { data: fetched, loading } = useResource(
+  const { data: fetched, loading } = useResource<App | null>(
     activeOrgId
       ? () => authedCall((token, on) => api.getApp(activeOrgId, appId, token, on))
       : null,
@@ -98,12 +108,11 @@ export default function AppDetailPage({
   const [tab, setTab] = useState<Tab>("Overview");
   const [pending, setPending] = useState<ActionKind | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   async function runAction(kind: ActionKind) {
     if (!activeOrgId) {
-      setNotice(
-        `${capitalize(kind)} unavailable — no active organization (demo mode).`,
-      );
+      setNotice(`${capitalize(kind)} unavailable — no active organization.`);
       return;
     }
     setPending(kind);
@@ -119,12 +128,55 @@ export default function AppDetailPage({
       setOverride(updated);
       setNotice(`${capitalize(kind)} requested — status: ${updated.status}`);
     } catch {
-      setNotice(
-        `${capitalize(kind)} queued locally (API unreachable — running in demo mode).`,
-      );
+      setNotice(`${capitalize(kind)} failed — the API is unreachable.`);
     } finally {
       setPending(null);
     }
+  }
+
+  async function onDelete() {
+    if (!activeOrgId) {
+      setNotice("Delete unavailable — no active organization.");
+      return;
+    }
+    if (
+      typeof window !== "undefined" &&
+      !window.confirm(
+        `Delete ${app?.name ?? "this app"}? This permanently removes the app and all of its machines.`,
+      )
+    ) {
+      return;
+    }
+    setDeleting(true);
+    setNotice(null);
+    try {
+      await authedCall((token, on) =>
+        api.deleteApp(activeOrgId, appId, token, on),
+      );
+      router.push("/dashboard/apps");
+    } catch {
+      setNotice("Delete failed — the API is unreachable.");
+      setDeleting(false);
+    }
+  }
+
+  if (!app && !loading) {
+    return (
+      <div className="space-y-6">
+        <Link
+          href="/dashboard/apps"
+          className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          Back to apps
+        </Link>
+        <Card className="flex flex-col items-center justify-center py-16 text-center">
+          <p className="text-sm text-muted-foreground">
+            App not found, or the API is unreachable.
+          </p>
+        </Card>
+      </div>
+    );
   }
 
   return (
@@ -140,14 +192,14 @@ export default function AppDetailPage({
       {/* Header */}
       <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
         <div className="flex items-center gap-3">
-          <StatusDot status={app.status} />
+          <StatusDot status={app?.status ?? "created"} />
           <div>
             <h1 className="text-2xl font-semibold tracking-tight">
-              {app.name}
+              {app?.name ?? "Loading…"}
             </h1>
             <span className="inline-flex items-center gap-1 font-mono text-sm text-muted-foreground">
               <Globe className="h-3.5 w-3.5" />
-              {app.gitRepository}
+              {app?.gitRepository}
             </span>
           </div>
         </div>
@@ -191,39 +243,17 @@ export default function AppDetailPage({
         </div>
       </div>
 
-      {notice && (
-        <div className="rounded-md border border-primary/30 bg-primary/10 px-4 py-2 text-sm text-primary">
-          {notice}
-        </div>
-      )}
+      {notice && <Notice>{notice}</Notice>}
 
       {/* Tabs */}
-      <div className="border-b border-border">
-        <nav className="-mb-px flex gap-6 overflow-x-auto">
-          {TABS.map((t) => (
-            <button
-              key={t}
-              type="button"
-              onClick={() => setTab(t)}
-              className={cn(
-                "whitespace-nowrap border-b-2 px-1 pb-3 text-sm font-medium transition-colors",
-                tab === t
-                  ? "border-primary text-foreground"
-                  : "border-transparent text-muted-foreground hover:text-foreground",
-              )}
-            >
-              {t}
-            </button>
-          ))}
-        </nav>
-      </div>
+      <Tabs tabs={TABS} active={tab} onChange={setTab} />
 
       {loading && (
         <p className="text-sm text-muted-foreground">Loading app…</p>
       )}
 
       {/* Tab content */}
-      {tab === "Overview" && (
+      {app && tab === "Overview" && (
         <div className="grid gap-4 sm:grid-cols-2">
           <InfoCard title="Status">
             <StatusDot status={app.status} showLabel />
@@ -246,38 +276,17 @@ export default function AppDetailPage({
         </div>
       )}
 
-      {tab === "Logs" && (
-        <Card className="overflow-hidden">
-          <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
-            <span className="font-mono text-xs text-muted-foreground">
-              live tail — {app.name}
-            </span>
-            <StatusDot status="running" showLabel />
-          </div>
-          <div className="scrollbar-thin max-h-[420px] overflow-y-auto bg-[#0c0c0f] p-4 font-mono text-xs leading-relaxed">
-            {MOCK_LOGS.map((line, i) => {
-              const level = line.includes("[warn]")
-                ? "text-warning"
-                : line.includes("[error]")
-                  ? "text-destructive"
-                  : "text-muted-foreground";
-              return (
-                <div key={i} className={cn("whitespace-pre-wrap", level)}>
-                  {line}
-                </div>
-              );
-            })}
-          </div>
-        </Card>
+      {app && tab === "Logs" && <LogsTab appName={app.name} />}
+
+      {app && tab === "Metrics" && <MetricsTab appId={appId} />}
+
+      {app && tab === "Environment" && <EnvironmentTab appId={appId} />}
+
+      {app && tab === "Domains" && (
+        <DomainsTab appId={appId} appName={app.name} />
       )}
 
-      {tab === "Metrics" && <MetricsTab appId={appId} />}
-
-      {tab === "Environment" && <EnvironmentTab appId={appId} />}
-
-      {tab === "Domains" && <DomainsTab appId={appId} appName={app.name} />}
-
-      {tab === "Settings" && (
+      {app && tab === "Settings" && (
         <Card>
           <CardHeader>
             <CardTitle>Danger zone</CardTitle>
@@ -303,7 +312,13 @@ export default function AppDetailPage({
                   Permanently remove this app and all of its machines.
                 </p>
               </div>
-              <Button variant="destructive" size="sm">
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={onDelete}
+                disabled={deleting}
+              >
+                {deleting && <Loader2 className="h-4 w-4 animate-spin" />}
                 Delete
               </Button>
             </div>
@@ -315,11 +330,56 @@ export default function AppDetailPage({
 }
 
 // ---------------------------------------------------------------------------
+// Logs tab — no live log endpoint is wired yet, so this shows demo lines in
+// demo mode and an explicit placeholder otherwise (never invented as live).
+// ---------------------------------------------------------------------------
+
+function LogsTab({ appName }: { appName: string }) {
+  if (!isDemoMode()) {
+    return (
+      <Card className="flex flex-col items-center justify-center py-16 text-center">
+        <p className="text-sm text-muted-foreground">
+          Live log streaming isn&apos;t available yet for this app.
+        </p>
+      </Card>
+    );
+  }
+
+  return (
+    <Card className="overflow-hidden">
+      <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
+        <span className="font-mono text-xs text-muted-foreground">
+          sample tail — {appName}
+        </span>
+        <Badge variant="outline">Demo</Badge>
+      </div>
+      <div className="scrollbar-thin max-h-[420px] overflow-y-auto bg-background p-4 font-mono text-xs leading-relaxed">
+        {DEMO_LOGS.map((line, i) => {
+          const level = line.includes("[warn]")
+            ? "text-warning"
+            : line.includes("[error]")
+              ? "text-destructive"
+              : "text-muted-foreground";
+          return (
+            <div key={i} className={cn("whitespace-pre-wrap", level)}>
+              {line}
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Metrics tab
 // ---------------------------------------------------------------------------
 
 function MetricsTab({ appId }: { appId: string }) {
   const { activeOrgId, authedCall } = useAuth();
+
+  const demo = isDemoMode();
+  const empty: AppMetrics = { cpu: [], memory: [], requests: [] };
 
   const { data } = useResource<AppMetrics>(
     activeOrgId
@@ -328,20 +388,33 @@ function MetricsTab({ appId }: { appId: string }) {
             api.getMetrics(activeOrgId, appId, token, on),
           )
       : null,
-    mockMetrics,
+    demo ? mockMetrics : empty,
     [activeOrgId, appId],
   );
 
-  // Fall back to client mock when the endpoint returns empty series.
-  const metrics: AppMetrics = {
-    cpu: data.cpu.length ? data.cpu : mockMetrics.cpu,
-    memory: data.memory.length ? data.memory : mockMetrics.memory,
-    requests: data.requests.length ? data.requests : mockMetrics.requests,
-  };
+  // In demo mode, synthesize any empty series so the charts render; in
+  // production, empty series stay empty (no invented data).
+  const metrics: AppMetrics = demo
+    ? {
+        cpu: data.cpu.length ? data.cpu : mockMetrics.cpu,
+        memory: data.memory.length ? data.memory : mockMetrics.memory,
+        requests: data.requests.length ? data.requests : mockMetrics.requests,
+      }
+    : data;
 
   const cpu = metrics.cpu.map((p) => p.v);
   const mem = metrics.memory.map((p) => p.v);
   const req = metrics.requests.map((p) => p.v);
+
+  if (cpu.length === 0 && mem.length === 0 && req.length === 0) {
+    return (
+      <Card className="flex flex-col items-center justify-center py-16 text-center">
+        <p className="text-sm text-muted-foreground">
+          No metrics recorded yet for this app.
+        </p>
+      </Card>
+    );
+  }
 
   return (
     <div className="grid gap-4 sm:grid-cols-2">
@@ -355,7 +428,7 @@ function MetricsTab({ appId }: { appId: string }) {
         title="Memory"
         value={`${last(mem)}%`}
         data={mem}
-        color="#E0218A"
+        color={BRAND_MAGENTA}
       />
       <MetricCard
         title="Requests"
@@ -378,7 +451,7 @@ function EnvironmentTab({ appId }: { appId: string }) {
     activeOrgId
       ? () => authedCall((token, on) => api.listEnv(activeOrgId, appId, token, on))
       : null,
-    { data: mockEnv },
+    { data: isDemoMode() ? mockEnv : [] },
     [activeOrgId, appId],
   );
 
@@ -396,7 +469,7 @@ function EnvironmentTab({ appId }: { appId: string }) {
     const k = key.trim();
     if (!k) return;
     if (!activeOrgId) {
-      setNotice("Set unavailable — no active organization (demo mode).");
+      setNotice("Set unavailable — no active organization.");
       return;
     }
     setPending(true);
@@ -409,7 +482,7 @@ function EnvironmentTab({ appId }: { appId: string }) {
       setValue("");
       refetch();
     } catch {
-      setNotice("Variable queued locally (API unreachable — demo mode).");
+      setNotice("Could not save the variable — the API is unreachable.");
     } finally {
       setPending(false);
     }
@@ -417,7 +490,7 @@ function EnvironmentTab({ appId }: { appId: string }) {
 
   async function onDelete(k: string) {
     if (!activeOrgId) {
-      setNotice("Delete unavailable — no active organization (demo mode).");
+      setNotice("Delete unavailable — no active organization.");
       return;
     }
     setBusyKey(k);
@@ -428,7 +501,7 @@ function EnvironmentTab({ appId }: { appId: string }) {
       );
       refetch();
     } catch {
-      setNotice("Delete queued locally (API unreachable — demo mode).");
+      setNotice("Could not delete the variable — the API is unreachable.");
     } finally {
       setBusyKey(null);
     }
@@ -436,11 +509,7 @@ function EnvironmentTab({ appId }: { appId: string }) {
 
   return (
     <div className="space-y-4">
-      {notice && (
-        <div className="rounded-md border border-primary/30 bg-primary/10 px-4 py-2 text-sm text-primary">
-          {notice}
-        </div>
-      )}
+      {notice && <Notice>{notice}</Notice>}
 
       <Card>
         <CardHeader>
@@ -550,19 +619,6 @@ function EnvironmentTab({ appId }: { appId: string }) {
 // Domains tab
 // ---------------------------------------------------------------------------
 
-// Base domain for platform-issued app hostnames.
-const VORTEX_BASE_DOMAIN = "vortex.v60ai.com";
-
-function slugify(value: string): string {
-  return (
-    value
-      .toLowerCase()
-      .trim()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "") || "app"
-  );
-}
-
 function DomainsTab({ appId, appName }: { appId: string; appName: string }) {
   const { activeOrgId, authedCall, orgs } = useAuth();
 
@@ -579,12 +635,12 @@ function DomainsTab({ appId, appName }: { appId: string; appName: string }) {
             api.listDomains(activeOrgId, appId, token, on),
           )
       : null,
-    { data: mockDomains },
+    { data: isDemoMode() ? mockDomains : [] },
     [activeOrgId, appId],
   );
 
   const domains = data.data;
-  const fqdn = `${slugify(appName)}.default.${orgSlug}.${VORTEX_BASE_DOMAIN}`;
+  const fqdn = buildAppFqdn(appName, orgSlug);
 
   const [domain, setDomain] = useState("");
   const [pending, setPending] = useState(false);
@@ -596,7 +652,7 @@ function DomainsTab({ appId, appName }: { appId: string; appName: string }) {
     const d = domain.trim();
     if (!d) return;
     if (!activeOrgId) {
-      setNotice("Add unavailable — no active organization (demo mode).");
+      setNotice("Add unavailable — no active organization.");
       return;
     }
     setPending(true);
@@ -608,7 +664,7 @@ function DomainsTab({ appId, appName }: { appId: string; appName: string }) {
       setDomain("");
       refetch();
     } catch {
-      setNotice("Domain queued locally (API unreachable — demo mode).");
+      setNotice("Could not add the domain — the API is unreachable.");
     } finally {
       setPending(false);
     }
@@ -616,7 +672,7 @@ function DomainsTab({ appId, appName }: { appId: string; appName: string }) {
 
   async function onDelete(id: string) {
     if (!activeOrgId) {
-      setNotice("Delete unavailable — no active organization (demo mode).");
+      setNotice("Delete unavailable — no active organization.");
       return;
     }
     setBusyId(id);
@@ -627,7 +683,7 @@ function DomainsTab({ appId, appName }: { appId: string; appName: string }) {
       );
       refetch();
     } catch {
-      setNotice("Delete queued locally (API unreachable — demo mode).");
+      setNotice("Could not delete the domain — the API is unreachable.");
     } finally {
       setBusyId(null);
     }
@@ -635,11 +691,7 @@ function DomainsTab({ appId, appName }: { appId: string; appName: string }) {
 
   return (
     <div className="space-y-4">
-      {notice && (
-        <div className="rounded-md border border-primary/30 bg-primary/10 px-4 py-2 text-sm text-primary">
-          {notice}
-        </div>
-      )}
+      {notice && <Notice>{notice}</Notice>}
 
       <Card>
         <CardHeader>

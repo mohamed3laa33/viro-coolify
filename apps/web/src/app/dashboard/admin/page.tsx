@@ -4,7 +4,9 @@ import { Building2, Users } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { mockAdminOverview, mockPlans } from "@/lib/mock";
+import { isDemoMode } from "@/lib/demo";
 import { useResource } from "@/lib/use-resource";
+import type { AdminOverview } from "@/lib/api";
 import { PageHeader } from "@/components/page-header";
 import { StatCard } from "@/components/stat-card";
 import {
@@ -23,18 +25,26 @@ function humanizeMetric(metric: string): string {
     .replace(/^\w/, (c) => c.toUpperCase());
 }
 
+const EMPTY_OVERVIEW: AdminOverview = {
+  orgCount: 0,
+  userCount: 0,
+  subscriptionsByPlan: {},
+  usageTotals: {},
+};
+
 export default function AdminOverviewPage() {
   const { authedCall } = useAuth();
+  const demo = isDemoMode();
 
   const { data: overview, usingFallback } = useResource(
     () => authedCall((token, on) => api.getAdminOverview(token, on)),
-    mockAdminOverview,
+    demo ? mockAdminOverview : EMPTY_OVERVIEW,
     [],
   );
 
   const { data: plansData } = useResource(
     () => authedCall((token, on) => api.listAdminPlans(token, on)),
-    { data: mockPlans },
+    { data: demo ? mockPlans : [] },
     [],
   );
   const plans = plansData.data;
@@ -53,7 +63,7 @@ export default function AdminOverviewPage() {
         description="Platform-wide totals across every organization."
       />
 
-      {usingFallback && (
+      {usingFallback && demo && (
         <div className="rounded-md border border-warning/30 bg-warning/10 px-4 py-2 text-sm text-warning">
           Showing demo data — admin API unreachable.
         </div>

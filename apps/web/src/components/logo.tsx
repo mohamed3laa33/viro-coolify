@@ -30,8 +30,8 @@ export function Logo({ className, size = 28, withWordmark = false }: LogoProps) 
             y2="26"
             gradientUnits="userSpaceOnUse"
           >
-            <stop stopColor="#9D4EDD" />
-            <stop offset="1" stopColor="#E0218A" />
+            <stop stopColor="hsl(var(--brand-violet))" />
+            <stop offset="1" stopColor="hsl(var(--brand-magenta))" />
           </linearGradient>
         </defs>
         {/* Balloon envelope */}

@@ -14,12 +14,14 @@ import {
 import { useAuth } from "@/lib/auth";
 import { api, type App, type Project } from "@/lib/api";
 import { mockApps, mockProjects } from "@/lib/mock";
+import { isDemoMode } from "@/lib/demo";
 import { useResource } from "@/lib/use-resource";
 import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent } from "@/components/ui/card";
+import { Notice } from "@/components/ui/notice";
 import { Badge } from "@/components/ui/badge";
 import { StatusDot } from "@/components/ui/status-dot";
 
@@ -30,7 +32,7 @@ export default function ProjectsPage() {
     activeOrgId
       ? () => authedCall((token, on) => api.listProjects(activeOrgId, token, on))
       : null,
-    { data: mockProjects },
+    { data: isDemoMode() ? mockProjects : [] },
     [activeOrgId],
   );
 
@@ -46,7 +48,7 @@ export default function ProjectsPage() {
     const trimmed = name.trim();
     if (!trimmed) return;
     if (!activeOrgId) {
-      setNotice("Create unavailable — no active organization (demo mode).");
+      setNotice("Create unavailable — no active organization.");
       return;
     }
     setPending(true);
@@ -59,7 +61,7 @@ export default function ProjectsPage() {
       setCreating(false);
       refetch();
     } catch {
-      setNotice("Project queued locally (API unreachable — demo mode).");
+      setNotice("Could not create the project — the API is unreachable.");
     } finally {
       setPending(false);
     }
@@ -78,11 +80,7 @@ export default function ProjectsPage() {
         }
       />
 
-      {notice && (
-        <div className="rounded-md border border-primary/30 bg-primary/10 px-4 py-2 text-sm text-primary">
-          {notice}
-        </div>
-      )}
+      {notice && <Notice>{notice}</Notice>}
 
       {creating && (
         <Card>
@@ -144,8 +142,8 @@ function ProjectRow({ project }: { project: Project }) {
   const { activeOrgId, authedCall } = useAuth();
   const [open, setOpen] = useState(false);
 
-  // Fallback: filter the global mock apps as a stand-in for this project.
-  const fallbackApps = mockApps.slice(0, 3);
+  // Fallback: in demo mode, use a stand-in slice of mock apps; otherwise empty.
+  const fallbackApps = isDemoMode() ? mockApps.slice(0, 3) : [];
 
   const { data, loading } = useResource(
     open && activeOrgId

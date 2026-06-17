@@ -10,6 +10,7 @@ import {
   type TemplateKind,
 } from "@/lib/api";
 import { mockTemplates } from "@/lib/mock";
+import { isDemoMode } from "@/lib/demo";
 import { useResource } from "@/lib/use-resource";
 import { cn } from "@/lib/utils";
 import { PageHeader } from "@/components/page-header";
@@ -41,7 +42,7 @@ export default function AdminCatalogPage() {
 
   const { data, refetch, usingFallback } = useResource(
     () => authedCall((token, on) => api.listTemplates(token, on)),
-    { data: mockTemplates },
+    { data: isDemoMode() ? mockTemplates : [] },
     [],
   );
   const templates = data.data;

@@ -4,6 +4,7 @@ import { Globe, Plus, ShieldCheck, ShieldAlert } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { api, type App, type Domain } from "@/lib/api";
 import { mockApps, mockDomains } from "@/lib/mock";
+import { isDemoMode } from "@/lib/demo";
 import { useResource } from "@/lib/use-resource";
 import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
@@ -24,7 +25,7 @@ export default function DomainsPage() {
     activeOrgId
       ? () => authedCall((token, on) => api.listApps(activeOrgId, token, on))
       : null,
-    { data: mockApps },
+    { data: isDemoMode() ? mockApps : [] },
     [activeOrgId],
   );
   const apps = appsData.data;
@@ -51,7 +52,9 @@ export default function DomainsPage() {
             return lists.flat();
           })
       : null,
-    mockDomains.map((d) => ({ ...d, app: mockApps[0]?.name ?? "—" })),
+    isDemoMode()
+      ? mockDomains.map((d) => ({ ...d, app: mockApps[0]?.name ?? "—" }))
+      : [],
     [activeOrgId, apps.map((a) => a.id).join(",")],
   );
 

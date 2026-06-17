@@ -5,6 +5,7 @@ import { Loader2, Pencil, Plus, Trash2 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { api, type AdminPlan, type AdminPlanInput } from "@/lib/api";
 import { mockPlans } from "@/lib/mock";
+import { isDemoMode } from "@/lib/demo";
 import { useResource } from "@/lib/use-resource";
 import { cn } from "@/lib/utils";
 import { PageHeader } from "@/components/page-header";
@@ -48,7 +49,7 @@ export default function AdminPlansPage() {
 
   const { data, refetch, usingFallback } = useResource(
     () => authedCall((token, on) => api.listAdminPlans(token, on)),
-    { data: mockPlans },
+    { data: isDemoMode() ? mockPlans : [] },
     [],
   );
   const plans = data.data;
@@ -95,7 +96,7 @@ export default function AdminPlansPage() {
         }
       />
 
-      {usingFallback && (
+      {usingFallback && isDemoMode() && (
         <div className="rounded-md border border-warning/30 bg-warning/10 px-4 py-2 text-sm text-warning">
           Showing demo data — admin API unreachable. Edits won&apos;t persist.
         </div>

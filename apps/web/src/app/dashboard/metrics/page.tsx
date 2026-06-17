@@ -2,8 +2,11 @@
 
 import { useMemo } from "react";
 import { Activity, Cpu, MemoryStick, Network } from "lucide-react";
+import { isDemoMode } from "@/lib/demo";
+import { BRAND_MAGENTA } from "@/lib/utils";
 import { PageHeader } from "@/components/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 import { Sparkline } from "@/components/sparkline";
 import { StatCard } from "@/components/stat-card";
 
@@ -18,16 +21,39 @@ function series(seed: number, n = 32): number[] {
 }
 
 export default function MetricsPage() {
-  const cpu = useMemo(() => series(2), []);
-  const mem = useMemo(() => series(5), []);
-  const net = useMemo(() => series(9), []);
-  const req = useMemo(() => series(13), []);
+  // There is no org-wide aggregate metrics endpoint yet, so the charts below
+  // are sample data shown only in demo mode. Production renders an explicit
+  // placeholder rather than presenting invented numbers as live.
+  const demo = isDemoMode();
+
+  const cpu = useMemo(() => (demo ? series(2) : []), [demo]);
+  const mem = useMemo(() => (demo ? series(5) : []), [demo]);
+  const net = useMemo(() => (demo ? series(9) : []), [demo]);
+  const req = useMemo(() => (demo ? series(13) : []), [demo]);
+
+  if (!demo) {
+    return (
+      <div className="space-y-6">
+        <PageHeader
+          title="Metrics"
+          description="Real-time resource usage across all your machines."
+        />
+        <Card className="flex flex-col items-center justify-center py-16 text-center">
+          <p className="text-sm text-muted-foreground">
+            Aggregate metrics aren&apos;t available yet. View per-app metrics
+            from an app&apos;s Metrics tab.
+          </p>
+        </Card>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
       <PageHeader
         title="Metrics"
         description="Real-time resource usage across all your machines."
+        actions={<Badge variant="outline">Demo</Badge>}
       />
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -51,7 +77,7 @@ export default function MetricsPage() {
 
       <div className="grid gap-4 lg:grid-cols-2">
         <ChartCard title="CPU utilization" data={cpu} color="hsl(var(--primary))" />
-        <ChartCard title="Memory utilization" data={mem} color="#E0218A" />
+        <ChartCard title="Memory utilization" data={mem} color={BRAND_MAGENTA} />
         <ChartCard title="Network egress" data={net} color="hsl(var(--info))" />
         <ChartCard
           title="Requests per second"
