@@ -1,0 +1,186 @@
+package httpx
+
+import (
+	"context"
+	"io"
+	"log/slog"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/config"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/domain"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/kube"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/platform"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/store"
+)
+
+func newReconcileServer(t *testing.T) (*Server, *kube.FakeBackend, store.Store) {
+	t.Helper()
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	st := store.NewMemoryStore()
+	fb := kube.NewFakeBackend()
+	s := NewServer(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), st, WithBackend(fb))
+	return s, fb, st
+}
+
+func TestReconcileWritesBackRunningStatus(t *testing.T) {
+	s, fb, st := newReconcileServer(t)
+	ctx := context.Background()
+
+	if err := st.CreateOrganization(ctx, &domain.Organization{ID: "org-1", Name: "Acme", Slug: "acme"}); err != nil {
+		t.Fatalf("create org: %v", err)
+	}
+
+	// Deploy a workload on the backend so Status reports it as running (replicas 1).
+	rel, host, err := fb.Apply(ctx, kube.Workload{
+		OrgSlug: "acme", ProjectSlug: "web", Name: "api", Kind: "app", Image: "nginx:1",
+	})
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	// Seed an app with a stale status and the matching placement.
+	app := &domain.App{
+		ID: "a1", OrgID: "org-1", Name: "api", Image: "nginx:1",
+		Status: "deploying", Namespace: "vortex-acme-web", Release: rel, Host: host,
+	}
+	if err := st.CreateApp(ctx, app); err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	s.reconcileOnce(ctx)
+
+	got, err := st.GetApp(ctx, "a1")
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if got.Status != "running" {
+		t.Fatalf("reconciled status = %q, want running", got.Status)
+	}
+}
+
+func TestReconcileScaledToZero(t *testing.T) {
+	s, fb, st := newReconcileServer(t)
+	ctx := context.Background()
+	if err := st.CreateOrganization(ctx, &domain.Organization{ID: "org-1", Slug: "acme"}); err != nil {
+		t.Fatalf("create org: %v", err)
+	}
+	rel, host, _ := fb.Apply(ctx, kube.Workload{OrgSlug: "acme", ProjectSlug: "web", Name: "api", Kind: "app"})
+	if err := fb.Stop(ctx, "vortex-acme-web", rel); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if err := st.CreateApp(ctx, &domain.App{
+		ID: "a1", OrgID: "org-1", Name: "api", Status: "running",
+		Namespace: "vortex-acme-web", Release: rel, Host: host,
+	}); err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	s.reconcileOnce(ctx)
+
+	got, _ := st.GetApp(ctx, "a1")
+	if got.Status != "scaled-to-zero" {
+		t.Fatalf("status = %q, want scaled-to-zero", got.Status)
+	}
+}
+
+// TestReconcileDoesNotClobberStopped verifies a user-initiated Stop is sticky:
+// after platform.Stop() the workload is "stopped" and a reconcile pass MUST leave
+// it that way (otherwise it flips to scaled-to-zero and billing resumes charging).
+func TestReconcileDoesNotClobberStopped(t *testing.T) {
+	s, _, st := newReconcileServer(t)
+	ctx := context.Background()
+
+	if err := st.CreateOrganization(ctx, &domain.Organization{ID: "org-1", Name: "Acme", Slug: "acme"}); err != nil {
+		t.Fatalf("create org: %v", err)
+	}
+
+	// Seed a non-zero vCPU price so the billing gate (billable) is observable: a
+	// running workload yields a positive estimate, a stopped one yields 0.
+	if err := st.UpsertPricingComponent(ctx, &domain.PricingComponent{
+		Key: "cpu", Name: "vCPU", Unit: "vCPU-hour", PricePerHour: 1.0,
+		Currency: "usd", Active: true, SortOrder: 1,
+	}); err != nil {
+		t.Fatalf("seed pricing: %v", err)
+	}
+
+	// Create an image-based app so it deploys (gets a Release) on the fake backend.
+	// Size stays within the default plan quota (max 0.5 vCPU).
+	app, err := s.platform.CreateApp(ctx, "org-1", platform.CreateAppInput{
+		Name: "api", Image: "nginx:1", CPU: 0.25, MemoryMB: 256,
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	if app.Release == "" {
+		t.Fatalf("expected a Release after deploy, got empty")
+	}
+
+	// While running, billing must consider the workload billable (non-zero estimate).
+	if est, err := s.billing.OrgMonthlyEstimateCents(ctx, "org-1"); err != nil || est <= 0 {
+		t.Fatalf("running estimate = %d (err %v), want > 0", est, err)
+	}
+
+	// User stops the app: status becomes "stopped".
+	stopped, err := s.platform.Stop(ctx, "org-1", app.ID)
+	if err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if stopped.Status != "stopped" {
+		t.Fatalf("status after Stop = %q, want stopped", stopped.Status)
+	}
+
+	// The next reconcile tick must NOT overwrite "stopped" with scaled-to-zero.
+	s.reconcileOnce(ctx)
+
+	got, err := st.GetApp(ctx, app.ID)
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if got.Status != "stopped" {
+		t.Fatalf("status after reconcile = %q, want stopped (sticky)", got.Status)
+	}
+
+	// And billing must stay off for the stopped workload (estimate back to 0).
+	if est, err := s.billing.OrgMonthlyEstimateCents(ctx, "org-1"); err != nil || est != 0 {
+		t.Fatalf("stopped estimate = %d (err %v), want 0", est, err)
+	}
+}
+
+func TestReconcileSkipsWorkloadsWithoutRelease(t *testing.T) {
+	s, _, st := newReconcileServer(t)
+	ctx := context.Background()
+	if err := st.CreateOrganization(ctx, &domain.Organization{ID: "org-1", Slug: "acme"}); err != nil {
+		t.Fatalf("create org: %v", err)
+	}
+	// No Release => queued app; reconciler must leave it untouched (and not error).
+	if err := st.CreateApp(ctx, &domain.App{ID: "a1", OrgID: "org-1", Name: "api", Status: "queued"}); err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	s.reconcileOnce(ctx)
+	got, _ := st.GetApp(ctx, "a1")
+	if got.Status != "queued" {
+		t.Fatalf("status = %q, want queued (untouched)", got.Status)
+	}
+}
+
+func TestStartReconcilerStopsOnContextCancel(t *testing.T) {
+	s, _, _ := newReconcileServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	s.StartReconciler(ctx, 10*time.Millisecond, &wg)
+	cancel()
+	// The WaitGroup lets us deterministically confirm the loop exits on cancel
+	// (this is the drain other code Wait()s on before closing the store).
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("reconciler loop did not exit after context cancel")
+	}
+}

@@ -12,10 +12,14 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/util/retry"
 
 	"sigs.k8s.io/yaml"
 )
@@ -36,14 +40,34 @@ type Config struct {
 	// scheduler requests (e.g. 0.2 and 0.35). Limits stay at the full requested size.
 	CPUOvercommitFactor    float64
 	MemoryOvercommitFactor float64
+	// HelmTimeout bounds each `helm upgrade` (with --wait --atomic). Zero falls
+	// back to defaultHelmTimeout. Sourced from the VORTEX_* env (admin-tunable).
+	HelmTimeout time.Duration
 }
+
+// defaultHelmTimeout is the fallback per-Apply helm deadline when cfg.HelmTimeout
+// is unset.
+const defaultHelmTimeout = 5 * time.Minute
+
+// KEDA ScaledObject GroupVersionResource, used to pause/resume autoscaling so
+// Stop/Start are not reverted by the autoscaler.
+var scaledObjectGVR = schema.GroupVersionResource{
+	Group:    "keda.sh",
+	Version:  "v1alpha1",
+	Resource: "scaledobjects",
+}
+
+// kedaPausedAnnotation, when set on a ScaledObject, pins the workload to the
+// annotated replica count (KEDA stops scaling it). Removing it resumes scaling.
+const kedaPausedAnnotation = "autoscaling.keda.sh/paused-replicas"
 
 // KubeBackend is the real Backend: a typed clientset for namespace/quota/status/logs
 // plus a HelmRunner for chart installs.
 type KubeBackend struct {
-	cfg    Config
-	client kubernetes.Interface
-	helm   HelmRunner
+	cfg     Config
+	client  kubernetes.Interface
+	dynamic dynamic.Interface
+	helm    HelmRunner
 }
 
 var _ Backend = (*KubeBackend)(nil)
@@ -60,16 +84,32 @@ func New(cfg Config, kubeconfigPath string, helm HelmRunner) (*KubeBackend, erro
 	if err != nil {
 		return nil, fmt.Errorf("kube: build clientset: %w", err)
 	}
-	return NewWithClient(cfg, cs, helm), nil
+	dyn, err := dynamic.NewForConfig(restCfg)
+	if err != nil {
+		return nil, fmt.Errorf("kube: build dynamic client: %w", err)
+	}
+	b := NewWithClient(cfg, cs, helm)
+	b.dynamic = dyn
+	return b, nil
 }
 
 // NewWithClient builds a KubeBackend from an existing clientset (used by tests
 // with client-go's fake clientset). Pass helm=nil to use the real `helm` binary.
+// The dynamic client (used to pause/resume KEDA) is left nil here; set it via
+// NewWithClients when a fake dynamic client is needed.
 func NewWithClient(cfg Config, client kubernetes.Interface, helm HelmRunner) *KubeBackend {
 	if helm == nil {
 		helm = NewExecHelmRunner("")
 	}
 	return &KubeBackend{cfg: cfg, client: client, helm: helm}
+}
+
+// NewWithClients is like NewWithClient but also wires a dynamic client, so tests
+// can assert KEDA ScaledObject pause/resume behavior with a fake dynamic client.
+func NewWithClients(cfg Config, client kubernetes.Interface, dyn dynamic.Interface, helm HelmRunner) *KubeBackend {
+	b := NewWithClient(cfg, client, helm)
+	b.dynamic = dyn
+	return b
 }
 
 // restConfig prefers in-cluster config and falls back to a kubeconfig file.
@@ -271,16 +311,36 @@ func (b *KubeBackend) Apply(ctx context.Context, w Workload) (string, string, er
 		return "", "", fmt.Errorf("kube: close values: %w", err)
 	}
 
+	// Run helm on a DETACHED context with its own deadline: a deploy must not be
+	// abandoned half-way just because the originating HTTP request was cancelled.
+	// --wait --atomic make a failed rollout auto-revert, so the returned status
+	// reflects readiness rather than "submitted".
+	timeout := b.helmTimeout()
+	helmCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
 	args := []string{
 		"upgrade", "--install", rel, b.cfg.ChartPath,
 		"-n", ns, "--create-namespace",
 		"-f", f.Name(),
+		"--wait", "--atomic", "--timeout", helmDuration(timeout),
 	}
-	if _, err := b.helm.Run(ctx, args...); err != nil {
+	if _, err := b.helm.Run(helmCtx, args...); err != nil {
 		return "", "", err
 	}
 	return rel, h, nil
 }
+
+// helmTimeout returns the configured per-Apply helm deadline, or the default.
+func (b *KubeBackend) helmTimeout() time.Duration {
+	if b.cfg.HelmTimeout > 0 {
+		return b.cfg.HelmTimeout
+	}
+	return defaultHelmTimeout
+}
+
+// helmDuration renders a timeout for helm's --timeout flag (e.g. "5m0s").
+func helmDuration(d time.Duration) string { return d.String() }
 
 // buildValues maps a Workload to common-chart values.
 func (b *KubeBackend) buildValues(w Workload, h string) map[string]any {
@@ -346,6 +406,28 @@ func (b *KubeBackend) buildValues(w Workload, h string) map[string]any {
 			"timeoutSeconds":      5,
 			"failureThreshold":    6,
 		}
+	} else {
+		// Default conservative TCP probes for every other app/service/database kind
+		// so a RollingUpdate doesn't shift traffic to a not-yet-listening pod. These
+		// only check that the workload's port accepts a connection (engine-agnostic).
+		if _, ok := deployment["readinessProbe"]; !ok {
+			deployment["readinessProbe"] = map[string]any{
+				"tcpSocket":           map[string]any{"port": port},
+				"initialDelaySeconds": 5,
+				"periodSeconds":       10,
+				"timeoutSeconds":      3,
+				"failureThreshold":    3,
+			}
+		}
+		if _, ok := deployment["livenessProbe"]; !ok {
+			deployment["livenessProbe"] = map[string]any{
+				"tcpSocket":           map[string]any{"port": port},
+				"initialDelaySeconds": 30,
+				"periodSeconds":       30,
+				"timeoutSeconds":      5,
+				"failureThreshold":    5,
+			}
+		}
 	}
 
 	service := map[string]any{
@@ -392,10 +474,17 @@ func (b *KubeBackend) buildValues(w Workload, h string) map[string]any {
 	}
 
 	return map[string]any{
-		"deployment": deployment,
-		"service":    service,
-		"keda":       keda,
-		"gateway":    gateway,
+		// Force the chart to name every rendered object (Deployment, StatefulSet,
+		// Service, ScaledObject) EXACTLY the release name. Without this the
+		// common-chart's fullname template appends "-common-chart", so the
+		// lifecycle Get/Patch calls (scale/Restart/Status/pauseKeda/resumeKeda),
+		// which target the bare release name, would 404 on a real cluster. The
+		// chart's _helpers.tpl honors fullnameOverride.
+		"fullnameOverride": releaseName(w.Name),
+		"deployment":       deployment,
+		"service":          service,
+		"keda":             keda,
+		"gateway":          gateway,
 	}
 }
 
@@ -410,48 +499,97 @@ func scaleTargetKind(stateful bool) string {
 // Lifecycle
 // ---------------------------------------------------------------------------
 
-// Stop scales the workload's controller to zero replicas via the clientset.
+// Stop scales the workload to zero. When a KEDA ScaledObject owns the workload,
+// scaling the controller directly is reverted within ~30s, so Stop first PAUSES
+// KEDA (paused-replicas: "0") and then scales the controller to 0. With no
+// ScaledObject it falls back to scaling alone.
 func (b *KubeBackend) Stop(ctx context.Context, namespace, release string) error {
+	if err := b.pauseKeda(ctx, namespace, release, "0"); err != nil {
+		return err
+	}
 	return b.scale(ctx, namespace, release, 0)
 }
 
-// Start scales the workload back up to one replica.
+// Start resumes the workload: it removes the KEDA pause annotation (handing
+// replica control back to the autoscaler) and scales the controller to 1 so the
+// workload comes up immediately even before KEDA next reconciles.
 func (b *KubeBackend) Start(ctx context.Context, namespace, release string) error {
+	if err := b.resumeKeda(ctx, namespace, release); err != nil {
+		return err
+	}
 	return b.scale(ctx, namespace, release, 1)
 }
 
+// pauseKeda patches the release's KEDA ScaledObject with the paused-replicas
+// annotation. A missing ScaledObject (or no dynamic client) is not an error: the
+// caller falls back to plain scaling.
+func (b *KubeBackend) pauseKeda(ctx context.Context, namespace, release, replicas string) error {
+	if b.dynamic == nil {
+		return nil
+	}
+	patch := []byte(fmt.Sprintf(
+		`{"metadata":{"annotations":{%q:%q}}}`, kedaPausedAnnotation, replicas))
+	_, err := b.dynamic.Resource(scaledObjectGVR).Namespace(namespace).
+		Patch(ctx, release, types.MergePatchType, patch, metav1.PatchOptions{})
+	if err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("kube: pause keda %s/%s: %w", namespace, release, err)
+	}
+	return nil
+}
+
+// resumeKeda removes the paused-replicas annotation from the ScaledObject. A
+// missing ScaledObject (or no dynamic client) is not an error.
+func (b *KubeBackend) resumeKeda(ctx context.Context, namespace, release string) error {
+	if b.dynamic == nil {
+		return nil
+	}
+	// JSON Merge Patch: setting an annotation to null removes it.
+	patch := []byte(fmt.Sprintf(
+		`{"metadata":{"annotations":{%q:null}}}`, kedaPausedAnnotation))
+	_, err := b.dynamic.Resource(scaledObjectGVR).Namespace(namespace).
+		Patch(ctx, release, types.MergePatchType, patch, metav1.PatchOptions{})
+	if err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("kube: resume keda %s/%s: %w", namespace, release, err)
+	}
+	return nil
+}
+
 func (b *KubeBackend) scale(ctx context.Context, namespace, release string, replicas int32) error {
-	if dep, err := b.client.AppsV1().Deployments(namespace).Get(ctx, release, metav1.GetOptions{}); err == nil {
-		dep.Spec.Replicas = &replicas
-		_, err = b.client.AppsV1().Deployments(namespace).Update(ctx, dep, metav1.UpdateOptions{})
-		return err
-	} else if !errors.IsNotFound(err) {
-		return err
-	}
-	if sts, err := b.client.AppsV1().StatefulSets(namespace).Get(ctx, release, metav1.GetOptions{}); err == nil {
-		sts.Spec.Replicas = &replicas
-		_, err = b.client.AppsV1().StatefulSets(namespace).Update(ctx, sts, metav1.UpdateOptions{})
-		return err
-	}
-	return fmt.Errorf("kube: no Deployment/StatefulSet %q in %q", release, namespace)
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if dep, err := b.client.AppsV1().Deployments(namespace).Get(ctx, release, metav1.GetOptions{}); err == nil {
+			dep.Spec.Replicas = &replicas
+			_, err = b.client.AppsV1().Deployments(namespace).Update(ctx, dep, metav1.UpdateOptions{})
+			return err
+		} else if !errors.IsNotFound(err) {
+			return err
+		}
+		if sts, err := b.client.AppsV1().StatefulSets(namespace).Get(ctx, release, metav1.GetOptions{}); err == nil {
+			sts.Spec.Replicas = &replicas
+			_, err = b.client.AppsV1().StatefulSets(namespace).Update(ctx, sts, metav1.UpdateOptions{})
+			return err
+		}
+		return fmt.Errorf("kube: no Deployment/StatefulSet %q in %q", release, namespace)
+	})
 }
 
 // Restart triggers a rollout by stamping a restart annotation on the pod template.
 func (b *KubeBackend) Restart(ctx context.Context, namespace, release string) error {
 	stamp := time.Now().Format(time.RFC3339)
-	if dep, err := b.client.AppsV1().Deployments(namespace).Get(ctx, release, metav1.GetOptions{}); err == nil {
-		setRestartAnnotation(&dep.Spec.Template.ObjectMeta, stamp)
-		_, err = b.client.AppsV1().Deployments(namespace).Update(ctx, dep, metav1.UpdateOptions{})
-		return err
-	} else if !errors.IsNotFound(err) {
-		return err
-	}
-	if sts, err := b.client.AppsV1().StatefulSets(namespace).Get(ctx, release, metav1.GetOptions{}); err == nil {
-		setRestartAnnotation(&sts.Spec.Template.ObjectMeta, stamp)
-		_, err = b.client.AppsV1().StatefulSets(namespace).Update(ctx, sts, metav1.UpdateOptions{})
-		return err
-	}
-	return fmt.Errorf("kube: no Deployment/StatefulSet %q in %q", release, namespace)
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if dep, err := b.client.AppsV1().Deployments(namespace).Get(ctx, release, metav1.GetOptions{}); err == nil {
+			setRestartAnnotation(&dep.Spec.Template.ObjectMeta, stamp)
+			_, err = b.client.AppsV1().Deployments(namespace).Update(ctx, dep, metav1.UpdateOptions{})
+			return err
+		} else if !errors.IsNotFound(err) {
+			return err
+		}
+		if sts, err := b.client.AppsV1().StatefulSets(namespace).Get(ctx, release, metav1.GetOptions{}); err == nil {
+			setRestartAnnotation(&sts.Spec.Template.ObjectMeta, stamp)
+			_, err = b.client.AppsV1().StatefulSets(namespace).Update(ctx, sts, metav1.UpdateOptions{})
+			return err
+		}
+		return fmt.Errorf("kube: no Deployment/StatefulSet %q in %q", release, namespace)
+	})
 }
 
 func setRestartAnnotation(meta *metav1.ObjectMeta, stamp string) {
@@ -461,10 +599,23 @@ func setRestartAnnotation(meta *metav1.ObjectMeta, stamp string) {
 	meta.Annotations["kubectl.kubernetes.io/restartedAt"] = stamp
 }
 
-// Delete uninstalls the Helm release.
+// Delete uninstalls the Helm release. It is idempotent: an already-absent
+// release (`helm uninstall` reporting "release: not found") is treated as
+// success so callers can safely retry / reconcile.
 func (b *KubeBackend) Delete(ctx context.Context, namespace, release string) error {
 	_, err := b.helm.Run(ctx, "uninstall", release, "-n", namespace)
+	if err != nil && isHelmNotFound(err.Error()) {
+		return nil
+	}
 	return err
+}
+
+// isHelmNotFound reports whether a helm error indicates the release is already
+// gone. It matches ONLY helm's specific sentinel ("release: not found") so it
+// never swallows unrelated failures like "chart ... not found" or
+// "namespace ... not found".
+func isHelmNotFound(s string) bool {
+	return strings.Contains(strings.ToLower(s), "release: not found")
 }
 
 // ---------------------------------------------------------------------------

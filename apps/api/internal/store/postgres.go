@@ -472,6 +472,21 @@ func (s *PostgresStore) ListDatabasesByOrg(ctx context.Context, orgID string) ([
 	return out, mapErr(rows.Err())
 }
 
+func (s *PostgresStore) UpdateDatabase(ctx context.Context, d *domain.Database) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE databases SET org_id = $2, project_id = $3, coolify_uuid = $4, name = $5, engine = $6,
+		 cpu = $7, memory_mb = $8, status = $9, namespace = $10, "release" = $11, host = $12, created_at = $13 WHERE id = $1`,
+		d.ID, d.OrgID, d.ProjectID, d.CoolifyUUID, d.Name, d.Engine, d.CPU, d.MemoryMB, d.Status, d.Namespace, d.Release, d.Host, d.CreatedAt,
+	)
+	if err != nil {
+		return mapErr(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *PostgresStore) DeleteDatabase(ctx context.Context, id string) error {
 	tag, err := s.pool.Exec(ctx, `DELETE FROM databases WHERE id = $1`, id)
 	if err != nil {

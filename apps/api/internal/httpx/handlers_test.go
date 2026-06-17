@@ -141,7 +141,9 @@ func TestAppLifecycleOrgScoped(t *testing.T) {
 	token := signup(t, s, "owner-apps@example.com")
 	org := firstOrgID(t, s, token)
 
-	rec := doJSON(t, s, http.MethodPost, "/v1/orgs/"+org+"/apps", `{"name":"web"}`, token)
+	// Image-based app so a redeploy has an image to apply (a git app with no
+	// image yet would correctly get a 409 from /deploy).
+	rec := doJSON(t, s, http.MethodPost, "/v1/orgs/"+org+"/apps", `{"name":"web","image":"nginx:1.27"}`, token)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create app: %d %s", rec.Code, rec.Body.String())
 	}
@@ -150,7 +152,7 @@ func TestAppLifecycleOrgScoped(t *testing.T) {
 		Status string `json:"status"`
 	}
 	_ = json.NewDecoder(rec.Body).Decode(&app)
-	if app.ID == "" || app.Status != "queued" {
+	if app.ID == "" || app.Status != "deploying" {
 		t.Fatalf("unexpected app: %+v", app)
 	}
 

@@ -38,6 +38,8 @@ type Config struct {
 	KubeChartPath    string // path to the common-chart used for workload installs
 	GatewayName      string // shared Gateway every per-app HTTPRoute attaches to
 	GatewayNamespace string // namespace of the shared Gateway
+	HelmTimeoutSec   int    // per-Apply helm deadline (seconds); --wait --atomic
+	ReconcileSec     int    // status reconciler interval (seconds)
 
 	// Billing (Stripe, test-mode by default).
 	StripeSecretKey     string
@@ -68,6 +70,8 @@ func Load() (*Config, error) {
 		KubeChartPath:       getenv("KUBE_CHART_PATH", "deploy/charts/common-chart"),
 		GatewayName:         getenv("GATEWAY_NAME", "vortex"),
 		GatewayNamespace:    getenv("GATEWAY_NAMESPACE", "vortex"),
+		HelmTimeoutSec:      getenvInt("HELM_TIMEOUT_SEC", 300),
+		ReconcileSec:        getenvInt("RECONCILE_SEC", 30),
 		StripeSecretKey:     getenv("STRIPE_SECRET_KEY", ""),
 		StripeWebhookSecret: getenv("STRIPE_WEBHOOK_SECRET", ""),
 		BillingEnabled:      getenvBool("BILLING_ENABLED", false),

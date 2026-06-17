@@ -178,9 +178,59 @@ func (s *Service) serviceAction(ctx context.Context, orgID, serviceID, status st
 	return svc, nil
 }
 
-// DeployService (re)starts a service on the backend.
+// serviceWorkload renders the full kube.Workload for a stored service from its
+// template (image/port/kind) and resolved resources, so a redeploy re-applies
+// the same chart values via helm upgrade.
+func (s *Service) serviceWorkload(ctx context.Context, svc *domain.Service, orgSlug, projSlug string) (kube.Workload, error) {
+	tmpl, ok := s.templateByKey(ctx, svc.Template)
+	if !ok {
+		return kube.Workload{}, ErrInvalidTemplate
+	}
+	kind := "service"
+	if catalog.Kind(tmpl.Kind) == catalog.KindDatabase {
+		kind = "database"
+	}
+	cpuF, memF := s.overcommitFactors(ctx)
+	return kube.Workload{
+		OrgSlug:                orgSlug,
+		ProjectSlug:            projSlug,
+		Name:                   svc.Name,
+		Kind:                   kind,
+		Image:                  tmpl.Image,
+		Port:                   tmpl.DefaultPort,
+		CPU:                    svc.CPU,
+		MemoryMB:               svc.MemoryMB,
+		ServiceTemplateKey:     tmpl.Key,
+		CPUOvercommitFactor:    cpuF,
+		MemoryOvercommitFactor: memF,
+	}, nil
+}
+
+// DeployService (re)deploys a service by re-rendering its workload from the
+// catalog template and running a helm upgrade via backend.Apply.
 func (s *Service) DeployService(ctx context.Context, orgID, serviceID string) (*domain.Service, error) {
-	return s.serviceAction(ctx, orgID, serviceID, "deploying", s.backend.Start)
+	svc, err := s.ownedService(ctx, orgID, serviceID)
+	if err != nil {
+		return nil, err
+	}
+	orgSlug := s.orgSlug(ctx, orgID)
+	projSlug := s.projectSlug(ctx, svc.ProjectID)
+
+	w, err := s.serviceWorkload(ctx, svc, orgSlug, projSlug)
+	if err != nil {
+		return nil, err
+	}
+	release, host, err := s.backend.Apply(ctx, w)
+	if err != nil {
+		return nil, err
+	}
+	svc.Release = release
+	svc.Host = host
+	svc.Status = "deploying"
+	if err := s.store.UpdateService(ctx, svc); err != nil {
+		return nil, err
+	}
+	return svc, nil
 }
 
 // StopService scales a service to zero on the backend.

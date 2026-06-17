@@ -364,6 +364,16 @@ func (s *MemoryStore) ListDatabasesByOrg(_ context.Context, orgID string) ([]dom
 	return out, nil
 }
 
+func (s *MemoryStore) UpdateDatabase(_ context.Context, d *domain.Database) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.databases[d.ID]; !ok {
+		return ErrNotFound
+	}
+	s.databases[d.ID] = *d
+	return nil
+}
+
 func (s *MemoryStore) DeleteDatabase(_ context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -373,6 +383,9 @@ func (s *MemoryStore) DeleteDatabase(_ context.Context, id string) error {
 	delete(s.databases, id)
 	return nil
 }
+
+// Close is a no-op for the in-memory store.
+func (s *MemoryStore) Close() {}
 
 func (s *MemoryStore) CreateProject(_ context.Context, p *domain.Project) error {
 	s.mu.Lock()

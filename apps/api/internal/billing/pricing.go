@@ -130,10 +130,23 @@ func (s *Service) MeterUsage(ctx context.Context) (int, error) {
 	}
 	at := s.now()
 	metered := 0
+	var firstErr error
 	for _, org := range orgs {
+		// Short-circuit on shutdown so we stop querying the pool once the process
+		// is draining (the store may be about to close).
+		if err := ctx.Err(); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			break
+		}
 		hourly, err := s.orgHourlyCost(ctx, org.ID)
 		if err != nil {
-			return metered, err
+			// Continue-on-error: one org's failure must not stop metering the rest.
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
 		microCents := int64(math.Round(hourly * 100.0 * 1000.0)) // currency -> micro-cents
 		if microCents <= 0 {
@@ -147,9 +160,12 @@ func (s *Service) MeterUsage(ctx context.Context) (int, error) {
 			At:       at,
 		}
 		if err := s.store.AddUsage(ctx, rec); err != nil {
-			return metered, err
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
 		metered++
 	}
-	return metered, nil
+	return metered, firstErr
 }

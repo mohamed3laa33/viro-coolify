@@ -147,7 +147,7 @@ func (s *Service) AppMetrics(ctx context.Context, orgID, appID string) (*Metrics
 		x := float64((seed>>uint(i%16))&0xff) / 255.0
 		y := float64((seed>>uint((i+5)%16))&0xff) / 255.0
 		z := float64((seed>>uint((i+11)%16))&0xff) / 255.0
-		cpuPct := active * (10 + x*float64(maxInt(1, int(app.CPU*100)))/100*60)
+		cpuPct := active * (10 + x*float64(max(1, int(app.CPU*100)))/100*60)
 		memPct := active * (20 + y*50)
 		reqs := active * (z * 500)
 		m.CPU[i] = MetricPoint{T: t, V: round2(cpuPct)}
@@ -155,13 +155,6 @@ func (s *Service) AppMetrics(ctx context.Context, orgID, appID string) (*Metrics
 		m.Requests[i] = MetricPoint{T: t, V: round2(reqs)}
 	}
 	return m, nil
-}
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 func round2(f float64) float64 {

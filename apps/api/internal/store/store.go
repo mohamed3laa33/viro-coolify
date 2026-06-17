@@ -44,6 +44,7 @@ type Store interface {
 	CreateDatabase(ctx context.Context, d *domain.Database) error
 	GetDatabase(ctx context.Context, id string) (*domain.Database, error)
 	ListDatabasesByOrg(ctx context.Context, orgID string) ([]domain.Database, error)
+	UpdateDatabase(ctx context.Context, d *domain.Database) error
 	DeleteDatabase(ctx context.Context, id string) error
 
 	// Services (one-click catalog instances, tenant-scoped).
@@ -121,4 +122,8 @@ type Store interface {
 	// SumUsageByMetric aggregates total usage per metric in the store (SQL-side
 	// for Postgres) so the admin overview never scans-and-sums in Go.
 	SumUsageByMetric(ctx context.Context) (map[string]int64, error)
+
+	// Close releases any resources held by the store (e.g. a pgx connection
+	// pool). The in-memory store is a no-op. Safe to call once on shutdown.
+	Close()
 }

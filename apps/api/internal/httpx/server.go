@@ -5,6 +5,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -115,6 +116,7 @@ func newKubeBackend(cfg *config.Config, logger *slog.Logger) kube.Backend {
 		GatewayNamespace:       cfg.GatewayNamespace,
 		CPUOvercommitFactor:    settings.CPUOvercommitFactor,
 		MemoryOvercommitFactor: settings.MemoryOvercommitFactor,
+		HelmTimeout:            time.Duration(cfg.HelmTimeoutSec) * time.Second,
 	}
 	be, err := kube.New(kc, cfg.Kubeconfig, nil)
 	if err != nil {
@@ -133,11 +135,20 @@ func (s *Server) Router() http.Handler { return s.router }
 // StartMetering launches a background ticker that records one interval of compute
 // cost for every org at the live admin price list (hourly pricing). It returns
 // immediately and stops when ctx is cancelled. interval<=0 defaults to one hour.
-func (s *Server) StartMetering(ctx context.Context, interval time.Duration) {
+// When wg is non-nil it is incremented before the loop starts and Done()'d when it
+// exits, so the caller can Wait() for the loop to drain (e.g. before closing the
+// store) and avoid querying a pool that is about to close.
+func (s *Server) StartMetering(ctx context.Context, interval time.Duration, wg *sync.WaitGroup) {
 	if interval <= 0 {
 		interval = time.Hour
 	}
+	if wg != nil {
+		wg.Add(1)
+	}
 	go func() {
+		if wg != nil {
+			defer wg.Done()
+		}
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
@@ -145,15 +156,223 @@ func (s *Server) StartMetering(ctx context.Context, interval time.Duration) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				n, err := s.billing.MeterUsage(ctx)
-				if err != nil {
-					s.logger.Error("metering tick", "err", err)
-					continue
-				}
-				s.logger.Info("metered usage", "orgs", n)
+				s.meterOnce(ctx)
 			}
 		}
 	}()
+}
+
+// meterOnce runs a single metering pass, recovering from panics so a single bad
+// tick can never crash the process or kill the metering goroutine.
+func (s *Server) meterOnce(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Error("metering panic recovered", "panic", r)
+		}
+	}()
+	n, err := s.billing.MeterUsage(ctx)
+	if err != nil {
+		// MeterUsage is continue-on-error; err is the first per-org failure.
+		s.logger.Error("metering tick", "err", err)
+	}
+	s.logger.Info("metered usage", "orgs", n)
+}
+
+// StartReconciler launches a background ticker that reconciles the stored status
+// of every workload (app, service, database) that has a Release against the live
+// backend status, writing back a real phase (running/pending/failed/stopped/
+// scaled-to-zero). It returns immediately and stops when ctx is cancelled.
+// interval<=0 defaults to 30s. When wg is non-nil it is incremented before the
+// loop starts and Done()'d when it exits, so the caller can Wait() for the loop to
+// drain (e.g. before closing the store) and avoid querying a pool that is about to
+// close.
+func (s *Server) StartReconciler(ctx context.Context, interval time.Duration, wg *sync.WaitGroup) {
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	if wg != nil {
+		wg.Add(1)
+	}
+	go func() {
+		if wg != nil {
+			defer wg.Done()
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.reconcileOnce(ctx)
+			}
+		}
+	}()
+}
+
+// reconcileOnce performs one reconciliation pass over all orgs' workloads. The
+// pass itself is panic-guarded; each individual workload is additionally isolated
+// (see reconcileWorkload) so one bad workload never aborts the rest of the tick.
+func (s *Server) reconcileOnce(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Error("reconciler panic recovered", "panic", r)
+		}
+	}()
+
+	orgs, err := s.store.ListAllOrgs(ctx)
+	if err != nil {
+		s.logger.Error("reconcile: list orgs", "err", err)
+		return
+	}
+	for _, org := range orgs {
+		// Short-circuit on shutdown so we don't keep querying the pool after the
+		// HTTP server has drained and the store is about to close.
+		if ctx.Err() != nil {
+			return
+		}
+		s.reconcileOrg(ctx, org.ID)
+	}
+}
+
+// reconcileOrg reconciles every app/service/database in one org.
+func (s *Server) reconcileOrg(ctx context.Context, orgID string) {
+	apps, err := s.store.ListAppsByOrg(ctx, orgID)
+	if err != nil {
+		s.logger.Error("reconcile: list apps", "org", orgID, "err", err)
+	}
+	for i := range apps {
+		a := apps[i]
+		s.reconcileWorkload(ctx, a.ID, a.Status, a.Namespace, a.Release, func(status string) error {
+			a.Status = status
+			return s.store.UpdateApp(ctx, &a)
+		})
+	}
+
+	svcs, err := s.store.ListServicesByOrg(ctx, orgID)
+	if err != nil {
+		s.logger.Error("reconcile: list services", "org", orgID, "err", err)
+	}
+	for i := range svcs {
+		sv := svcs[i]
+		s.reconcileWorkload(ctx, sv.ID, sv.Status, sv.Namespace, sv.Release, func(status string) error {
+			sv.Status = status
+			return s.store.UpdateService(ctx, &sv)
+		})
+	}
+
+	dbs, err := s.store.ListDatabasesByOrg(ctx, orgID)
+	if err != nil {
+		s.logger.Error("reconcile: list databases", "org", orgID, "err", err)
+	}
+	for i := range dbs {
+		d := dbs[i]
+		s.reconcileWorkload(ctx, d.ID, d.Status, d.Namespace, d.Release, func(status string) error {
+			d.Status = status
+			return s.store.UpdateDatabase(ctx, &d)
+		})
+	}
+}
+
+// reconcileWorkload reconciles a single workload's stored status against the live
+// backend, persisting via save when it changes. It is wrapped in its own deferred
+// recover() so a panic in one workload (backend call, store write, etc.) is
+// isolated and the surrounding pass continues with the next workload.
+func (s *Server) reconcileWorkload(ctx context.Context, id, current, namespace, release string, save func(status string) error) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Error("reconcile: workload panic recovered", "workload", id, "panic", r)
+		}
+	}()
+	if release == "" {
+		return
+	}
+	phase, ok := s.backendPhase(ctx, current, namespace, release)
+	if !ok || phase == current {
+		return
+	}
+	if err := save(phase); err != nil {
+		s.logger.Error("reconcile: update workload", "workload", id, "err", err)
+	}
+}
+
+// stickyStatuses are user-initiated states the reconciler must NEVER overwrite.
+// "stopped" in particular gates billing (billable() charges anything that is not
+// "stopped"), so clobbering it back to a machine state would resume charges for a
+// workload the user explicitly stopped.
+var stickyStatuses = map[string]bool{
+	"stopped": true,
+}
+
+// transientIntents are user-initiated states that should be LEFT ALONE until the
+// backend resolves them to a terminal machine state (running/failed). They must
+// not be flipped to non-terminal machine phases (e.g. "pending",
+// "scaled-to-zero") while the intent is still in flight.
+var transientIntents = map[string]bool{
+	"deploying":  true,
+	"restarting": true,
+}
+
+// terminalMachinePhases are the machine-observable phases that are allowed to
+// resolve a transient intent.
+var terminalMachinePhases = map[string]bool{
+	"running": true,
+	"failed":  true,
+}
+
+// reconcilePhase computes the status to store for a workload, given its current
+// stored status and the live backend status. ok=false means leave the row
+// untouched. It respects user intent: sticky statuses are never overwritten, and
+// transient intents are only refined once the backend reaches a terminal machine
+// state.
+func reconcilePhase(current string, st kube.Status) (string, bool) {
+	if stickyStatuses[current] {
+		return "", false
+	}
+	phase, ok := mapPhase(st)
+	if !ok {
+		return "", false
+	}
+	if transientIntents[current] && !terminalMachinePhases[phase] {
+		// Intent still in flight; don't downgrade to a non-terminal machine phase.
+		return "", false
+	}
+	return phase, true
+}
+
+// backendPhase reads the live backend status for a release and reconciles it
+// against the stored status, honoring user intent (sticky/transient statuses).
+// ok=false means the status could not be read or must be left untouched (the row
+// is never flipped to a wrong value).
+func (s *Server) backendPhase(ctx context.Context, current, namespace, release string) (string, bool) {
+	if stickyStatuses[current] {
+		// Skip the backend read entirely for sticky statuses.
+		return "", false
+	}
+	st, err := s.backend.Status(ctx, namespace, release)
+	if err != nil {
+		s.logger.Warn("reconcile: backend status", "ns", namespace, "release", release, "err", err)
+		return "", false
+	}
+	return reconcilePhase(current, st)
+}
+
+// mapPhase maps a kube.Status to the stored workload status vocabulary. ok=false
+// for unrecognized phases so the caller leaves the stored status untouched rather
+// than flipping it to "failed"; only an explicit failed phase reports "failed".
+func mapPhase(st kube.Status) (string, bool) {
+	switch st.Phase {
+	case "Running":
+		return "running", true
+	case "Scaled to zero":
+		return "scaled-to-zero", true
+	case "Pending":
+		return "pending", true
+	case "Failed":
+		return "failed", true
+	default:
+		return "", false
+	}
 }
 
 func (s *Server) routes() chi.Router {

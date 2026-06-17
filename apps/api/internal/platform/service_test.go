@@ -29,11 +29,12 @@ func TestAppLifecycle(t *testing.T) {
 	svc := newSvc()
 	ctx := context.Background()
 
-	app, err := svc.CreateApp(ctx, "org-1", CreateAppInput{Name: "web"})
+	// Image-based app: deploys directly on create, and Deploy re-applies it.
+	app, err := svc.CreateApp(ctx, "org-1", CreateAppInput{Name: "web", Image: "nginx:1.27"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if app.OrgID != "org-1" || app.Status != "queued" {
+	if app.OrgID != "org-1" || app.Status != "deploying" {
 		t.Fatalf("unexpected app: %+v", app)
 	}
 

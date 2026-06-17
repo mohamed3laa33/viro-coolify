@@ -171,3 +171,28 @@ func TestMemoryStoreSumUsageByMetric(t *testing.T) {
 		t.Fatalf("unexpected totals: %+v", totals)
 	}
 }
+
+func TestMemoryStoreUpdateDatabase(t *testing.T) {
+	s := NewMemoryStore()
+	ctx := context.Background()
+
+	d := &domain.Database{ID: "db1", OrgID: "o1", Name: "pg", Engine: "postgresql", Status: "deploying"}
+	if err := s.CreateDatabase(ctx, d); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	d.Status = "running"
+	if err := s.UpdateDatabase(ctx, d); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	got, err := s.GetDatabase(ctx, "db1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Status != "running" {
+		t.Fatalf("status = %q, want running", got.Status)
+	}
+	// Updating a missing database is a not-found error.
+	if err := s.UpdateDatabase(ctx, &domain.Database{ID: "missing"}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("update missing: expected ErrNotFound, got %v", err)
+	}
+}

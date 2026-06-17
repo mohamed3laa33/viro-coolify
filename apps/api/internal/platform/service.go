@@ -33,6 +33,11 @@ var ErrQuotaExceeded = errors.New("platform: plan quota exceeded")
 // ErrInvalidTemplate is returned when a catalog template key is unknown.
 var ErrInvalidTemplate = errors.New("platform: unknown catalog template")
 
+// ErrNoImage is returned when a deploy is requested for an app that has no image
+// yet (e.g. a git-based app whose build has not produced an image). The HTTP
+// layer maps it to 409/422 rather than faking a successful deploy.
+var ErrNoImage = errors.New("platform: no image to deploy yet — build pending")
+
 // planLimits returns the resource limits for the org's plan, reading the plan
 // (and its Max* quotas) from the store via the billing service. An org with no
 // subscription falls back to the store's default plan.
@@ -76,7 +81,8 @@ func (s *Service) checkQuota(ctx context.Context, orgID string, cpu float64, mem
 	return nil
 }
 
-// workloadCount returns the org's current app + service count (counts against MaxApps).
+// workloadCount returns the org's current app + service + database count (all
+// count against MaxApps).
 func (s *Service) workloadCount(ctx context.Context, orgID string) (int, error) {
 	apps, err := s.store.ListAppsByOrg(ctx, orgID)
 	if err != nil {
@@ -86,7 +92,11 @@ func (s *Service) workloadCount(ctx context.Context, orgID string) (int, error) 
 	if err != nil {
 		return 0, err
 	}
-	return len(apps) + len(svcs), nil
+	dbs, err := s.store.ListDatabasesByOrg(ctx, orgID)
+	if err != nil {
+		return 0, err
+	}
+	return len(apps) + len(svcs) + len(dbs), nil
 }
 
 // Service provides org-scoped app and service operations on top of the
@@ -172,6 +182,51 @@ func (s *Service) overcommitFactors(ctx context.Context) (cpuFactor, memFactor f
 	return 0, 0
 }
 
+// appEnv returns the app's stored environment variables (key->value), or an
+// empty map when none are set / the lookup fails.
+func (s *Service) appEnv(ctx context.Context, appID string) map[string]string {
+	env, err := s.store.GetAppEnv(ctx, appID)
+	if err != nil || env == nil {
+		return map[string]string{}
+	}
+	return env
+}
+
+// appDomains returns the custom hostnames attached to the app (in addition to
+// the generated host), or nil when none are set / the lookup fails.
+func (s *Service) appDomains(ctx context.Context, appID string) []string {
+	doms, err := s.store.ListDomainsByApp(ctx, appID)
+	if err != nil || len(doms) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(doms))
+	for _, d := range doms {
+		if d.Domain != "" {
+			out = append(out, d.Domain)
+		}
+	}
+	return out
+}
+
+// appWorkload renders the full kube.Workload for an app, populating its stored
+// env + custom domains so they reach the pods on every Apply.
+func (s *Service) appWorkload(ctx context.Context, app *domain.App, orgSlug, projSlug string) kube.Workload {
+	cpuF, memF := s.overcommitFactors(ctx)
+	return kube.Workload{
+		OrgSlug:                orgSlug,
+		ProjectSlug:            projSlug,
+		Name:                   app.Name,
+		Kind:                   "app",
+		Image:                  app.Image,
+		CPU:                    app.CPU,
+		MemoryMB:               app.MemoryMB,
+		Env:                    s.appEnv(ctx, app.ID),
+		Domains:                s.appDomains(ctx, app.ID),
+		CPUOvercommitFactor:    cpuF,
+		MemoryOvercommitFactor: memF,
+	}
+}
+
 // CreateApp creates an app for the org. Requested CPU/memory are validated
 // against the org's plan quota, and the per-org-project namespace + quota are
 // ensured on the backend.
@@ -221,19 +276,9 @@ func (s *Service) CreateApp(ctx context.Context, orgID string, in CreateAppInput
 	}
 
 	if app.Image != "" {
-		// Image-based app: deploy directly, no build needed.
-		cpuF, memF := s.overcommitFactors(ctx)
-		release, host, err := s.backend.Apply(ctx, kube.Workload{
-			OrgSlug:                orgSlug,
-			ProjectSlug:            projSlug,
-			Name:                   app.Name,
-			Kind:                   "app",
-			Image:                  app.Image,
-			CPU:                    cpu,
-			MemoryMB:               memMB,
-			CPUOvercommitFactor:    cpuF,
-			MemoryOvercommitFactor: memF,
-		})
+		// Image-based app: deploy directly, no build needed. The workload carries
+		// the app's stored env + custom domains so they reach the pods.
+		release, host, err := s.backend.Apply(ctx, s.appWorkload(ctx, app, orgSlug, projSlug))
 		if err != nil {
 			return nil, err
 		}
@@ -287,9 +332,33 @@ func (s *Service) GetApp(ctx context.Context, orgID, appID string) (*domain.App,
 	return s.ownedApp(ctx, orgID, appID)
 }
 
-// Deploy (re)starts a deployed app on the backend and updates status.
+// Deploy (re)deploys an app: it re-renders the full kube.Workload (image, env,
+// custom domains, requested size) and runs a helm upgrade via backend.Apply, so
+// env/domain/image changes actually reach the pods. An app with no image yet
+// (a git app whose build hasn't produced an image) returns ErrNoImage rather
+// than faking success.
 func (s *Service) Deploy(ctx context.Context, orgID, appID string) (*domain.App, error) {
-	return s.action(ctx, orgID, appID, "deploying", s.backend.Start)
+	app, err := s.ownedApp(ctx, orgID, appID)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(app.Image) == "" {
+		return nil, ErrNoImage
+	}
+	orgSlug := s.orgSlug(ctx, orgID)
+	projSlug := s.projectSlug(ctx, app.ProjectID)
+
+	release, host, err := s.backend.Apply(ctx, s.appWorkload(ctx, app, orgSlug, projSlug))
+	if err != nil {
+		return nil, err
+	}
+	app.Release = release
+	app.Host = host
+	app.Status = "deploying"
+	if err := s.store.UpdateApp(ctx, app); err != nil {
+		return nil, err
+	}
+	return app, nil
 }
 
 // Stop scales the app to zero on the backend.
