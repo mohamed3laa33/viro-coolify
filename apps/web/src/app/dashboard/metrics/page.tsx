@@ -36,7 +36,7 @@ export default function MetricsPage() {
       <div className="space-y-6">
         <PageHeader
           title="Metrics"
-          description="Real-time resource usage across all your machines."
+          description="Resource usage across your machines. Org-wide aggregation isn't available yet."
         />
         <Card className="flex flex-col items-center justify-center py-16 text-center">
           <p className="text-sm text-muted-foreground">
@@ -52,12 +52,16 @@ export default function MetricsPage() {
     <div className="space-y-6">
       <PageHeader
         title="Metrics"
-        description="Real-time resource usage across all your machines."
+        description="Sample resource usage (a static snapshot, not live data)."
         actions={<Badge variant="outline">Demo</Badge>}
       />
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <StatCard label="Avg CPU" value={`${cpu[cpu.length - 1]}%`} icon={Cpu} />
+        <StatCard
+          label="Avg CPU"
+          value={`${cpu[cpu.length - 1]}%`}
+          icon={Cpu}
+        />
         <StatCard
           label="Avg Memory"
           value={`${mem[mem.length - 1]}%`}
@@ -76,8 +80,16 @@ export default function MetricsPage() {
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <ChartCard title="CPU utilization" data={cpu} color="hsl(var(--primary))" />
-        <ChartCard title="Memory utilization" data={mem} color={BRAND_MAGENTA} />
+        <ChartCard
+          title="CPU utilization"
+          data={cpu}
+          color="hsl(var(--primary))"
+        />
+        <ChartCard
+          title="Memory utilization"
+          data={mem}
+          color={BRAND_MAGENTA}
+        />
         <ChartCard title="Network egress" data={net} color="hsl(var(--info))" />
         <ChartCard
           title="Requests per second"

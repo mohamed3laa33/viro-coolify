@@ -20,6 +20,8 @@ type Config struct {
 
 	// Persistence.
 	DatabaseURL string
+	DBMaxConns  int // upper bound on pooled connections
+	DBMinConns  int // warm connections kept open
 
 	// Auth / JWT.
 	JWTSecret     string
@@ -54,6 +56,8 @@ func Load() (*Config, error) {
 		Env:                 getenv("ENV", "development"),
 		HTTPAddr:            getenv("HTTP_ADDR", ":8080"),
 		DatabaseURL:         getenv("DATABASE_URL", ""),
+		DBMaxConns:          getenvInt("DB_MAX_CONNS", 10),
+		DBMinConns:          getenvInt("DB_MIN_CONNS", 2),
 		JWTSecret:           getenv("JWT_SECRET", defaultDevJWTSecret),
 		JWTAccessTTL:        getenvInt("JWT_ACCESS_TTL_MIN", 15),
 		JWTRefreshTTL:       getenvInt("JWT_REFRESH_TTL_HOURS", 24*30),

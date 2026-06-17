@@ -28,6 +28,18 @@ export function initials(name: string): string {
  */
 export const BRAND_MAGENTA = "hsl(var(--brand-magenta))";
 
+/**
+ * Brand violet as a CSS color for inline SVG strokes/fills, backed by the
+ * `--brand-violet` design token (see globals.css / tailwind theme).
+ */
+export const BRAND_VIOLET = "hsl(var(--brand-violet))";
+
+/**
+ * Deep brand violet (logo basket / seam accent), backed by the
+ * `--brand-violet-deep` design token.
+ */
+export const BRAND_VIOLET_DEEP = "hsl(var(--brand-violet-deep))";
+
 /** Base domain for platform-issued app hostnames. */
 export const VORTEX_BASE_DOMAIN = "vortex.v60ai.com";
 
@@ -58,4 +70,31 @@ export function buildAppFqdn(
   return `${slugify(appName)}.${slugify(projectSlug)}.${slugify(
     orgSlug,
   )}.${VORTEX_BASE_DOMAIN}`;
+}
+
+/**
+ * Default landing path used when an internal redirect target is missing or
+ * unsafe.
+ */
+export const DEFAULT_NEXT_PATH = "/dashboard";
+
+/**
+ * Sanitize a `next` redirect parameter so it can only point at an in-app path.
+ *
+ * Returns `param` only when it is a same-origin absolute path: it must start
+ * with a single "/" (not "//", which is protocol-relative and would navigate
+ * off-site) and must not contain ":" (which would allow `javascript:` or
+ * absolute URLs like `http://evil.com`). Anything else falls back to
+ * {@link DEFAULT_NEXT_PATH}.
+ */
+export function safeNextPath(param: string | null): string {
+  if (
+    param &&
+    param.startsWith("/") &&
+    !param.startsWith("//") &&
+    !param.includes(":")
+  ) {
+    return param;
+  }
+  return DEFAULT_NEXT_PATH;
 }

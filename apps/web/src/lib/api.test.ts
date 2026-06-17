@@ -4,7 +4,9 @@ import {
   buildUrl,
   API_BASE_URL,
   computeHoursUsed,
-  statusVariant,
+  formatCents,
+  formatHourlyPrice,
+  type PricingComponent,
 } from "@/lib/api";
 
 interface CapturedCall {
@@ -14,15 +16,13 @@ interface CapturedCall {
 
 function stubFetch(responseBody: unknown, status = 200) {
   const calls: CapturedCall[] = [];
-  const fn = vi.fn(
-    async (input: RequestInfo | URL, init?: RequestInit) => {
-      calls.push({ url: String(input), init: init ?? {} });
-      return new Response(JSON.stringify(responseBody), {
-        status,
-        headers: { "Content-Type": "application/json" },
-      });
-    },
-  );
+  const fn = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({ url: String(input), init: init ?? {} });
+    return new Response(JSON.stringify(responseBody), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+  });
   vi.stubGlobal("fetch", fn);
   return calls;
 }
@@ -235,17 +235,13 @@ describe("api client", () => {
   it("lists env vars for an app", async () => {
     const calls = stubFetch({ data: [] });
     await api.listEnv("org_1", "app_1", "tok");
-    expect(calls[0].url).toBe(
-      `${API_BASE_URL}/v1/orgs/org_1/apps/app_1/env`,
-    );
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/orgs/org_1/apps/app_1/env`);
   });
 
   it("sets an env var via PUT", async () => {
     const calls = stubFetch({ key: "K", value: "V" });
     await api.setEnv("org_1", "app_1", { key: "K", value: "V" }, "tok");
-    expect(calls[0].url).toBe(
-      `${API_BASE_URL}/v1/orgs/org_1/apps/app_1/env`,
-    );
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/orgs/org_1/apps/app_1/env`);
     expect(calls[0].init.method).toBe("PUT");
     expect(JSON.parse(calls[0].init.body as string)).toEqual({
       key: "K",
@@ -271,7 +267,11 @@ describe("api client", () => {
   });
 
   it("adds a domain with a domain body", async () => {
-    const calls = stubFetch({ id: "dom_1", domain: "acme.com", verified: false });
+    const calls = stubFetch({
+      id: "dom_1",
+      domain: "acme.com",
+      verified: false,
+    });
     await api.addDomain("org_1", "app_1", "acme.com", "tok");
     expect(calls[0].url).toBe(
       `${API_BASE_URL}/v1/orgs/org_1/apps/app_1/domains`,
@@ -408,9 +408,7 @@ describe("admin api client", () => {
   it("deletes a template via DELETE at the key URL", async () => {
     const calls = stubFetch({});
     await api.deleteTemplate("postgresql", "tok");
-    expect(calls[0].url).toBe(
-      `${API_BASE_URL}/v1/admin/templates/postgresql`,
-    );
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/admin/templates/postgresql`);
     expect(calls[0].init.method).toBe("DELETE");
   });
 
@@ -449,6 +447,108 @@ describe("admin api client", () => {
     const headers = calls[0].init.headers as Record<string, string>;
     expect(headers.Authorization).toBe("Bearer tok");
   });
+
+  // Pricing (hourly components)
+  it("reads public pricing without a bearer header", async () => {
+    const calls = stubFetch({ data: [] });
+    await api.getPricing();
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/billing/pricing`);
+    const headers = calls[0].init.headers as Record<string, string>;
+    expect(headers.Authorization).toBeUndefined();
+  });
+
+  it("lists admin pricing with the bearer token", async () => {
+    const calls = stubFetch({ data: [] });
+    await api.listPricing("admtok");
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/admin/pricing`);
+    expect(calls[0].init.method).toBe("GET");
+    const headers = calls[0].init.headers as Record<string, string>;
+    expect(headers.Authorization).toBe("Bearer admtok");
+  });
+
+  it("creates a pricing component via POST with the full body", async () => {
+    const calls = stubFetch({ key: "cpu" }, 201);
+    await api.createPricing(
+      {
+        key: "cpu",
+        name: "CPU",
+        unit: "core-hour",
+        pricePerHour: 2,
+        currency: "usd",
+        active: true,
+        sortOrder: 0,
+      },
+      "tok",
+    );
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/admin/pricing`);
+    expect(calls[0].init.method).toBe("POST");
+    const body = JSON.parse(calls[0].init.body as string);
+    expect(body.key).toBe("cpu");
+    expect(body.pricePerHour).toBe(2);
+  });
+
+  it("updates a pricing component via PATCH at the url-encoded key", async () => {
+    const calls = stubFetch({ key: "core hour" });
+    await api.updatePricing("core hour", { pricePerHour: 3 }, "tok");
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/admin/pricing/core%20hour`);
+    expect(calls[0].init.method).toBe("PATCH");
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({
+      pricePerHour: 3,
+    });
+  });
+
+  it("deletes a pricing component via DELETE at the key URL", async () => {
+    const calls = stubFetch({});
+    await api.deletePricing("egress", "tok");
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/admin/pricing/egress`);
+    expect(calls[0].init.method).toBe("DELETE");
+  });
+});
+
+describe("formatCents", () => {
+  it("formats whole-dollar amounts without cents", () => {
+    expect(formatCents(2900, "usd")).toBe("$29");
+  });
+
+  it("formats sub-dollar cent amounts with two fraction digits", () => {
+    expect(formatCents(250, "usd")).toBe("$2.50");
+  });
+
+  it("keeps sub-cent precision for fractional per-hour rates", () => {
+    // 2 cents -> $0.02; a fractional 0.5 cents -> $0.005.
+    expect(formatCents(2, "usd")).toBe("$0.02");
+    expect(formatCents(0.5, "usd")).toBe("$0.005");
+  });
+
+  it("defaults the currency to USD", () => {
+    expect(formatCents(100)).toBe("$1");
+  });
+});
+
+describe("formatHourlyPrice", () => {
+  const base: PricingComponent = {
+    key: "cpu",
+    name: "CPU",
+    unit: "core-hour",
+    pricePerHour: 2,
+    currency: "usd",
+    active: true,
+    sortOrder: 0,
+  };
+
+  it("renders the rate and unit", () => {
+    expect(formatHourlyPrice(base)).toBe("$0.02 / core-hour");
+  });
+
+  it("falls back to 'hour' when the unit is blank", () => {
+    expect(formatHourlyPrice({ ...base, unit: "" })).toBe("$0.02 / hour");
+  });
+
+  it("formats sub-cent rates", () => {
+    expect(formatHourlyPrice({ ...base, pricePerHour: 0.5 })).toBe(
+      "$0.005 / core-hour",
+    );
+  });
 });
 
 describe("computeHoursUsed", () => {
@@ -465,31 +565,6 @@ describe("computeHoursUsed", () => {
     expect(computeHoursUsed(null)).toBe(0);
     expect(computeHoursUsed(undefined)).toBe(0);
     expect(computeHoursUsed({ builds: 9 })).toBe(0);
-  });
-});
-
-describe("statusVariant", () => {
-  it("maps running to success", () => {
-    expect(statusVariant("running")).toBe("success");
-  });
-
-  it("maps in-flight states to warning", () => {
-    expect(statusVariant("deploying")).toBe("warning");
-    expect(statusVariant("restarting")).toBe("warning");
-  });
-
-  it("maps stopped to muted and error to destructive", () => {
-    expect(statusVariant("stopped")).toBe("muted");
-    expect(statusVariant("error")).toBe("destructive");
-  });
-
-  it("maps created to info", () => {
-    expect(statusVariant("created")).toBe("info");
-  });
-
-  it("falls back to muted for unknown statuses", () => {
-    expect(statusVariant("paused")).toBe("muted");
-    expect(statusVariant("")).toBe("muted");
   });
 });
 

@@ -32,7 +32,9 @@ export function Sparkline({
     return [x, y] as const;
   });
 
-  const line = points.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
+  const line = points
+    .map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`)
+    .join(" ");
   const area = `0,${height} ${line} ${width},${height}`;
 
   return (

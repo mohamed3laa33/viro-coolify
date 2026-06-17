@@ -42,9 +42,14 @@ func requestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+			reqID := middleware.GetReqID(r.Context())
+			if reqID != "" {
+				ww.Header().Set("X-Request-Id", reqID)
+			}
 			start := time.Now()
 			defer func() {
 				logger.Info("http_request",
+					"request_id", reqID,
 					"method", r.Method,
 					"path", r.URL.Path,
 					"status", ww.Status(),

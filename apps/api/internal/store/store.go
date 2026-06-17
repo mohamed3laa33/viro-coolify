@@ -79,6 +79,12 @@ type Store interface {
 	ListInvitationsByOrg(ctx context.Context, orgID string) ([]domain.Invitation, error)
 	UpdateInvitation(ctx context.Context, inv *domain.Invitation) error
 
+	// Refresh tokens (rotation + revocation; keyed by jti).
+	CreateRefreshToken(ctx context.Context, rt *domain.RefreshToken) error
+	GetRefreshToken(ctx context.Context, id string) (*domain.RefreshToken, error)
+	RevokeRefreshToken(ctx context.Context, id string) error
+	RevokeAllUserRefreshTokens(ctx context.Context, userID string) error
+
 	// Billing.
 	UpsertSubscription(ctx context.Context, s *domain.Subscription) error
 	GetSubscription(ctx context.Context, orgID string) (*domain.Subscription, error)
@@ -112,4 +118,7 @@ type Store interface {
 	CountUsers(ctx context.Context) (int, error)
 	ListAllSubscriptions(ctx context.Context) ([]domain.Subscription, error)
 	ListAllUsage(ctx context.Context) ([]domain.UsageRecord, error)
+	// SumUsageByMetric aggregates total usage per metric in the store (SQL-side
+	// for Postgres) so the admin overview never scans-and-sums in Go.
+	SumUsageByMetric(ctx context.Context) (map[string]int64, error)
 }

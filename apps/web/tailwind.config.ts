@@ -1,4 +1,5 @@
 import type { Config } from "tailwindcss";
+import tailwindcssAnimate from "tailwindcss-animate";
 
 const config: Config = {
   darkMode: "class",
@@ -49,6 +50,7 @@ const config: Config = {
           700: "#6d28d9",
           800: "#5b21b6",
           900: "#4c1d95",
+          // Brand gradient stops, both backed by CSS tokens in globals.css.
           violet: "hsl(var(--brand-violet))",
           magenta: "hsl(var(--brand-magenta))",
         },
@@ -63,6 +65,8 @@ const config: Config = {
         mono: ["var(--font-mono)", "monospace"],
       },
       backgroundImage: {
+        // Drives the violet→magenta balloon gradient; both stops track the
+        // --brand-violet / --brand-magenta CSS tokens instead of raw hex.
         "brand-balloon":
           "linear-gradient(135deg,hsl(var(--brand-violet)),hsl(var(--brand-magenta)))",
       },
@@ -87,7 +91,7 @@ const config: Config = {
       },
     },
   },
-  plugins: [require("tailwindcss-animate")],
+  plugins: [tailwindcssAnimate],
 };
 
 export default config;

@@ -33,6 +33,55 @@ func TestMemoryStoreUsers(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreRefreshTokens(t *testing.T) {
+	s := NewMemoryStore()
+	ctx := context.Background()
+
+	rt := &domain.RefreshToken{ID: "jti-1", UserID: "u1"}
+	if err := s.CreateRefreshToken(ctx, rt); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Duplicate jti conflicts.
+	if err := s.CreateRefreshToken(ctx, rt); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected ErrConflict, got %v", err)
+	}
+	got, err := s.GetRefreshToken(ctx, "jti-1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Revoked {
+		t.Fatal("new token should not be revoked")
+	}
+	// Unknown jti is not found.
+	if _, err := s.GetRefreshToken(ctx, "missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+	// Revoke then verify.
+	if err := s.RevokeRefreshToken(ctx, "jti-1"); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	got, _ = s.GetRefreshToken(ctx, "jti-1")
+	if !got.Revoked {
+		t.Fatal("token should be revoked")
+	}
+	// Revoking an unknown token is ErrNotFound.
+	if err := s.RevokeRefreshToken(ctx, "missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+	// RevokeAll revokes every live token for a user.
+	_ = s.CreateRefreshToken(ctx, &domain.RefreshToken{ID: "jti-2", UserID: "u1"})
+	_ = s.CreateRefreshToken(ctx, &domain.RefreshToken{ID: "jti-3", UserID: "u2"})
+	if err := s.RevokeAllUserRefreshTokens(ctx, "u1"); err != nil {
+		t.Fatalf("revoke all: %v", err)
+	}
+	if g, _ := s.GetRefreshToken(ctx, "jti-2"); !g.Revoked {
+		t.Fatal("jti-2 should be revoked")
+	}
+	if g, _ := s.GetRefreshToken(ctx, "jti-3"); g.Revoked {
+		t.Fatal("jti-3 (other user) should not be revoked")
+	}
+}
+
 func TestMemoryStoreSeededDefaults(t *testing.T) {
 	s := NewMemoryStore()
 	ctx := context.Background()
@@ -96,5 +145,29 @@ func TestMemoryStoreMemberships(t *testing.T) {
 	}
 	if len(members) != 1 {
 		t.Fatalf("expected 1 member, got %d", len(members))
+	}
+}
+
+func TestMemoryStoreSumUsageByMetric(t *testing.T) {
+	s := NewMemoryStore()
+	ctx := context.Background()
+
+	recs := []domain.UsageRecord{
+		{ID: "1", OrgID: "o1", Metric: "compute_hours", Quantity: 10},
+		{ID: "2", OrgID: "o1", Metric: "compute_hours", Quantity: 5},
+		{ID: "3", OrgID: "o2", Metric: "egress_gb", Quantity: 3},
+	}
+	for i := range recs {
+		if err := s.AddUsage(ctx, &recs[i]); err != nil {
+			t.Fatalf("add usage: %v", err)
+		}
+	}
+
+	totals, err := s.SumUsageByMetric(ctx)
+	if err != nil {
+		t.Fatalf("SumUsageByMetric: %v", err)
+	}
+	if totals["compute_hours"] != 15 || totals["egress_gb"] != 3 {
+		t.Fatalf("unexpected totals: %+v", totals)
 	}
 }

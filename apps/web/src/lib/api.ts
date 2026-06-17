@@ -1,15 +1,27 @@
 // Typed API client for the Vortex Go control-plane.
 //
 // Reads the base URL from NEXT_PUBLIC_VORTEX_API_URL (falling back to the legacy
-// NEXT_PUBLIC_VIRO_API_URL, then http://localhost:8080) and attaches
-// `Authorization: Bearer <token>` when a token is provided.
+// NEXT_PUBLIC_VIRO_API_URL) and attaches `Authorization: Bearer <token>` when a
+// token is provided. In development the URL falls back to http://localhost:8080;
+// in production an unset URL is a hard error (no silent localhost default).
 //
 // Resource endpoints are org-scoped: /v1/orgs/{orgId}/...
 
-export const API_BASE_URL =
-  process.env.NEXT_PUBLIC_VORTEX_API_URL ??
-  process.env.NEXT_PUBLIC_VIRO_API_URL ??
-  "http://localhost:8080";
+function resolveApiBaseUrl(): string {
+  const configured =
+    process.env.NEXT_PUBLIC_VORTEX_API_URL ??
+    process.env.NEXT_PUBLIC_VIRO_API_URL;
+  if (configured) return configured;
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(
+      "NEXT_PUBLIC_VORTEX_API_URL is not set. The API base URL must be " +
+        "configured explicitly in production; there is no localhost fallback.",
+    );
+  }
+  return "http://localhost:8080";
+}
+
+export const API_BASE_URL = resolveApiBaseUrl();
 
 // ---------------------------------------------------------------------------
 // Types
@@ -42,12 +54,37 @@ export type AppStatus = string;
 export interface App {
   id: string;
   orgId: string;
-  coolifyUuid: string;
+  projectId: string;
   name: string;
   gitRepository: string;
   gitBranch: string;
   buildPack: string;
+  // Requested resources (overcommit is applied server-side).
+  cpu: number;
+  memoryMb: number;
   status: AppStatus;
+  // Kubernetes placement returned by the deploy backend.
+  namespace?: string;
+  release?: string;
+  host?: string;
+  createdAt: string;
+}
+
+// Service is a one-click catalog instance (WordPress, a database, etc.) owned by
+// an organization and grouped under a project. Mirrors domain.Service.
+export interface Service {
+  id: string;
+  orgId: string;
+  projectId: string;
+  template: string;
+  name: string;
+  cpu: number;
+  memoryMb: number;
+  status: string;
+  // Kubernetes placement returned by the deploy backend.
+  namespace?: string;
+  release?: string;
+  host?: string;
   createdAt: string;
 }
 
@@ -148,11 +185,64 @@ export interface BillingResponse {
   subscription: Subscription | null;
   plan: Plan | null;
   usage: Usage;
+  // Estimated cost for the current period, derived server-side from metered
+  // usage and the hourly pricing components. Optional: older API builds omit it.
+  estimatedMonthlyCents?: number;
+  currency?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Hourly pricing components (admin-managed metered rates)
+// ---------------------------------------------------------------------------
+
+// A single metered pricing line item, e.g. "CPU core-hour" at $0.02/hour.
+// Mirrors the backend `PricingComponent`. The `key` is the stable identifier
+// (immutable on update; supplied in the body on create, in the path otherwise).
+export interface PricingComponent {
+  key: string;
+  name: string;
+  // Human-readable billing unit, e.g. "core-hour", "GB-hour".
+  unit: string;
+  // Price per unit per hour, expressed in whole cents (integer or fractional).
+  pricePerHour: number;
+  currency: string;
+  active: boolean;
+  sortOrder: number;
+}
+
+// On create the key is supplied in the body; on update it lives in the path.
+export type PricingComponentInput = PricingComponent;
+
+/** Format a pricing component's per-hour rate, e.g. "$0.02 / core-hour". */
+export function formatHourlyPrice(c: PricingComponent): string {
+  return `${formatCents(c.pricePerHour, c.currency)} / ${c.unit || "hour"}`;
+}
+
+/**
+ * Format a cent amount as a currency string. Sub-cent values (fractional cents,
+ * common for per-hour metered rates) keep up to 4 fraction digits; whole-dollar
+ * amounts drop the cents.
+ */
+export function formatCents(cents: number, currency = "usd"): string {
+  const amount = cents / 100;
+  const cur = (currency || "usd").toUpperCase();
+  const isWhole = Number.isInteger(amount);
+  const hasSubCent = Math.abs(amount * 100 - Math.round(amount * 100)) > 1e-9;
+  return amount.toLocaleString(undefined, {
+    style: "currency",
+    currency: cur,
+    minimumFractionDigits: isWhole ? 0 : 2,
+    maximumFractionDigits: hasSubCent ? 4 : 2,
+  });
 }
 
 // Metric key the backend records for metered compute, used to derive the
 // "hours used" figure shown in the billing UI.
-export const COMPUTE_HOURS_METRICS = ["compute_hours", "machine_hours", "hours"];
+export const COMPUTE_HOURS_METRICS = [
+  "compute_hours",
+  "machine_hours",
+  "hours",
+];
 
 /** Sum the compute-hours-style usage metrics from a usage map. */
 export function computeHoursUsed(usage: Usage | null | undefined): number {
@@ -239,6 +329,18 @@ export interface CreateAppInput {
   gitRepository: string;
   gitBranch: string;
   buildPack: string;
+  // Optional requested resources; the backend falls back to platform defaults.
+  cpu?: number;
+  memoryMb?: number;
+}
+
+export interface CreateServiceInput {
+  // Catalog template key (e.g. "wordpress"). Required by the backend.
+  templateKey: string;
+  name: string;
+  // Optional requested resources; the backend falls back to platform defaults.
+  cpu?: number;
+  memoryMb?: number;
 }
 
 export interface CreateDatabaseInput {
@@ -320,6 +422,14 @@ export class ApiError extends Error {
  */
 export type OnUnauthorized = () => Promise<string | null>;
 
+/**
+ * Per-call options public API methods accept so callers can cancel in-flight
+ * requests (e.g. on unmount or when inputs change). Optional everywhere.
+ */
+export interface CallOpts {
+  signal?: AbortSignal;
+}
+
 interface RequestOptions {
   method?: string;
   body?: unknown;
@@ -334,7 +444,10 @@ export function buildUrl(path: string): string {
   return `${base}${suffix}`;
 }
 
-async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+async function request<T>(
+  path: string,
+  options: RequestOptions = {},
+): Promise<T> {
   const { method = "GET", body, token, signal, onUnauthorized } = options;
 
   async function exec(authToken: string | null | undefined): Promise<Response> {
@@ -348,18 +461,23 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
       method,
       headers,
       signal,
+      // Send/receive the HttpOnly auth cookies (vortex_access/vortex_refresh).
+      // The session is cookie-based; the optional Bearer header is only a
+      // fallback for non-browser clients.
+      credentials: "include",
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
   }
 
   let res = await exec(token);
 
-  // Refresh-on-401: if we sent a token, got a 401, and have a refresh hook,
-  // try to refresh once and retry the request a single time.
-  if (res.status === 401 && token && onUnauthorized) {
-    const newToken = await onUnauthorized();
-    if (newToken) {
-      res = await exec(newToken);
+  // Refresh-on-401: on a 401, if a refresh hook is provided, refresh once
+  // (rotating the HttpOnly cookies server-side) and retry the request once.
+  // No JS-held token is required — the refreshed cookie carries the new session.
+  if (res.status === 401 && onUnauthorized) {
+    const refreshed = await onUnauthorized();
+    if (refreshed) {
+      res = await exec(token);
     }
   }
 
@@ -387,42 +505,77 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 
 export const api = {
   // Auth
-  signup(input: SignupInput): Promise<AuthResponse> {
+  signup(input: SignupInput, opts?: CallOpts): Promise<AuthResponse> {
     return request<AuthResponse>("/v1/auth/signup", {
       method: "POST",
       body: input,
+      signal: opts?.signal,
     });
   },
 
-  login(input: LoginInput): Promise<AuthResponse> {
+  login(input: LoginInput, opts?: CallOpts): Promise<AuthResponse> {
     return request<AuthResponse>("/v1/auth/login", {
       method: "POST",
       body: input,
+      signal: opts?.signal,
     });
   },
 
-  refresh(refreshToken: string): Promise<AuthResponse> {
+  // Refresh rotates the session. The refresh token is read from the HttpOnly
+  // cookie; refreshToken is optional and only used by non-browser callers.
+  refresh(refreshToken?: string, opts?: CallOpts): Promise<AuthResponse> {
     return request<AuthResponse>("/v1/auth/refresh", {
       method: "POST",
-      body: { refreshToken },
+      body: refreshToken ? { refreshToken } : {},
+      signal: opts?.signal,
     });
   },
 
-  me(token: string, onUnauthorized?: OnUnauthorized): Promise<User> {
-    return request<User>("/v1/me", { token, onUnauthorized });
+  // Logout revokes the refresh token server-side and clears the auth cookies.
+  logout(opts?: CallOpts): Promise<void> {
+    return request<void>("/v1/auth/logout", {
+      method: "POST",
+      signal: opts?.signal,
+    });
+  },
+
+  me(
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<User> {
+    return request<User>("/v1/me", {
+      token,
+      onUnauthorized,
+      signal: opts?.signal,
+    });
   },
 
   // Orgs
-  listOrgs(token: string, onUnauthorized?: OnUnauthorized): Promise<ListResponse<Org>> {
-    return request<ListResponse<Org>>("/v1/orgs", { token, onUnauthorized });
+  listOrgs(
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<ListResponse<Org>> {
+    return request<ListResponse<Org>>("/v1/orgs", {
+      token,
+      onUnauthorized,
+      signal: opts?.signal,
+    });
   },
 
-  createOrg(name: string, token: string, onUnauthorized?: OnUnauthorized): Promise<Org> {
+  createOrg(
+    name: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<Org> {
     return request<Org>("/v1/orgs", {
       method: "POST",
       body: { name },
       token,
       onUnauthorized,
+      signal: opts?.signal,
     });
   },
 
@@ -431,10 +584,12 @@ export const api = {
     orgId: string,
     token: string,
     onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<ListResponse<App>> {
     return request<ListResponse<App>>(`/v1/orgs/${orgId}/apps`, {
       token,
       onUnauthorized,
+      signal: opts?.signal,
     });
   },
 
@@ -443,11 +598,28 @@ export const api = {
     appId: string,
     token: string,
     onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<App> {
     return request<App>(`/v1/orgs/${orgId}/apps/${appId}`, {
       token,
       onUnauthorized,
+      signal: opts?.signal,
     });
+  },
+
+  // App logs (org-scoped). The backend returns {"logs": string}; we unwrap it.
+  getLogs(
+    orgId: string,
+    appId: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<string> {
+    return request<{ logs: string }>(`/v1/orgs/${orgId}/apps/${appId}/logs`, {
+      token,
+      onUnauthorized,
+      signal: opts?.signal,
+    }).then((res) => res.logs);
   },
 
   createApp(
@@ -455,12 +627,14 @@ export const api = {
     input: CreateAppInput,
     token: string,
     onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<App> {
     return request<App>(`/v1/orgs/${orgId}/apps`, {
       method: "POST",
       body: input,
       token,
       onUnauthorized,
+      signal: opts?.signal,
     });
   },
 
@@ -469,11 +643,13 @@ export const api = {
     appId: string,
     token: string,
     onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<App> {
     return request<App>(`/v1/orgs/${orgId}/apps/${appId}/deploy`, {
       method: "POST",
       token,
       onUnauthorized,
+      signal: opts?.signal,
     });
   },
 
@@ -482,11 +658,13 @@ export const api = {
     appId: string,
     token: string,
     onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<App> {
     return request<App>(`/v1/orgs/${orgId}/apps/${appId}/stop`, {
       method: "POST",
       token,
       onUnauthorized,
+      signal: opts?.signal,
     });
   },
 
@@ -495,11 +673,13 @@ export const api = {
     appId: string,
     token: string,
     onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<App> {
     return request<App>(`/v1/orgs/${orgId}/apps/${appId}/restart`, {
       method: "POST",
       token,
       onUnauthorized,
+      signal: opts?.signal,
     });
   },
 
@@ -508,11 +688,110 @@ export const api = {
     appId: string,
     token: string,
     onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<void> {
     return request<void>(`/v1/orgs/${orgId}/apps/${appId}`, {
       method: "DELETE",
       token,
       onUnauthorized,
+      signal: opts?.signal,
+    });
+  },
+
+  // -------------------------------------------------------------------------
+  // One-click Services (org-scoped) — mirrors httpx/services.go.
+  // Create is project-scoped; lifecycle ops are org-scoped by serviceId.
+  // -------------------------------------------------------------------------
+  listServices(
+    orgId: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<ListResponse<Service>> {
+    return request<ListResponse<Service>>(`/v1/orgs/${orgId}/services`, {
+      token,
+      onUnauthorized,
+      signal: opts?.signal,
+    });
+  },
+
+  createService(
+    orgId: string,
+    projectId: string,
+    input: CreateServiceInput,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<Service> {
+    return request<Service>(
+      `/v1/orgs/${orgId}/projects/${projectId}/services`,
+      {
+        method: "POST",
+        body: input,
+        token,
+        onUnauthorized,
+        signal: opts?.signal,
+      },
+    );
+  },
+
+  deployService(
+    orgId: string,
+    serviceId: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<Service> {
+    return request<Service>(`/v1/orgs/${orgId}/services/${serviceId}/deploy`, {
+      method: "POST",
+      token,
+      onUnauthorized,
+      signal: opts?.signal,
+    });
+  },
+
+  stopService(
+    orgId: string,
+    serviceId: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<Service> {
+    return request<Service>(`/v1/orgs/${orgId}/services/${serviceId}/stop`, {
+      method: "POST",
+      token,
+      onUnauthorized,
+      signal: opts?.signal,
+    });
+  },
+
+  restartService(
+    orgId: string,
+    serviceId: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<Service> {
+    return request<Service>(`/v1/orgs/${orgId}/services/${serviceId}/restart`, {
+      method: "POST",
+      token,
+      onUnauthorized,
+      signal: opts?.signal,
+    });
+  },
+
+  deleteService(
+    orgId: string,
+    serviceId: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<void> {
+    return request<void>(`/v1/orgs/${orgId}/services/${serviceId}`, {
+      method: "DELETE",
+      token,
+      onUnauthorized,
+      signal: opts?.signal,
     });
   },
 
@@ -521,10 +800,12 @@ export const api = {
     orgId: string,
     token: string,
     onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<ListResponse<Database>> {
     return request<ListResponse<Database>>(`/v1/orgs/${orgId}/databases`, {
       token,
       onUnauthorized,
+      signal: opts?.signal,
     });
   },
 
@@ -533,12 +814,14 @@ export const api = {
     input: CreateDatabaseInput,
     token: string,
     onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<Database> {
     return request<Database>(`/v1/orgs/${orgId}/databases`, {
       method: "POST",
       body: input,
       token,
       onUnauthorized,
+      signal: opts?.signal,
     });
   },
 
@@ -547,10 +830,12 @@ export const api = {
     orgId: string,
     token: string,
     onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<ListResponse<Project>> {
     return request<ListResponse<Project>>(`/v1/orgs/${orgId}/projects`, {
       token,
       onUnauthorized,
+      signal: opts?.signal,
     });
   },
 
@@ -559,12 +844,14 @@ export const api = {
     name: string,
     token: string,
     onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<Project> {
     return request<Project>(`/v1/orgs/${orgId}/projects`, {
       method: "POST",
       body: { name },
       token,
       onUnauthorized,
+      signal: opts?.signal,
     });
   },
 
@@ -573,10 +860,11 @@ export const api = {
     projectId: string,
     token: string,
     onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<ListResponse<App>> {
     return request<ListResponse<App>>(
       `/v1/orgs/${orgId}/projects/${projectId}/apps`,
-      { token, onUnauthorized },
+      { token, onUnauthorized, signal: opts?.signal },
     );
   },
 
@@ -585,10 +873,12 @@ export const api = {
     orgId: string,
     token: string,
     onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<ListResponse<Member>> {
     return request<ListResponse<Member>>(`/v1/orgs/${orgId}/members`, {
       token,
       onUnauthorized,
+      signal: opts?.signal,
     });
   },
 
@@ -597,11 +887,13 @@ export const api = {
     orgId: string,
     token: string,
     onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<ListResponse<Invitation>> {
-    return request<ListResponse<Invitation>>(
-      `/v1/orgs/${orgId}/invitations`,
-      { token, onUnauthorized },
-    );
+    return request<ListResponse<Invitation>>(`/v1/orgs/${orgId}/invitations`, {
+      token,
+      onUnauthorized,
+      signal: opts?.signal,
+    });
   },
 
   invite(
@@ -609,12 +901,14 @@ export const api = {
     input: InviteInput,
     token: string,
     onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<Invitation> {
     return request<Invitation>(`/v1/orgs/${orgId}/invitations`, {
       method: "POST",
       body: input,
       token,
       onUnauthorized,
+      signal: opts?.signal,
     });
   },
 
@@ -622,12 +916,14 @@ export const api = {
     inviteToken: string,
     token: string,
     onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<Invitation> {
     return request<Invitation>(`/v1/invitations/accept`, {
       method: "POST",
       body: { token: inviteToken },
       token,
       onUnauthorized,
+      signal: opts?.signal,
     });
   },
 
@@ -637,10 +933,11 @@ export const api = {
     appId: string,
     token: string,
     onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<ListResponse<EnvVar>> {
     return request<ListResponse<EnvVar>>(
       `/v1/orgs/${orgId}/apps/${appId}/env`,
-      { token, onUnauthorized },
+      { token, onUnauthorized, signal: opts?.signal },
     );
   },
 
@@ -650,12 +947,14 @@ export const api = {
     input: EnvVar,
     token: string,
     onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<EnvVar> {
     return request<EnvVar>(`/v1/orgs/${orgId}/apps/${appId}/env`, {
       method: "PUT",
       body: input,
       token,
       onUnauthorized,
+      signal: opts?.signal,
     });
   },
 
@@ -665,10 +964,11 @@ export const api = {
     key: string,
     token: string,
     onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<void> {
     return request<void>(
       `/v1/orgs/${orgId}/apps/${appId}/env/${encodeURIComponent(key)}`,
-      { method: "DELETE", token, onUnauthorized },
+      { method: "DELETE", token, onUnauthorized, signal: opts?.signal },
     );
   },
 
@@ -678,10 +978,11 @@ export const api = {
     appId: string,
     token: string,
     onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<ListResponse<Domain>> {
     return request<ListResponse<Domain>>(
       `/v1/orgs/${orgId}/apps/${appId}/domains`,
-      { token, onUnauthorized },
+      { token, onUnauthorized, signal: opts?.signal },
     );
   },
 
@@ -691,12 +992,14 @@ export const api = {
     domain: string,
     token: string,
     onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<Domain> {
     return request<Domain>(`/v1/orgs/${orgId}/apps/${appId}/domains`, {
       method: "POST",
       body: { domain },
       token,
       onUnauthorized,
+      signal: opts?.signal,
     });
   },
 
@@ -706,10 +1009,11 @@ export const api = {
     domainId: string,
     token: string,
     onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<void> {
     return request<void>(
       `/v1/orgs/${orgId}/apps/${appId}/domains/${domainId}`,
-      { method: "DELETE", token, onUnauthorized },
+      { method: "DELETE", token, onUnauthorized, signal: opts?.signal },
     );
   },
 
@@ -719,32 +1023,48 @@ export const api = {
     appId: string,
     token: string,
     onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<AppMetrics> {
     return request<AppMetrics>(`/v1/orgs/${orgId}/apps/${appId}/metrics`, {
       token,
       onUnauthorized,
+      signal: opts?.signal,
     });
   },
 
   // Public one-click services catalog (no auth required). Mirrors the
   // admin-managed templates but is readable by any signed-in user.
-  getServiceCatalog(): Promise<ListResponse<Template>> {
-    return request<ListResponse<Template>>("/v1/services/catalog");
+  getServiceCatalog(opts?: CallOpts): Promise<ListResponse<Template>> {
+    return request<ListResponse<Template>>("/v1/services/catalog", {
+      signal: opts?.signal,
+    });
   },
 
   // Billing
-  getPlans(): Promise<PlansResponse> {
-    return request<PlansResponse>("/v1/billing/plans");
+  getPlans(opts?: CallOpts): Promise<PlansResponse> {
+    return request<PlansResponse>("/v1/billing/plans", {
+      signal: opts?.signal,
+    });
+  },
+
+  // Public hourly pricing components (no auth required) — the rates shown to
+  // users. Mirrors the admin-managed list but is read-only here.
+  getPricing(opts?: CallOpts): Promise<ListResponse<PricingComponent>> {
+    return request<ListResponse<PricingComponent>>("/v1/billing/pricing", {
+      signal: opts?.signal,
+    });
   },
 
   getBilling(
     orgId: string,
     token: string,
     onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<BillingResponse> {
     return request<BillingResponse>(`/v1/orgs/${orgId}/billing`, {
       token,
       onUnauthorized,
+      signal: opts?.signal,
     });
   },
 
@@ -753,12 +1073,14 @@ export const api = {
     planId: string,
     token: string,
     onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<SubscribeResponse> {
     return request<SubscribeResponse>(`/v1/orgs/${orgId}/billing/subscribe`, {
       method: "POST",
       body: { planId },
       token,
       onUnauthorized,
+      signal: opts?.signal,
     });
   },
 
@@ -770,10 +1092,12 @@ export const api = {
   listAdminPlans(
     token: string,
     onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<ListResponse<AdminPlan>> {
     return request<ListResponse<AdminPlan>>("/v1/admin/plans", {
       token,
       onUnauthorized,
+      signal: opts?.signal,
     });
   },
 
@@ -781,12 +1105,14 @@ export const api = {
     input: AdminPlanInput,
     token: string,
     onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<AdminPlan> {
     return request<AdminPlan>("/v1/admin/plans", {
       method: "POST",
       body: input,
       token,
       onUnauthorized,
+      signal: opts?.signal,
     });
   },
 
@@ -795,12 +1121,14 @@ export const api = {
     input: Partial<AdminPlanInput>,
     token: string,
     onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<AdminPlan> {
     return request<AdminPlan>(`/v1/admin/plans/${id}`, {
       method: "PATCH",
       body: input,
       token,
       onUnauthorized,
+      signal: opts?.signal,
     });
   },
 
@@ -808,11 +1136,13 @@ export const api = {
     id: string,
     token: string,
     onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<void> {
     return request<void>(`/v1/admin/plans/${id}`, {
       method: "DELETE",
       token,
       onUnauthorized,
+      signal: opts?.signal,
     });
   },
 
@@ -820,10 +1150,12 @@ export const api = {
   listTemplates(
     token: string,
     onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<ListResponse<Template>> {
     return request<ListResponse<Template>>("/v1/admin/templates", {
       token,
       onUnauthorized,
+      signal: opts?.signal,
     });
   },
 
@@ -831,12 +1163,14 @@ export const api = {
     input: TemplateInput,
     token: string,
     onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<Template> {
     return request<Template>("/v1/admin/templates", {
       method: "POST",
       body: input,
       token,
       onUnauthorized,
+      signal: opts?.signal,
     });
   },
 
@@ -845,12 +1179,14 @@ export const api = {
     input: Partial<TemplateInput>,
     token: string,
     onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<Template> {
     return request<Template>(`/v1/admin/templates/${encodeURIComponent(key)}`, {
       method: "PATCH",
       body: input,
       token,
       onUnauthorized,
+      signal: opts?.signal,
     });
   },
 
@@ -858,11 +1194,13 @@ export const api = {
     key: string,
     token: string,
     onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<void> {
     return request<void>(`/v1/admin/templates/${encodeURIComponent(key)}`, {
       method: "DELETE",
       token,
       onUnauthorized,
+      signal: opts?.signal,
     });
   },
 
@@ -870,10 +1208,12 @@ export const api = {
   getSettings(
     token: string,
     onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<Settings> {
     return request<Settings>("/v1/admin/settings", {
       token,
       onUnauthorized,
+      signal: opts?.signal,
     });
   },
 
@@ -881,12 +1221,14 @@ export const api = {
     input: Partial<Settings>,
     token: string,
     onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<Settings> {
     return request<Settings>("/v1/admin/settings", {
       method: "PATCH",
       body: input,
       token,
       onUnauthorized,
+      signal: opts?.signal,
     });
   },
 
@@ -894,10 +1236,73 @@ export const api = {
   getAdminOverview(
     token: string,
     onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<AdminOverview> {
     return request<AdminOverview>("/v1/admin/overview", {
       token,
       onUnauthorized,
+      signal: opts?.signal,
+    });
+  },
+
+  // Admin: hourly pricing components — mirrors /v1/admin/pricing.
+  listPricing(
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<ListResponse<PricingComponent>> {
+    return request<ListResponse<PricingComponent>>("/v1/admin/pricing", {
+      token,
+      onUnauthorized,
+      signal: opts?.signal,
+    });
+  },
+
+  createPricing(
+    input: PricingComponentInput,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<PricingComponent> {
+    return request<PricingComponent>("/v1/admin/pricing", {
+      method: "POST",
+      body: input,
+      token,
+      onUnauthorized,
+      signal: opts?.signal,
+    });
+  },
+
+  updatePricing(
+    key: string,
+    patch: Partial<PricingComponentInput>,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<PricingComponent> {
+    return request<PricingComponent>(
+      `/v1/admin/pricing/${encodeURIComponent(key)}`,
+      {
+        method: "PATCH",
+        body: patch,
+        token,
+        onUnauthorized,
+        signal: opts?.signal,
+      },
+    );
+  },
+
+  deletePricing(
+    key: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<void> {
+    return request<void>(`/v1/admin/pricing/${encodeURIComponent(key)}`, {
+      method: "DELETE",
+      token,
+      onUnauthorized,
+      signal: opts?.signal,
     });
   },
 };

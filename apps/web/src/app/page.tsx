@@ -39,7 +39,10 @@ const FEATURES = [
 const CLI_LINES = [
   { prompt: true, text: "vortex launch" },
   { prompt: false, text: "Detected a Dockerfile — using it to build." },
-  { prompt: false, text: "Provisioning app marketing-site in iad, lhr, sin..." },
+  {
+    prompt: false,
+    text: "Provisioning app marketing-site in iad, lhr, sin...",
+  },
   { prompt: false, text: "✓ Built image in 18.2s" },
   { prompt: false, text: "✓ Deployed v1 across 3 regions" },
   {
@@ -83,7 +86,11 @@ export default function LandingPage() {
                 </Button>
               </Link>
               <a href="#cli" className="w-full sm:w-auto">
-                <Button variant="secondary" size="lg" className="w-full sm:w-auto">
+                <Button
+                  variant="secondary"
+                  size="lg"
+                  className="w-full sm:w-auto"
+                >
                   See the CLI
                 </Button>
               </a>
@@ -140,9 +147,9 @@ export default function LandingPage() {
               One command from git to globe.
             </h2>
             <p className="mt-4 text-muted-foreground">
-              The Vortex CLI detects your stack, builds an image, and rolls it out
-              across regions with health checks and automatic TLS. No pipelines
-              to wire up.
+              The Vortex CLI detects your stack, builds an image, and rolls it
+              out across regions with health checks and automatic TLS. No
+              pipelines to wire up.
             </p>
             <ul className="mt-6 space-y-3 text-sm">
               {[
@@ -158,7 +165,7 @@ export default function LandingPage() {
             </ul>
           </div>
 
-          <div className="overflow-hidden rounded-xl border border-border bg-background shadow-2xl">
+          <div className="overflow-hidden rounded-xl border border-border bg-[#0c0c0f] shadow-2xl">
             <div className="flex items-center gap-2 border-b border-border px-4 py-3">
               <span className="h-3 w-3 rounded-full bg-destructive/70" />
               <span className="h-3 w-3 rounded-full bg-warning/70" />

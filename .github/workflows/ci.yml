@@ -49,12 +49,21 @@ jobs:
           cache-dependency-path: apps/web/package-lock.json
       - name: Install
         run: npm ci
+      - name: Lint
+        run: npm run lint
+      - name: Typecheck
+        run: npx tsc --noEmit
+      - name: Format check (prettier)
+        run: npm run format:check
       - name: Unit tests
         run: npm run test
       - name: Build
         run: npm run build
         env:
           NEXT_TELEMETRY_DISABLED: "1"
+          # api.ts requires the public API URL at build time; CI just needs a
+          # non-empty value to compile (the artifact is not deployed).
+          NEXT_PUBLIC_VORTEX_API_URL: "https://api.vortex.v60ai.com"
       - name: Dependency audit (npm)
         run: npm audit --audit-level=high --omit=dev
 

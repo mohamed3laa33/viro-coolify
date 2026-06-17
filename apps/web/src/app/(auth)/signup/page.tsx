@@ -3,7 +3,6 @@
 import { useState, type FormEvent } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Loader2 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { ApiError } from "@/lib/api";
 import {
@@ -16,6 +15,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Notice } from "@/components/ui/notice";
 
 export default function SignupPage() {
   const router = useRouter();
@@ -66,6 +66,7 @@ export default function SignupPage() {
               placeholder="Ada Lovelace"
               value={name}
               onChange={(e) => setName(e.target.value)}
+              aria-invalid={error ? true : undefined}
               required
             />
           </div>
@@ -78,6 +79,7 @@ export default function SignupPage() {
               placeholder="you@vortex.v60ai.com"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
+              aria-invalid={error ? true : undefined}
               required
             />
           </div>
@@ -91,25 +93,24 @@ export default function SignupPage() {
               minLength={8}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
+              aria-invalid={error ? true : undefined}
               required
             />
           </div>
 
-          {error && (
-            <p className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-              {error}
-            </p>
-          )}
+          {error && <Notice variant="error">{error}</Notice>}
 
-          <Button type="submit" className="w-full" disabled={loading}>
-            {loading && <Loader2 className="h-4 w-4 animate-spin" />}
+          <Button type="submit" className="w-full" loading={loading}>
             {loading ? "Creating account…" : "Create account"}
           </Button>
         </form>
 
         <p className="mt-6 text-center text-sm text-muted-foreground">
           Already have an account?{" "}
-          <Link href="/login" className="font-medium text-primary hover:underline">
+          <Link
+            href="/login"
+            className="font-medium text-primary hover:underline"
+          >
             Log in
           </Link>
         </p>

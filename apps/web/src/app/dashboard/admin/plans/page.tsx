@@ -1,11 +1,10 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
-import { Loader2, Pencil, Plus, Trash2 } from "lucide-react";
+import { Pencil, Plus, Trash2 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { api, type AdminPlan, type AdminPlanInput } from "@/lib/api";
-import { mockPlans } from "@/lib/mock";
-import { isDemoMode } from "@/lib/demo";
+import { useDemoData } from "@/lib/demo-data";
 import { useResource } from "@/lib/use-resource";
 import { cn } from "@/lib/utils";
 import { PageHeader } from "@/components/page-header";
@@ -14,6 +13,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
+import { Notice } from "@/components/ui/notice";
 
 const EMPTY_PLAN: AdminPlanInput = {
   id: "",
@@ -47,10 +47,13 @@ function formatPrice(plan: AdminPlan): string {
 export default function AdminPlansPage() {
   const { authedCall } = useAuth();
 
+  // Demo fallback loads lazily (demo mode only); prod shows a real empty table.
+  const demoPlans = useDemoData((m) => m.mockPlans, [] as AdminPlan[]);
+
   const { data, refetch, usingFallback } = useResource(
     () => authedCall((token, on) => api.listAdminPlans(token, on)),
-    { data: isDemoMode() ? mockPlans : [] },
-    [],
+    { data: demoPlans },
+    [demoPlans],
   );
   const plans = data.data;
 
@@ -60,7 +63,7 @@ export default function AdminPlansPage() {
 
   const editingPlan =
     editing && editing !== "new"
-      ? plans.find((p) => p.id === editing) ?? null
+      ? (plans.find((p) => p.id === editing) ?? null)
       : null;
 
   async function onDelete(plan: AdminPlan) {
@@ -86,9 +89,7 @@ export default function AdminPlansPage() {
         description="Pricing, included usage, and per-plan resource quotas."
         actions={
           <Button
-            onClick={() =>
-              setEditing((cur) => (cur === "new" ? null : "new"))
-            }
+            onClick={() => setEditing((cur) => (cur === "new" ? null : "new"))}
           >
             <Plus className="h-4 w-4" />
             New plan
@@ -96,17 +97,13 @@ export default function AdminPlansPage() {
         }
       />
 
-      {usingFallback && isDemoMode() && (
-        <div className="rounded-md border border-warning/30 bg-warning/10 px-4 py-2 text-sm text-warning">
+      {usingFallback && (
+        <Notice variant="warning">
           Showing demo data — admin API unreachable. Edits won&apos;t persist.
-        </div>
+        </Notice>
       )}
 
-      {notice && (
-        <div className="rounded-md border border-primary/30 bg-primary/10 px-4 py-2 text-sm text-primary">
-          {notice}
-        </div>
-      )}
+      {notice && <Notice variant="error">{notice}</Notice>}
 
       {editing === "new" && (
         <PlanForm
@@ -117,9 +114,7 @@ export default function AdminPlansPage() {
           onCancel={() => setEditing(null)}
           onSubmit={async (input) => {
             try {
-              await authedCall((token, on) =>
-                api.createPlan(input, token, on),
-              );
+              await authedCall((token, on) => api.createPlan(input, token, on));
               setEditing(null);
               refetch();
             } catch {
@@ -131,84 +126,90 @@ export default function AdminPlansPage() {
 
       <Card>
         <CardContent className="p-0">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-border text-left text-xs uppercase tracking-wide text-muted-foreground">
-                <th className="px-6 py-3 font-medium">Plan</th>
-                <th className="px-6 py-3 font-medium">Price</th>
-                <th className="px-6 py-3 font-medium">Included</th>
-                <th className="px-6 py-3 font-medium">Quotas</th>
-                <th className="px-6 py-3 font-medium">Status</th>
-                <th className="px-6 py-3 text-right font-medium">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border">
-              {plans.map((plan) => (
-                <tr key={plan.id} className="hover:bg-muted/40">
-                  <td className="px-6 py-4">
-                    <div className="flex items-center gap-2 font-medium">
-                      {plan.name}
-                      {plan.isDefault && (
-                        <Badge variant="info">Default</Badge>
-                      )}
-                    </div>
-                    <p className="font-mono text-xs text-muted-foreground">
-                      {plan.id} · sort {plan.sortOrder}
-                    </p>
-                  </td>
-                  <td className="px-6 py-4">
-                    {formatPrice(plan)}
-                    <span className="text-xs text-muted-foreground"> /mo</span>
-                  </td>
-                  <td className="px-6 py-4 text-muted-foreground">
-                    {plan.includedHours}h
-                    <span className="block text-xs">
-                      +{(plan.overagePerHourCents / 100).toLocaleString(
-                        undefined,
-                        {
-                          style: "currency",
-                          currency: (plan.currency || "usd").toUpperCase(),
-                        },
-                      )}
-                      /h over
-                    </span>
-                  </td>
-                  <td className="px-6 py-4 text-xs text-muted-foreground">
-                    {plan.maxCpu} CPU · {plan.maxMemoryMb}MB · {plan.maxApps}{" "}
-                    apps
-                  </td>
-                  <td className="px-6 py-4">
-                    <Badge variant={plan.active ? "success" : "outline"}>
-                      {plan.active ? "Active" : "Inactive"}
-                    </Badge>
-                  </td>
-                  <td className="px-6 py-4">
-                    <div className="flex items-center justify-end gap-2">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() =>
-                          setEditing((cur) =>
-                            cur === plan.id ? null : plan.id,
-                          )
-                        }
-                      >
-                        <Pencil className="h-3.5 w-3.5" />
-                        Edit
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => onDelete(plan)}
-                      >
-                        <Trash2 className="h-3.5 w-3.5 text-destructive" />
-                      </Button>
-                    </div>
-                  </td>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-border text-left text-xs uppercase tracking-wide text-muted-foreground">
+                  <th className="px-6 py-3 font-medium">Plan</th>
+                  <th className="px-6 py-3 font-medium">Price</th>
+                  <th className="px-6 py-3 font-medium">Included</th>
+                  <th className="px-6 py-3 font-medium">Quotas</th>
+                  <th className="px-6 py-3 font-medium">Status</th>
+                  <th className="px-6 py-3 text-right font-medium">Actions</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {plans.map((plan) => (
+                  <tr key={plan.id} className="hover:bg-muted/40">
+                    <td className="px-6 py-4">
+                      <div className="flex items-center gap-2 font-medium">
+                        {plan.name}
+                        {plan.isDefault && (
+                          <Badge variant="info">Default</Badge>
+                        )}
+                      </div>
+                      <p className="font-mono text-xs text-muted-foreground">
+                        {plan.id} · sort {plan.sortOrder}
+                      </p>
+                    </td>
+                    <td className="px-6 py-4">
+                      {formatPrice(plan)}
+                      <span className="text-xs text-muted-foreground">
+                        {" "}
+                        /mo
+                      </span>
+                    </td>
+                    <td className="px-6 py-4 text-muted-foreground">
+                      {plan.includedHours}h
+                      <span className="block text-xs">
+                        +
+                        {(plan.overagePerHourCents / 100).toLocaleString(
+                          undefined,
+                          {
+                            style: "currency",
+                            currency: (plan.currency || "usd").toUpperCase(),
+                          },
+                        )}
+                        /h over
+                      </span>
+                    </td>
+                    <td className="px-6 py-4 text-xs text-muted-foreground">
+                      {plan.maxCpu} CPU · {plan.maxMemoryMb}MB · {plan.maxApps}{" "}
+                      apps
+                    </td>
+                    <td className="px-6 py-4">
+                      <Badge variant={plan.active ? "success" : "outline"}>
+                        {plan.active ? "Active" : "Inactive"}
+                      </Badge>
+                    </td>
+                    <td className="px-6 py-4">
+                      <div className="flex items-center justify-end gap-2">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() =>
+                            setEditing((cur) =>
+                              cur === plan.id ? null : plan.id,
+                            )
+                          }
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                          Edit
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => onDelete(plan)}
+                        >
+                          <Trash2 className="h-3.5 w-3.5 text-destructive" />
+                        </Button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </CardContent>
       </Card>
 
@@ -347,9 +348,7 @@ function PlanForm({
                 type="number"
                 min={0}
                 value={form.includedHours}
-                onChange={(e) =>
-                  set("includedHours", Number(e.target.value))
-                }
+                onChange={(e) => set("includedHours", Number(e.target.value))}
               />
             </Field>
             <Field label="Overage / hour (cents)" htmlFor="plan-overage">
@@ -410,8 +409,7 @@ function PlanForm({
           </div>
 
           <div className="flex items-center gap-2">
-            <Button type="submit" disabled={pending}>
-              {pending && <Loader2 className="h-4 w-4 animate-spin" />}
+            <Button type="submit" loading={pending}>
               Save plan
             </Button>
             <Button type="button" variant="ghost" onClick={onCancel}>
@@ -454,7 +452,7 @@ function Toggle({
     <button
       type="button"
       onClick={() => onChange(!checked)}
-      className="inline-flex items-center gap-2 text-sm font-medium"
+      className="inline-flex items-center gap-2 text-sm font-medium pointer-coarse:min-h-11"
     >
       <span
         className={cn(

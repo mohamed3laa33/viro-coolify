@@ -2,11 +2,9 @@
 
 import { Building2, Users } from "lucide-react";
 import { useAuth } from "@/lib/auth";
-import { api } from "@/lib/api";
-import { mockAdminOverview, mockPlans } from "@/lib/mock";
-import { isDemoMode } from "@/lib/demo";
+import { api, type AdminOverview, type AdminPlan } from "@/lib/api";
+import { useDemoData } from "@/lib/demo-data";
 import { useResource } from "@/lib/use-resource";
-import type { AdminOverview } from "@/lib/api";
 import { PageHeader } from "@/components/page-header";
 import { StatCard } from "@/components/stat-card";
 import {
@@ -16,6 +14,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Notice } from "@/components/ui/notice";
 
 function humanizeMetric(metric: string): string {
   // camelCase / snake_case -> "Title Case".
@@ -34,18 +33,21 @@ const EMPTY_OVERVIEW: AdminOverview = {
 
 export default function AdminOverviewPage() {
   const { authedCall } = useAuth();
-  const demo = isDemoMode();
+
+  // Demo fallbacks load lazily (demo mode only); prod shows real empty states.
+  const demoOverview = useDemoData((m) => m.mockAdminOverview, EMPTY_OVERVIEW);
+  const demoPlans = useDemoData((m) => m.mockPlans, [] as AdminPlan[]);
 
   const { data: overview, usingFallback } = useResource(
     () => authedCall((token, on) => api.getAdminOverview(token, on)),
-    demo ? mockAdminOverview : EMPTY_OVERVIEW,
-    [],
+    demoOverview,
+    [demoOverview],
   );
 
   const { data: plansData } = useResource(
     () => authedCall((token, on) => api.listAdminPlans(token, on)),
-    { data: demo ? mockPlans : [] },
-    [],
+    { data: demoPlans },
+    [demoPlans],
   );
   const plans = plansData.data;
 
@@ -63,10 +65,10 @@ export default function AdminOverviewPage() {
         description="Platform-wide totals across every organization."
       />
 
-      {usingFallback && demo && (
-        <div className="rounded-md border border-warning/30 bg-warning/10 px-4 py-2 text-sm text-warning">
+      {usingFallback && (
+        <Notice variant="warning">
           Showing demo data — admin API unreachable.
-        </div>
+        </Notice>
       )}
 
       <div className="grid gap-4 sm:grid-cols-2">
@@ -96,31 +98,33 @@ export default function AdminOverviewPage() {
                 No subscriptions yet.
               </p>
             ) : (
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-border text-left text-xs uppercase tracking-wide text-muted-foreground">
-                    <th className="px-6 py-3 font-medium">Plan</th>
-                    <th className="px-6 py-3 text-right font-medium">
-                      Subscriptions
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border">
-                  {subsEntries.map(([planId, count]) => (
-                    <tr key={planId} className="hover:bg-muted/40">
-                      <td className="px-6 py-3 font-medium">
-                        {planName(planId)}
-                        <span className="ml-2 font-mono text-xs text-muted-foreground">
-                          {planId}
-                        </span>
-                      </td>
-                      <td className="px-6 py-3 text-right tabular-nums">
-                        {count.toLocaleString()}
-                      </td>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-border text-left text-xs uppercase tracking-wide text-muted-foreground">
+                      <th className="px-6 py-3 font-medium">Plan</th>
+                      <th className="px-6 py-3 text-right font-medium">
+                        Subscriptions
+                      </th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody className="divide-y divide-border">
+                    {subsEntries.map(([planId, count]) => (
+                      <tr key={planId} className="hover:bg-muted/40">
+                        <td className="px-6 py-3 font-medium">
+                          {planName(planId)}
+                          <span className="ml-2 font-mono text-xs text-muted-foreground">
+                            {planId}
+                          </span>
+                        </td>
+                        <td className="px-6 py-3 text-right tabular-nums">
+                          {count.toLocaleString()}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             )}
           </CardContent>
         </Card>
@@ -138,26 +142,30 @@ export default function AdminOverviewPage() {
                 No usage recorded.
               </p>
             ) : (
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-border text-left text-xs uppercase tracking-wide text-muted-foreground">
-                    <th className="px-6 py-3 font-medium">Metric</th>
-                    <th className="px-6 py-3 text-right font-medium">Total</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border">
-                  {usageEntries.map(([metric, total]) => (
-                    <tr key={metric} className="hover:bg-muted/40">
-                      <td className="px-6 py-3 font-medium">
-                        {humanizeMetric(metric)}
-                      </td>
-                      <td className="px-6 py-3 text-right tabular-nums">
-                        {total.toLocaleString()}
-                      </td>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-border text-left text-xs uppercase tracking-wide text-muted-foreground">
+                      <th className="px-6 py-3 font-medium">Metric</th>
+                      <th className="px-6 py-3 text-right font-medium">
+                        Total
+                      </th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody className="divide-y divide-border">
+                    {usageEntries.map(([metric, total]) => (
+                      <tr key={metric} className="hover:bg-muted/40">
+                        <td className="px-6 py-3 font-medium">
+                          {humanizeMetric(metric)}
+                        </td>
+                        <td className="px-6 py-3 text-right tabular-nums">
+                          {total.toLocaleString()}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             )}
           </CardContent>
         </Card>

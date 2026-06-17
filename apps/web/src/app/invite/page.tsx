@@ -1,11 +1,6 @@
 "use client";
 
-import {
-  Suspense,
-  useEffect,
-  useState,
-  type FormEvent,
-} from "react";
+import { Suspense, useEffect, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { CheckCircle2, Loader2, MailCheck } from "lucide-react";

@@ -6,15 +6,84 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/auth"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/config"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/domain"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/identity"
+)
+
+// Auth cookie names. The frontend matches these exactly. Tokens are also still
+// returned in the JSON body so header-based clients (the CLI) keep working.
+const (
+	accessCookieName  = "vortex_access"
+	refreshCookieName = "vortex_refresh"
 )
 
 type ctxKey int
 
 const userCtxKey ctxKey = iota
+
+// setAuthCookies writes the access and refresh tokens as HttpOnly cookies using
+// the platform cookie contract: SameSite=Lax, Path=/, Secure in production, and
+// (in production) a Domain of the configured base domain so the cookies are
+// shared across "*.<base>" subdomains. In dev the Domain is omitted so cookies
+// are host-only on localhost. Cookie MaxAge mirrors the corresponding token TTL.
+func setAuthCookies(w http.ResponseWriter, access, refresh string, cfg *config.Config) {
+	http.SetCookie(w, authCookie(accessCookieName, access, cfg.JWTAccessTTL*60, cfg))
+	http.SetCookie(w, authCookie(refreshCookieName, refresh, cfg.JWTRefreshTTL*3600, cfg))
+}
+
+// clearAuthCookies expires both auth cookies (MaxAge<0 deletes immediately).
+func clearAuthCookies(w http.ResponseWriter, cfg *config.Config) {
+	http.SetCookie(w, authCookie(accessCookieName, "", -1, cfg))
+	http.SetCookie(w, authCookie(refreshCookieName, "", -1, cfg))
+}
+
+func authCookie(name, value string, maxAge int, cfg *config.Config) *http.Cookie {
+	c := &http.Cookie{
+		Name:     name,
+		Value:    value,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   maxAge,
+	}
+	if cfg.IsProduction() {
+		c.Secure = true
+		c.Domain = cfg.BaseDomain
+	}
+	if maxAge < 0 {
+		// Belt-and-suspenders: also set an expiry in the past for deletion.
+		c.Expires = time.Unix(0, 0)
+	}
+	return c
+}
+
+// accessTokenFromRequest extracts the access token, preferring the HttpOnly
+// "vortex_access" cookie (browser clients) and falling back to the
+// "Authorization: Bearer" header (the CLI and other API clients) for backward
+// compatibility.
+func accessTokenFromRequest(r *http.Request) string {
+	if c, err := r.Cookie(accessCookieName); err == nil && c.Value != "" {
+		return c.Value
+	}
+	parts := strings.SplitN(r.Header.Get("Authorization"), " ", 2)
+	if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
+		return parts[1]
+	}
+	return ""
+}
+
+// refreshTokenFromRequest returns the refresh token, preferring the cookie and
+// falling back to the JSON body value already decoded by the caller.
+func refreshTokenFromRequest(r *http.Request, bodyToken string) string {
+	if c, err := r.Cookie(refreshCookieName); err == nil && c.Value != "" {
+		return c.Value
+	}
+	return bodyToken
+}
 
 func userFromContext(ctx context.Context) (*domain.User, bool) {
 	u, ok := ctx.Value(userCtxKey).(*domain.User)
@@ -24,12 +93,12 @@ func userFromContext(ctx context.Context) (*domain.User, bool) {
 // authMiddleware requires a valid access token and loads the user into the context.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		parts := strings.SplitN(r.Header.Get("Authorization"), " ", 2)
-		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || parts[1] == "" {
+		token := accessTokenFromRequest(r)
+		if token == "" {
 			writeError(w, http.StatusUnauthorized, "missing bearer token")
 			return
 		}
-		claims, err := s.tokens.Verify(parts[1], auth.AccessToken)
+		claims, err := s.tokens.Verify(token, auth.AccessToken)
 		if err != nil {
 			writeError(w, http.StatusUnauthorized, "invalid or expired token")
 			return
@@ -138,6 +207,7 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 		writeAuthError(w, err)
 		return
 	}
+	setAuthCookies(w, res.Access, res.Refresh, s.cfg)
 	writeJSON(w, http.StatusCreated, toAuthResponse(res))
 }
 
@@ -151,20 +221,41 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeAuthError(w, err)
 		return
 	}
+	setAuthCookies(w, res.Access, res.Refresh, s.cfg)
 	writeJSON(w, http.StatusOK, toAuthResponse(res))
 }
 
 func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
+	// Refresh accepts the token from the "vortex_refresh" cookie (browser) or the
+	// JSON body (CLI). The body is optional so cookie-only callers need not send one.
 	var req refreshRequest
-	if !decodeJSON(w, r, &req) {
-		return
+	if r.ContentLength != 0 && r.Body != http.NoBody {
+		if !decodeJSON(w, r, &req) {
+			return
+		}
 	}
-	res, err := s.identity.Refresh(r.Context(), req.RefreshToken)
+	token := refreshTokenFromRequest(r, req.RefreshToken)
+	res, err := s.identity.Refresh(r.Context(), token)
 	if err != nil {
 		writeAuthError(w, err)
 		return
 	}
+	// Rotation issued a fresh pair; set the new cookies (old refresh is revoked).
+	setAuthCookies(w, res.Access, res.Refresh, s.cfg)
 	writeJSON(w, http.StatusOK, toAuthResponse(res))
+}
+
+// handleLogout revokes the caller's current refresh token (read from the
+// "vortex_refresh" cookie) and clears both auth cookies. It is authenticated and
+// idempotent — a missing/invalid refresh token still clears cookies and 204s.
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	token := refreshTokenFromRequest(r, "")
+	if err := s.identity.Logout(r.Context(), token); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	clearAuthCookies(w, s.cfg)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {

@@ -5,6 +5,12 @@ export interface PageHeaderProps {
   description?: string;
   actions?: React.ReactNode;
   className?: string;
+  /**
+   * Heading level to render the title as. Defaults to "h1".
+   * Use "h2" when the page already renders an h1 elsewhere to avoid
+   * duplicate-h1 accessibility issues (e.g. Metrics).
+   */
+  as?: "h1" | "h2";
 }
 
 export function PageHeader({
@@ -12,6 +18,7 @@ export function PageHeader({
   description,
   actions,
   className,
+  as: Heading = "h1",
 }: PageHeaderProps) {
   return (
     <div
@@ -21,7 +28,9 @@ export function PageHeader({
       )}
     >
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
+        <Heading className="text-2xl font-semibold tracking-tight">
+          {title}
+        </Heading>
         {description && (
           <p className="mt-1 text-sm text-muted-foreground">{description}</p>
         )}

@@ -1,6 +1,15 @@
 "use client";
 
-import { use, useMemo, useState, type FormEvent } from "react";
+import {
+  use,
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 import Link from "next/link";
 import {
   ArrowLeft,
@@ -10,6 +19,10 @@ import {
   GitBranch,
   Package,
   Globe,
+  Cpu,
+  MemoryStick,
+  Server,
+  RefreshCw,
   Loader2,
   Plus,
   Trash2,
@@ -27,13 +40,8 @@ import {
   type Domain,
   type EnvVar,
 } from "@/lib/api";
-import {
-  mockApps,
-  mockDomains,
-  mockEnv,
-  mockMetrics,
-} from "@/lib/mock";
 import { isDemoMode } from "@/lib/demo";
+import { useDemoData } from "@/lib/demo-data";
 import { useResource } from "@/lib/use-resource";
 import { cn, buildAppFqdn, slugify, BRAND_MAGENTA } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -58,8 +66,8 @@ type Tab = (typeof TABS)[number];
 
 type ActionKind = "deploy" | "stop" | "restart";
 
-// Placeholder log lines shown only in demo mode. There is no live log endpoint
-// wired yet, so production renders an explicit empty state instead.
+// Sample log lines shown only in demo mode (when the API is unreachable). In
+// production the Logs tab fetches the real tail from the API.
 const DEMO_LOGS = [
   "2026-06-17T09:01:02Z [info]  Starting machine 4d891 in iad",
   "2026-06-17T09:01:03Z [info]  Pulling image registry.vortex.v60ai.com/app:v42",
@@ -76,39 +84,59 @@ const DEMO_LOGS = [
 export default function AppDetailPage({
   params,
 }: {
-  params: Promise<{ uuid: string }>;
+  params: Promise<{ appId: string }>;
 }) {
-  // The route folder is named [uuid] for historical reasons; the param is the
-  // app id.
-  const { uuid: appId } = use(params);
+  const { appId } = use(params);
   const router = useRouter();
   const { activeOrgId, authedCall } = useAuth();
 
   // In demo mode show a mock app as the fallback; in production there is no
   // fabricated app, so a failed/absent fetch renders an explicit empty state.
-  const fallback = useMemo<App | null>(
-    () =>
-      isDemoMode() ? mockApps.find((a) => a.id === appId) ?? mockApps[0] : null,
-    [appId],
+  // The mock module loads lazily (demo mode only) so it never ships to prod.
+  const fallback = useDemoData<App | null>(
+    (m) => m.mockApps.find((a) => a.id === appId) ?? m.mockApps[0] ?? null,
+    null,
   );
 
-  const { data: fetched, loading } = useResource<App | null>(
+  const {
+    data: fetched,
+    loading,
+    refetch,
+  } = useResource<App | null>(
     activeOrgId
-      ? () => authedCall((token, on) => api.getApp(activeOrgId, appId, token, on))
+      ? () =>
+          authedCall((token, on) => api.getApp(activeOrgId, appId, token, on))
       : null,
     fallback,
-    [activeOrgId, appId],
+    [activeOrgId, appId, fallback],
   );
 
-  // Local override so action results (which return the updated App) reflect
-  // immediately without a refetch.
-  const [override, setOverride] = useState<App | null>(null);
-  const app = override ?? fetched;
+  // Brief optimistic status while an action is in flight; once the action
+  // resolves we refetch() so the displayed status reflects the backend rather
+  // than an optimistic guess that can desync.
+  const [optimisticStatus, setOptimisticStatus] = useState<
+    App["status"] | null
+  >(null);
+  const app = useMemo<App | null>(
+    () =>
+      fetched && optimisticStatus
+        ? { ...fetched, status: optimisticStatus }
+        : fetched,
+    [fetched, optimisticStatus],
+  );
 
   const [tab, setTab] = useState<Tab>("Overview");
   const [pending, setPending] = useState<ActionKind | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
+
+  // Optimistic status hint per action so the StatusDot reacts instantly.
+  const optimisticFor: Record<ActionKind, App["status"]> = {
+    deploy: "deploying",
+    stop: "stopped",
+    restart: "deploying",
+  };
 
   async function runAction(kind: ActionKind) {
     if (!activeOrgId) {
@@ -116,35 +144,36 @@ export default function AppDetailPage({
       return;
     }
     setPending(kind);
+    setOptimisticStatus(optimisticFor[kind]);
     setNotice(null);
     try {
-      const updated = await authedCall((token, on) =>
+      await authedCall((token, on) =>
         kind === "deploy"
           ? api.deployApp(activeOrgId, appId, token, on)
           : kind === "stop"
             ? api.stopApp(activeOrgId, appId, token, on)
             : api.restartApp(activeOrgId, appId, token, on),
       );
-      setOverride(updated);
-      setNotice(`${capitalize(kind)} requested — status: ${updated.status}`);
-    } catch {
-      setNotice(`${capitalize(kind)} failed — the API is unreachable.`);
+      // Reconcile with the backend instead of trusting the optimistic state.
+      refetch();
+    } catch (err) {
+      setOptimisticStatus(null);
+      setNotice(`${capitalize(kind)} failed — ${errorMessage(err)}`);
     } finally {
       setPending(null);
     }
   }
 
+  // Clear the optimistic status once a fresh fetch lands.
+  useEffect(() => {
+    if (optimisticStatus) setOptimisticStatus(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fetched]);
+
   async function onDelete() {
     if (!activeOrgId) {
       setNotice("Delete unavailable — no active organization.");
-      return;
-    }
-    if (
-      typeof window !== "undefined" &&
-      !window.confirm(
-        `Delete ${app?.name ?? "this app"}? This permanently removes the app and all of its machines.`,
-      )
-    ) {
+      setConfirmOpen(false);
       return;
     }
     setDeleting(true);
@@ -154,9 +183,10 @@ export default function AppDetailPage({
         api.deleteApp(activeOrgId, appId, token, on),
       );
       router.push("/dashboard/apps");
-    } catch {
-      setNotice("Delete failed — the API is unreachable.");
+    } catch (err) {
+      setNotice(`Delete failed — ${errorMessage(err)}`);
       setDeleting(false);
+      setConfirmOpen(false);
     }
   }
 
@@ -207,166 +237,351 @@ export default function AppDetailPage({
         <div className="flex items-center gap-2">
           <Button
             onClick={() => runAction("deploy")}
+            loading={pending === "deploy"}
             disabled={pending !== null}
           >
-            {pending === "deploy" ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Rocket className="h-4 w-4" />
-            )}
+            {pending !== "deploy" && <Rocket className="h-4 w-4" />}
             Deploy
           </Button>
           <Button
             variant="secondary"
             onClick={() => runAction("restart")}
+            loading={pending === "restart"}
             disabled={pending !== null}
           >
-            {pending === "restart" ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <RotateCw className="h-4 w-4" />
-            )}
+            {pending !== "restart" && <RotateCw className="h-4 w-4" />}
             Restart
           </Button>
           <Button
             variant="destructive"
             onClick={() => runAction("stop")}
+            loading={pending === "stop"}
             disabled={pending !== null}
           >
-            {pending === "stop" ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Square className="h-4 w-4" />
-            )}
+            {pending !== "stop" && <Square className="h-4 w-4" />}
             Stop
           </Button>
         </div>
       </div>
 
-      {notice && <Notice>{notice}</Notice>}
+      {notice && <Notice variant="error">{notice}</Notice>}
 
       {/* Tabs */}
       <Tabs tabs={TABS} active={tab} onChange={setTab} />
 
-      {loading && (
-        <p className="text-sm text-muted-foreground">Loading app…</p>
-      )}
+      {loading && <p className="text-sm text-muted-foreground">Loading app…</p>}
 
       {/* Tab content */}
       {app && tab === "Overview" && (
-        <div className="grid gap-4 sm:grid-cols-2">
-          <InfoCard title="Status">
-            <StatusDot status={app.status} showLabel />
-          </InfoCard>
-          <InfoCard title="Repository">
-            <span className="font-mono text-sm">{app.gitRepository}</span>
-          </InfoCard>
-          <InfoCard title="Branch">
-            <span className="inline-flex items-center gap-1.5 font-mono text-sm">
-              <GitBranch className="h-3.5 w-3.5 text-muted-foreground" />
-              {app.gitBranch}
-            </span>
-          </InfoCard>
-          <InfoCard title="Build pack">
-            <span className="inline-flex items-center gap-1.5 font-mono text-sm">
-              <Package className="h-3.5 w-3.5 text-muted-foreground" />
-              {app.buildPack}
-            </span>
-          </InfoCard>
-        </div>
+        <TabPanel tab="Overview">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <InfoCard title="Status">
+              <StatusDot status={app.status} showLabel />
+            </InfoCard>
+            <InfoCard title="Repository">
+              <span className="font-mono text-sm">{app.gitRepository}</span>
+            </InfoCard>
+            <InfoCard title="Branch">
+              <span className="inline-flex items-center gap-1.5 font-mono text-sm">
+                <GitBranch className="h-3.5 w-3.5 text-muted-foreground" />
+                {app.gitBranch}
+              </span>
+            </InfoCard>
+            <InfoCard title="Build pack">
+              <span className="inline-flex items-center gap-1.5 font-mono text-sm">
+                <Package className="h-3.5 w-3.5 text-muted-foreground" />
+                {app.buildPack}
+              </span>
+            </InfoCard>
+            <InfoCard title="Requested CPU">
+              <span className="inline-flex items-center gap-1.5 font-mono text-sm">
+                <Cpu className="h-3.5 w-3.5 text-muted-foreground" />
+                {app.cpu} vCPU
+              </span>
+            </InfoCard>
+            <InfoCard title="Requested memory">
+              <span className="inline-flex items-center gap-1.5 font-mono text-sm">
+                <MemoryStick className="h-3.5 w-3.5 text-muted-foreground" />
+                {formatMemory(app.memoryMb)}
+              </span>
+            </InfoCard>
+            {app.host && (
+              <InfoCard title="Host">
+                <span className="inline-flex items-center gap-1.5 font-mono text-sm">
+                  <Globe className="h-3.5 w-3.5 text-muted-foreground" />
+                  {app.host}
+                </span>
+              </InfoCard>
+            )}
+            {app.namespace && (
+              <InfoCard title="Namespace">
+                <span className="inline-flex items-center gap-1.5 font-mono text-sm">
+                  <Server className="h-3.5 w-3.5 text-muted-foreground" />
+                  {app.namespace}
+                </span>
+              </InfoCard>
+            )}
+          </div>
+        </TabPanel>
       )}
 
-      {app && tab === "Logs" && <LogsTab appName={app.name} />}
+      {app && tab === "Logs" && (
+        <TabPanel tab="Logs">
+          <LogsTab appId={appId} appName={app.name} />
+        </TabPanel>
+      )}
 
-      {app && tab === "Metrics" && <MetricsTab appId={appId} />}
+      {app && tab === "Metrics" && (
+        <TabPanel tab="Metrics">
+          <MetricsTab appId={appId} />
+        </TabPanel>
+      )}
 
-      {app && tab === "Environment" && <EnvironmentTab appId={appId} />}
+      {app && tab === "Environment" && (
+        <TabPanel tab="Environment">
+          <EnvironmentTab appId={appId} />
+        </TabPanel>
+      )}
 
       {app && tab === "Domains" && (
-        <DomainsTab appId={appId} appName={app.name} />
+        <TabPanel tab="Domains">
+          <DomainsTab appId={appId} appName={app.name} />
+        </TabPanel>
       )}
 
       {app && tab === "Settings" && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Danger zone</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="flex items-center justify-between rounded-lg border border-border p-4">
-              <div>
-                <p className="text-sm font-medium">Transfer app</p>
-                <p className="text-sm text-muted-foreground">
-                  Move this app to another organization.
-                </p>
+        <TabPanel tab="Settings">
+          <Card>
+            <CardHeader>
+              <CardTitle>Danger zone</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex items-center justify-between rounded-lg border border-border p-4">
+                <div>
+                  <p className="text-sm font-medium">Transfer app</p>
+                  <p className="text-sm text-muted-foreground">
+                    Move this app to another organization.
+                  </p>
+                </div>
+                {/* TODO(backend): no app-transfer endpoint exists yet; disabled
+                  until the API exposes one. */}
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled
+                  title="App transfer is not available yet"
+                >
+                  Transfer
+                </Button>
               </div>
-              <Button variant="secondary" size="sm">
-                Transfer
-              </Button>
-            </div>
-            <div className="flex items-center justify-between rounded-lg border border-destructive/40 p-4">
-              <div>
-                <p className="text-sm font-medium text-destructive">
-                  Delete app
-                </p>
-                <p className="text-sm text-muted-foreground">
-                  Permanently remove this app and all of its machines.
-                </p>
+              <div className="flex items-center justify-between rounded-lg border border-destructive/40 p-4">
+                <div>
+                  <p className="text-sm font-medium text-destructive">
+                    Delete app
+                  </p>
+                  <p className="text-sm text-muted-foreground">
+                    Permanently remove this app and all of its machines.
+                  </p>
+                </div>
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  onClick={() => setConfirmOpen(true)}
+                  loading={deleting}
+                >
+                  Delete
+                </Button>
               </div>
-              <Button
-                variant="destructive"
-                size="sm"
-                onClick={onDelete}
-                disabled={deleting}
-              >
-                {deleting && <Loader2 className="h-4 w-4 animate-spin" />}
-                Delete
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
+            </CardContent>
+          </Card>
+        </TabPanel>
+      )}
+
+      {confirmOpen && (
+        <ConfirmDialog
+          title="Delete app?"
+          message={`This permanently removes ${app?.name ?? "this app"} and all of its machines. This action cannot be undone.`}
+          confirmLabel="Delete app"
+          loading={deleting}
+          onConfirm={onDelete}
+          onCancel={() => setConfirmOpen(false)}
+        />
       )}
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Logs tab — no live log endpoint is wired yet, so this shows demo lines in
-// demo mode and an explicit placeholder otherwise (never invented as live).
+// Confirm dialog — accessible (role="alertdialog", focus trap, Escape to
+// cancel). Implemented inline to avoid window.confirm.
 // ---------------------------------------------------------------------------
 
-function LogsTab({ appName }: { appName: string }) {
-  if (!isDemoMode()) {
-    return (
-      <Card className="flex flex-col items-center justify-center py-16 text-center">
-        <p className="text-sm text-muted-foreground">
-          Live log streaming isn&apos;t available yet for this app.
+function ConfirmDialog({
+  title,
+  message,
+  confirmLabel,
+  loading,
+  onConfirm,
+  onCancel,
+}: {
+  title: string;
+  message: string;
+  confirmLabel: string;
+  loading: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const titleId = useId();
+  const descId = useId();
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const confirmRef = useRef<HTMLButtonElement | null>(null);
+
+  // Focus the destructive action on open so keyboard users land inside.
+  useEffect(() => {
+    confirmRef.current?.focus();
+  }, []);
+
+  const onKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLDivElement>) => {
+      if (e.key === "Escape" && !loading) {
+        e.preventDefault();
+        onCancel();
+        return;
+      }
+      // Trap Tab focus within the dialog.
+      if (e.key === "Tab") {
+        const focusable = dialogRef.current?.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), [href], input, [tabindex]:not([tabindex="-1"])',
+        );
+        if (!focusable || focusable.length === 0) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        const activeEl = document.activeElement;
+        if (e.shiftKey && activeEl === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && activeEl === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    },
+    [loading, onCancel],
+  );
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget && !loading) onCancel();
+      }}
+    >
+      <div
+        ref={dialogRef}
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={descId}
+        onKeyDown={onKeyDown}
+        className="w-full max-w-md rounded-lg border border-border bg-card p-6 shadow-lg"
+      >
+        <h2 id={titleId} className="text-lg font-semibold text-destructive">
+          {title}
+        </h2>
+        <p id={descId} className="mt-2 text-sm text-muted-foreground">
+          {message}
         </p>
-      </Card>
-    );
-  }
+        <div className="mt-6 flex justify-end gap-2">
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={onCancel}
+            disabled={loading}
+          >
+            Cancel
+          </Button>
+          <Button
+            ref={confirmRef}
+            variant="destructive"
+            size="sm"
+            onClick={onConfirm}
+            loading={loading}
+          >
+            {confirmLabel}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Logs tab — fetches the current log tail from the API. In demo mode (no
+// reachable API) it falls back to sample lines so the layout is reviewable.
+// ---------------------------------------------------------------------------
+
+function LogsTab({ appId, appName }: { appId: string; appName: string }) {
+  const { activeOrgId, authedCall } = useAuth();
+  const demo = isDemoMode();
+
+  const { data, loading, error, refetch } = useResource<string>(
+    activeOrgId
+      ? () =>
+          authedCall((token, on) => api.getLogs(activeOrgId, appId, token, on))
+      : null,
+    demo ? DEMO_LOGS.join("\n") : "",
+    [activeOrgId, appId],
+  );
+
+  const lines = data ? data.split("\n") : [];
 
   return (
     <Card className="overflow-hidden">
-      <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
+      <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-2.5">
         <span className="font-mono text-xs text-muted-foreground">
-          sample tail — {appName}
+          log tail — {appName}
         </span>
-        <Badge variant="outline">Demo</Badge>
+        <div className="flex items-center gap-2">
+          {demo && data === DEMO_LOGS.join("\n") && (
+            <Badge variant="outline">Demo</Badge>
+          )}
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => refetch()}
+            loading={loading}
+            aria-label="Refresh logs"
+          >
+            {!loading && <RefreshCw className="h-3.5 w-3.5" />}
+            Refresh
+          </Button>
+        </div>
       </div>
-      <div className="scrollbar-thin max-h-[420px] overflow-y-auto bg-background p-4 font-mono text-xs leading-relaxed">
-        {DEMO_LOGS.map((line, i) => {
-          const level = line.includes("[warn]")
-            ? "text-warning"
-            : line.includes("[error]")
-              ? "text-destructive"
-              : "text-muted-foreground";
-          return (
-            <div key={i} className={cn("whitespace-pre-wrap", level)}>
-              {line}
-            </div>
-          );
-        })}
-      </div>
+      {error && !demo && (
+        <Notice variant="error" className="m-4">
+          Could not load logs — the API is unreachable.
+        </Notice>
+      )}
+      {lines.length === 0 ? (
+        <p className="px-4 py-8 text-center text-sm text-muted-foreground">
+          {loading ? "Loading logs…" : "No log output yet for this app."}
+        </p>
+      ) : (
+        <div className="scrollbar-thin max-h-[420px] overflow-y-auto bg-background p-4 font-mono text-xs leading-relaxed">
+          {lines.map((line, i) => {
+            const level = line.includes("[warn]")
+              ? "text-warning"
+              : line.includes("[error]")
+                ? "text-destructive"
+                : "text-muted-foreground";
+            return (
+              <div key={i} className={cn("whitespace-pre-wrap", level)}>
+                {line}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </Card>
   );
 }
@@ -381,6 +596,9 @@ function MetricsTab({ appId }: { appId: string }) {
   const demo = isDemoMode();
   const empty: AppMetrics = { cpu: [], memory: [], requests: [] };
 
+  // Demo fallback loads lazily (demo mode only); never shipped to prod.
+  const demoMetrics = useDemoData((m) => m.mockMetrics, empty);
+
   const { data } = useResource<AppMetrics>(
     activeOrgId
       ? () =>
@@ -388,17 +606,17 @@ function MetricsTab({ appId }: { appId: string }) {
             api.getMetrics(activeOrgId, appId, token, on),
           )
       : null,
-    demo ? mockMetrics : empty,
-    [activeOrgId, appId],
+    demoMetrics,
+    [activeOrgId, appId, demoMetrics],
   );
 
   // In demo mode, synthesize any empty series so the charts render; in
   // production, empty series stay empty (no invented data).
   const metrics: AppMetrics = demo
     ? {
-        cpu: data.cpu.length ? data.cpu : mockMetrics.cpu,
-        memory: data.memory.length ? data.memory : mockMetrics.memory,
-        requests: data.requests.length ? data.requests : mockMetrics.requests,
+        cpu: data.cpu.length ? data.cpu : demoMetrics.cpu,
+        memory: data.memory.length ? data.memory : demoMetrics.memory,
+        requests: data.requests.length ? data.requests : demoMetrics.requests,
       }
     : data;
 
@@ -447,12 +665,16 @@ function MetricsTab({ appId }: { appId: string }) {
 function EnvironmentTab({ appId }: { appId: string }) {
   const { activeOrgId, authedCall } = useAuth();
 
+  // Demo fallback loads lazily (demo mode only); never shipped to prod.
+  const demoEnv = useDemoData((m) => m.mockEnv, [] as EnvVar[]);
+
   const { data, refetch } = useResource(
     activeOrgId
-      ? () => authedCall((token, on) => api.listEnv(activeOrgId, appId, token, on))
+      ? () =>
+          authedCall((token, on) => api.listEnv(activeOrgId, appId, token, on))
       : null,
-    { data: isDemoMode() ? mockEnv : [] },
-    [activeOrgId, appId],
+    { data: demoEnv },
+    [activeOrgId, appId, demoEnv],
   );
 
   const vars = data.data;
@@ -525,15 +747,14 @@ function EnvironmentTab({ appId }: { appId: string }) {
               {vars.map((v: EnvVar) => {
                 const show = revealed[v.key];
                 return (
-                  <li
-                    key={v.key}
-                    className="flex items-center gap-4 px-6 py-3"
-                  >
+                  <li key={v.key} className="flex items-center gap-4 px-6 py-3">
                     <span className="w-[200px] shrink-0 truncate font-mono text-sm text-foreground">
                       {v.key}
                     </span>
                     <span className="min-w-0 flex-1 truncate font-mono text-sm text-muted-foreground">
-                      {show ? v.value : "•".repeat(Math.min(24, v.value.length || 8))}
+                      {show
+                        ? v.value
+                        : "•".repeat(Math.min(24, v.value.length || 8))}
                     </span>
                     <Button
                       variant="ghost"
@@ -628,6 +849,9 @@ function DomainsTab({ appId, appName }: { appId: string; appName: string }) {
     orgs.find((o) => o.id === activeOrgId)?.slug ?? "personal",
   );
 
+  // Demo fallback loads lazily (demo mode only); never shipped to prod.
+  const demoDomains = useDemoData((m) => m.mockDomains, [] as Domain[]);
+
   const { data, refetch } = useResource(
     activeOrgId
       ? () =>
@@ -635,8 +859,8 @@ function DomainsTab({ appId, appName }: { appId: string; appName: string }) {
             api.listDomains(activeOrgId, appId, token, on),
           )
       : null,
-    { data: isDemoMode() ? mockDomains : [] },
-    [activeOrgId, appId],
+    { data: demoDomains },
+    [activeOrgId, appId, demoDomains],
   );
 
   const domains = data.data;
@@ -801,6 +1025,23 @@ function DomainsTab({ appId, appName }: { appId: string; appName: string }) {
 // Shared
 // ---------------------------------------------------------------------------
 
+// Wraps each tab's content as an ARIA tabpanel. The Tabs primitive owns the
+// tab `id`s (generated via useId), so we expose a self-describing panel
+// (role + label + focusable) rather than referencing ids we cannot read here.
+function TabPanel({ tab, children }: { tab: Tab; children: React.ReactNode }) {
+  return (
+    <div
+      role="tabpanel"
+      id={`app-tabpanel-${tab}`}
+      aria-label={tab}
+      tabIndex={0}
+      className="focus-visible:outline-none"
+    >
+      {children}
+    </div>
+  );
+}
+
 function InfoCard({
   title,
   children,
@@ -848,4 +1089,15 @@ function last(data: number[]): number {
 
 function capitalize(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+function formatMemory(mb: number): string {
+  if (mb >= 1024 && mb % 1024 === 0) return `${mb / 1024} GB`;
+  if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
+  return `${mb} MB`;
+}
+
+function errorMessage(err: unknown): string {
+  if (err instanceof Error && err.message) return err.message;
+  return "the API is unreachable.";
 }

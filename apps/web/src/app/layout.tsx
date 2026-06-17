@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Inter, JetBrains_Mono } from "next/font/google";
 import { AuthProvider } from "@/lib/auth";
 import "./globals.css";
@@ -21,13 +21,21 @@ export const metadata: Metadata = {
     "Vortex is a global application platform. Ship containers to the edge, scale instantly, and run managed databases with zero-config TLS.",
 };
 
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+};
+
 export default function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className={`dark ${inter.variable} ${jetbrainsMono.variable}`}>
+    <html
+      lang="en"
+      className={`dark ${inter.variable} ${jetbrainsMono.variable}`}
+    >
       <body className="min-h-screen bg-background font-sans text-foreground antialiased">
         <AuthProvider>{children}</AuthProvider>
       </body>

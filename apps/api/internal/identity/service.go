@@ -118,7 +118,7 @@ func (s *Service) Signup(ctx context.Context, email, name, password string) (*Au
 		return nil, err
 	}
 
-	return s.issue(user)
+	return s.issue(ctx, user)
 }
 
 // Login authenticates by email + password.
@@ -140,20 +140,53 @@ func (s *Service) Login(ctx context.Context, email, password string) (*AuthResul
 			return nil, err
 		}
 	}
-	return s.issue(user)
+	return s.issue(ctx, user)
 }
 
-// Refresh exchanges a valid refresh token for a fresh token pair.
+// Refresh exchanges a valid refresh token for a fresh token pair, rotating the
+// refresh token: the presented token's jti must reference a stored, non-revoked
+// record; on success the old record is revoked and a new pair issued (with a new
+// stored record). Reuse of a revoked or unknown jti is rejected as invalid
+// credentials (a 401 at the HTTP layer).
 func (s *Service) Refresh(ctx context.Context, refreshToken string) (*AuthResult, error) {
 	claims, err := s.tokens.Verify(refreshToken, auth.RefreshToken)
 	if err != nil {
+		return nil, ErrInvalidCredentials
+	}
+	if claims.ID == "" {
+		return nil, ErrInvalidCredentials
+	}
+	rec, err := s.store.GetRefreshToken(ctx, claims.ID)
+	if err != nil || rec.Revoked {
 		return nil, ErrInvalidCredentials
 	}
 	user, err := s.store.GetUserByID(ctx, claims.Subject)
 	if err != nil {
 		return nil, ErrInvalidCredentials
 	}
-	return s.issue(user)
+	// Rotate: revoke the presented token before issuing the new pair.
+	if err := s.store.RevokeRefreshToken(ctx, claims.ID); err != nil {
+		return nil, err
+	}
+	return s.issue(ctx, user)
+}
+
+// Logout revokes the refresh token identified by the given refresh-token string
+// (typically read from the caller's cookie). A missing/invalid token is not an
+// error — logout is idempotent and best-effort.
+func (s *Service) Logout(ctx context.Context, refreshToken string) error {
+	if refreshToken == "" {
+		return nil
+	}
+	// A malformed/expired token (or one without a jti) has nothing to revoke;
+	// logout stays best-effort and succeeds so the caller's cookies are cleared.
+	claims, verifyErr := s.tokens.Verify(refreshToken, auth.RefreshToken)
+	if verifyErr == nil && claims.ID != "" {
+		if err := s.store.RevokeRefreshToken(ctx, claims.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+	}
+	return nil
 }
 
 // GetUser returns a user by ID.
@@ -407,13 +440,19 @@ func newToken() string {
 	return hex.EncodeToString(b)
 }
 
-func (s *Service) issue(user *domain.User) (*AuthResult, error) {
+func (s *Service) issue(ctx context.Context, user *domain.User) (*AuthResult, error) {
 	access, err := s.tokens.Issue(user.ID, auth.AccessToken)
 	if err != nil {
 		return nil, err
 	}
-	refresh, err := s.tokens.Issue(user.ID, auth.RefreshToken)
+	refresh, jti, err := s.tokens.IssueWithID(user.ID, auth.RefreshToken)
 	if err != nil {
+		return nil, err
+	}
+	// Persist the refresh token's jti so it can be rotated/revoked. Without a
+	// matching, non-revoked record a refresh token is not honored.
+	rec := &domain.RefreshToken{ID: jti, UserID: user.ID, CreatedAt: s.now()}
+	if err := s.store.CreateRefreshToken(ctx, rec); err != nil {
 		return nil, err
 	}
 	return &AuthResult{User: user, Access: access, Refresh: refresh}, nil
