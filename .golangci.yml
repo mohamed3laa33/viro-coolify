@@ -1,0 +1,30 @@
+version: "2"
+
+# Gate focuses on real signal: security (gosec), duplicate code (dupl), bugs &
+# bad practices (staticcheck/govet/gocritic/bodyclose/nilerr), unchecked errors
+# (errcheck) and unused code. Pedantic style (revive) is intentionally omitted.
+linters:
+  enable:
+    - gosec
+    - dupl
+    - gocritic
+    - misspell
+    - unconvert
+    - bodyclose
+    - nilerr
+  settings:
+    dupl:
+      # Parallel resource-CRUD handlers (plans/templates) are idiomatic, not
+      # copy-paste bloat; this catches larger genuine duplication.
+      threshold: 260
+    gocritic:
+      disabled-checks:
+        - ifElseChain
+        - singleCaseSwitch
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - dupl
+          - gosec
+          - errcheck

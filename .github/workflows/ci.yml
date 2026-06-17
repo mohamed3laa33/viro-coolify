@@ -21,10 +21,17 @@ jobs:
           cache-dependency-path: apps/api/go.sum
       - name: Vet
         run: go vet ./...
-      - name: Test
-        run: go test -race -count=1 ./...
+      - name: Test (race + coverage)
+        run: go test -race -count=1 -coverprofile=coverage.out ./...
       - name: Build
         run: go build ./...
+      - name: Lint (golangci-lint — gosec SAST, dupl, gocritic, staticcheck)
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v2.12.2
+          working-directory: apps/api
+      - name: Vulnerability & deprecation scan (govulncheck)
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
   web:
     name: Web (Next.js)
@@ -47,6 +54,8 @@ jobs:
         run: npm run build
         env:
           NEXT_TELEMETRY_DISABLED: "1"
+      - name: Dependency audit (npm)
+        run: npm audit --audit-level=high --omit=dev
 
   security:
     name: Security (Trivy)
@@ -69,4 +78,20 @@ jobs:
           severity: HIGH,CRITICAL
           exit-code: "1"
           skip-dirs: deploy/charts/common-chart
+      - name: Gitleaks — secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  sast:
+    name: SAST (Semgrep)
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@v4
+      - name: Semgrep scan
+        run: semgrep ci
+        env:
+          SEMGREP_RULES: "p/default p/security-audit p/secrets p/golang p/typescript"
 

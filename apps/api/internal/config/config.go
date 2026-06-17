@@ -11,7 +11,7 @@ import (
 )
 
 // defaultDevJWTSecret is the insecure development fallback; it must never be used in production.
-const defaultDevJWTSecret = "dev-insecure-secret-change-me"
+const defaultDevJWTSecret = "dev-insecure-secret-change-me" //nolint:gosec // G101: dev placeholder, rejected in production (see Load)
 
 // Config holds all runtime configuration for the Vortex control-plane API.
 type Config struct {

@@ -1,0 +1,26 @@
+title = "Vortex gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Build artifacts, reference clones, and obvious non-secret placeholders"
+paths = [
+  '''_ref-.*''',
+  '''_clone/.*''',
+  '''.*/node_modules/.*''',
+  '''.*\.next/.*''',
+  '''apps/web/src/lib/mock\.ts''',
+]
+regexes = [
+  '''change-me(-in-production)?''',
+  '''dev-insecure-secret-change-me''',
+  '''postgres://viro:viro@''',
+  '''postgres://vortex:change-me''',
+  '''sk_test_xxx''',
+  '''whsec_xxx''',
+  '''dop_v1_x+''',
+  '''dop_v1_xxx''',
+  '''inv_tok_[a-z0-9_]+''',
+  '''vortex\.v60ai\.com''',
+]

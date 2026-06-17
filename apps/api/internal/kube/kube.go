@@ -243,9 +243,9 @@ func (b *KubeBackend) Apply(ctx context.Context, w Workload) (string, string, er
 	if err != nil {
 		return "", "", fmt.Errorf("kube: temp values: %w", err)
 	}
-	defer os.Remove(f.Name())
+	defer func() { _ = os.Remove(f.Name()) }()
 	if _, err := f.Write(out); err != nil {
-		f.Close()
+		_ = f.Close()
 		return "", "", fmt.Errorf("kube: write values: %w", err)
 	}
 	if err := f.Close(); err != nil {

@@ -103,7 +103,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	if err != nil {
 		return fmt.Errorf("execute request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Bound the response we buffer so a misbehaving upstream cannot OOM the process.
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
