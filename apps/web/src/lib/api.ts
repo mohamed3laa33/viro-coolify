@@ -103,6 +103,63 @@ export interface ListResponse<T> {
   data: T[];
 }
 
+export interface Project {
+  id: string;
+  name: string;
+  slug: string;
+  isDefault: boolean;
+  createdAt: string;
+}
+
+export type MemberRole = "owner" | "admin" | "member";
+
+export interface Member {
+  userId: string;
+  email: string;
+  name: string;
+  role: MemberRole;
+}
+
+export type InvitationStatus = "pending" | "accepted" | "revoked" | "expired";
+
+export interface Invitation {
+  id: string;
+  email: string;
+  role: MemberRole;
+  projectId: string | null;
+  token: string;
+  status: InvitationStatus;
+  createdAt: string;
+}
+
+export interface InviteInput {
+  email: string;
+  role: MemberRole;
+  projectId?: string;
+}
+
+export interface EnvVar {
+  key: string;
+  value: string;
+}
+
+export interface Domain {
+  id: string;
+  domain: string;
+  verified: boolean;
+}
+
+export interface MetricPoint {
+  t: string;
+  v: number;
+}
+
+export interface AppMetrics {
+  cpu: MetricPoint[];
+  memory: MetricPoint[];
+  requests: MetricPoint[];
+}
+
 export interface CreateAppInput {
   name: string;
   gitRepository: string;
@@ -113,6 +170,10 @@ export interface CreateAppInput {
 export interface CreateDatabaseInput {
   name: string;
   engine: string;
+}
+
+export interface CreateProjectInput {
+  name: string;
 }
 
 export interface SignupInput {
@@ -402,6 +463,190 @@ export const api = {
     return request<Database>(`/v1/orgs/${orgId}/databases`, {
       method: "POST",
       body: input,
+      token,
+      onUnauthorized,
+    });
+  },
+
+  // Projects (org-scoped)
+  listProjects(
+    orgId: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+  ): Promise<ListResponse<Project>> {
+    return request<ListResponse<Project>>(`/v1/orgs/${orgId}/projects`, {
+      token,
+      onUnauthorized,
+    });
+  },
+
+  createProject(
+    orgId: string,
+    name: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+  ): Promise<Project> {
+    return request<Project>(`/v1/orgs/${orgId}/projects`, {
+      method: "POST",
+      body: { name },
+      token,
+      onUnauthorized,
+    });
+  },
+
+  listProjectApps(
+    orgId: string,
+    projectId: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+  ): Promise<ListResponse<App>> {
+    return request<ListResponse<App>>(
+      `/v1/orgs/${orgId}/projects/${projectId}/apps`,
+      { token, onUnauthorized },
+    );
+  },
+
+  // Members (org-scoped)
+  listMembers(
+    orgId: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+  ): Promise<ListResponse<Member>> {
+    return request<ListResponse<Member>>(`/v1/orgs/${orgId}/members`, {
+      token,
+      onUnauthorized,
+    });
+  },
+
+  // Invitations
+  listInvitations(
+    orgId: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+  ): Promise<ListResponse<Invitation>> {
+    return request<ListResponse<Invitation>>(
+      `/v1/orgs/${orgId}/invitations`,
+      { token, onUnauthorized },
+    );
+  },
+
+  invite(
+    orgId: string,
+    input: InviteInput,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+  ): Promise<Invitation> {
+    return request<Invitation>(`/v1/orgs/${orgId}/invitations`, {
+      method: "POST",
+      body: input,
+      token,
+      onUnauthorized,
+    });
+  },
+
+  acceptInvitation(
+    inviteToken: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+  ): Promise<Invitation> {
+    return request<Invitation>(`/v1/invitations/accept`, {
+      method: "POST",
+      body: { token: inviteToken },
+      token,
+      onUnauthorized,
+    });
+  },
+
+  // App environment variables (org-scoped)
+  listEnv(
+    orgId: string,
+    appId: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+  ): Promise<ListResponse<EnvVar>> {
+    return request<ListResponse<EnvVar>>(
+      `/v1/orgs/${orgId}/apps/${appId}/env`,
+      { token, onUnauthorized },
+    );
+  },
+
+  setEnv(
+    orgId: string,
+    appId: string,
+    input: EnvVar,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+  ): Promise<EnvVar> {
+    return request<EnvVar>(`/v1/orgs/${orgId}/apps/${appId}/env`, {
+      method: "PUT",
+      body: input,
+      token,
+      onUnauthorized,
+    });
+  },
+
+  deleteEnv(
+    orgId: string,
+    appId: string,
+    key: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+  ): Promise<void> {
+    return request<void>(
+      `/v1/orgs/${orgId}/apps/${appId}/env/${encodeURIComponent(key)}`,
+      { method: "DELETE", token, onUnauthorized },
+    );
+  },
+
+  // App domains (org-scoped)
+  listDomains(
+    orgId: string,
+    appId: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+  ): Promise<ListResponse<Domain>> {
+    return request<ListResponse<Domain>>(
+      `/v1/orgs/${orgId}/apps/${appId}/domains`,
+      { token, onUnauthorized },
+    );
+  },
+
+  addDomain(
+    orgId: string,
+    appId: string,
+    domain: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+  ): Promise<Domain> {
+    return request<Domain>(`/v1/orgs/${orgId}/apps/${appId}/domains`, {
+      method: "POST",
+      body: { domain },
+      token,
+      onUnauthorized,
+    });
+  },
+
+  deleteDomain(
+    orgId: string,
+    appId: string,
+    domainId: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+  ): Promise<void> {
+    return request<void>(
+      `/v1/orgs/${orgId}/apps/${appId}/domains/${domainId}`,
+      { method: "DELETE", token, onUnauthorized },
+    );
+  },
+
+  // App metrics (org-scoped)
+  getMetrics(
+    orgId: string,
+    appId: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+  ): Promise<AppMetrics> {
+    return request<AppMetrics>(`/v1/orgs/${orgId}/apps/${appId}/metrics`, {
       token,
       onUnauthorized,
     });

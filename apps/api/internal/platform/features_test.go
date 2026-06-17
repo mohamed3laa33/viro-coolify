@@ -1,0 +1,210 @@
+package platform
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/domain"
+)
+
+func TestQuotaEnforcementOverCPU(t *testing.T) {
+	svc := newSvc()
+	ctx := context.Background()
+	// Hobby default: maxCPU 0.5. Request 1.0 vCPU -> over quota.
+	_, err := svc.CreateApp(ctx, "org-q", CreateAppInput{Name: "big", CPU: 1.0})
+	if !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("expected ErrQuotaExceeded, got %v", err)
+	}
+}
+
+func TestQuotaEnforcementOverMemory(t *testing.T) {
+	svc := newSvc()
+	ctx := context.Background()
+	_, err := svc.CreateApp(ctx, "org-q", CreateAppInput{Name: "big", MemoryMB: 4096})
+	if !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("expected ErrQuotaExceeded, got %v", err)
+	}
+}
+
+func TestQuotaCountLimit(t *testing.T) {
+	svc := newSvc()
+	ctx := context.Background()
+	// Hobby maxApps 3: create 3 ok, 4th over quota.
+	for i := 0; i < 3; i++ {
+		if _, err := svc.CreateApp(ctx, "org-c", CreateAppInput{Name: "a"}); err != nil {
+			t.Fatalf("create %d: %v", i, err)
+		}
+	}
+	if _, err := svc.CreateApp(ctx, "org-c", CreateAppInput{Name: "a"}); !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("4th create: expected ErrQuotaExceeded, got %v", err)
+	}
+}
+
+func TestQuotaAllowsWithinPlan(t *testing.T) {
+	svc := newSvc()
+	ctx := context.Background()
+	// Subscribe org to scale (maxCPU 2, maxMemoryMB 4096).
+	_ = svc.store.UpsertSubscription(ctx, &domain.Subscription{OrgID: "org-s", PlanID: "scale", Status: domain.SubActive})
+	app, err := svc.CreateApp(ctx, "org-s", CreateAppInput{Name: "big", CPU: 2, MemoryMB: 4096})
+	if err != nil {
+		t.Fatalf("create within scale: %v", err)
+	}
+	if app.CPU != 2 || app.MemoryMB != 4096 {
+		t.Fatalf("unexpected resources: %+v", app)
+	}
+}
+
+func TestCreateAppDefaultsResources(t *testing.T) {
+	svc := newSvc()
+	app, err := svc.CreateApp(context.Background(), "org-d", CreateAppInput{Name: "web"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if app.CPU != defaultCPU || app.MemoryMB != defaultMemoryMB {
+		t.Fatalf("defaults not applied: %+v", app)
+	}
+}
+
+func TestServiceLifecycleAndIsolation(t *testing.T) {
+	svc := newSvc()
+	ctx := context.Background()
+
+	s1, err := svc.CreateService(ctx, "org-1", "proj-1", CreateServiceInput{TemplateKey: "wordpress", Name: "blog"})
+	if err != nil {
+		t.Fatalf("create service: %v", err)
+	}
+	if s1.Status != "created" || s1.Template != "wordpress" {
+		t.Fatalf("unexpected service: %+v", s1)
+	}
+
+	// Database template.
+	if _, err := svc.CreateService(ctx, "org-1", "proj-1", CreateServiceInput{TemplateKey: "postgresql"}); err != nil {
+		t.Fatalf("create db service: %v", err)
+	}
+
+	list, _ := svc.ListServices(ctx, "org-1")
+	if len(list) != 2 {
+		t.Fatalf("expected 2 services, got %d", len(list))
+	}
+
+	dep, err := svc.DeployService(ctx, "org-1", s1.ID)
+	if err != nil || dep.Status != "deploying" {
+		t.Fatalf("deploy: %v status=%q", err, dep.Status)
+	}
+	stp, _ := svc.StopService(ctx, "org-1", s1.ID)
+	if stp.Status != "stopped" {
+		t.Fatalf("stop status=%q", stp.Status)
+	}
+
+	// Tenant isolation.
+	if _, err := svc.GetService(ctx, "org-2", s1.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-tenant get: %v", err)
+	}
+	if _, err := svc.DeployService(ctx, "org-2", s1.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-tenant deploy: %v", err)
+	}
+
+	if err := svc.DeleteService(ctx, "org-1", s1.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := svc.GetService(ctx, "org-1", s1.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("after delete: %v", err)
+	}
+}
+
+func TestServiceInvalidTemplate(t *testing.T) {
+	svc := newSvc()
+	if _, err := svc.CreateService(context.Background(), "org-1", "p", CreateServiceInput{TemplateKey: "nope"}); !errors.Is(err, ErrInvalidTemplate) {
+		t.Fatalf("expected ErrInvalidTemplate, got %v", err)
+	}
+}
+
+func TestServiceQuotaShareWithApps(t *testing.T) {
+	svc := newSvc()
+	ctx := context.Background()
+	// Hobby maxApps 3: 2 apps + 1 service = 3, then a 4th workload fails.
+	_, _ = svc.CreateApp(ctx, "org-x", CreateAppInput{Name: "a"})
+	_, _ = svc.CreateApp(ctx, "org-x", CreateAppInput{Name: "b"})
+	if _, err := svc.CreateService(ctx, "org-x", "p", CreateServiceInput{TemplateKey: "ghost"}); err != nil {
+		t.Fatalf("3rd workload: %v", err)
+	}
+	if _, err := svc.CreateService(ctx, "org-x", "p", CreateServiceInput{TemplateKey: "ghost"}); !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("4th workload: expected ErrQuotaExceeded, got %v", err)
+	}
+}
+
+func TestEnvSetGetDelete(t *testing.T) {
+	svc := newSvc()
+	ctx := context.Background()
+	app, _ := svc.CreateApp(ctx, "org-1", CreateAppInput{Name: "web"})
+
+	if _, err := svc.SetEnv(ctx, "org-1", app.ID, "FOO", "bar"); err != nil {
+		t.Fatalf("set env: %v", err)
+	}
+	if _, err := svc.SetEnv(ctx, "org-1", app.ID, "BAZ", "qux"); err != nil {
+		t.Fatalf("set env 2: %v", err)
+	}
+	env, _ := svc.ListEnv(ctx, "org-1", app.ID)
+	if len(env) != 2 || env[0].Key != "BAZ" || env[1].Key != "FOO" {
+		t.Fatalf("unexpected env (want sorted): %+v", env)
+	}
+	if err := svc.DeleteEnv(ctx, "org-1", app.ID, "FOO"); err != nil {
+		t.Fatalf("delete env: %v", err)
+	}
+	env, _ = svc.ListEnv(ctx, "org-1", app.ID)
+	if len(env) != 1 || env[0].Key != "BAZ" {
+		t.Fatalf("after delete: %+v", env)
+	}
+
+	// Tenant isolation.
+	if _, err := svc.SetEnv(ctx, "org-2", app.ID, "X", "y"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-tenant env: %v", err)
+	}
+}
+
+func TestDomainsAddListDelete(t *testing.T) {
+	svc := newSvc()
+	ctx := context.Background()
+	app, _ := svc.CreateApp(ctx, "org-1", CreateAppInput{Name: "web"})
+
+	d, err := svc.AddDomain(ctx, "org-1", app.ID, "example.com")
+	if err != nil {
+		t.Fatalf("add domain: %v", err)
+	}
+	if d.Domain != "example.com" || d.Verified {
+		t.Fatalf("unexpected domain: %+v", d)
+	}
+	list, _ := svc.ListDomains(ctx, "org-1", app.ID)
+	if len(list) != 1 {
+		t.Fatalf("expected 1 domain, got %d", len(list))
+	}
+	if err := svc.DeleteDomain(ctx, "org-1", app.ID, d.ID); err != nil {
+		t.Fatalf("delete domain: %v", err)
+	}
+	list, _ = svc.ListDomains(ctx, "org-1", app.ID)
+	if len(list) != 0 {
+		t.Fatalf("expected 0 domains, got %d", len(list))
+	}
+}
+
+func TestMetricsShape(t *testing.T) {
+	svc := newSvc()
+	ctx := context.Background()
+	app, _ := svc.CreateApp(ctx, "org-1", CreateAppInput{Name: "web"})
+
+	m, err := svc.AppMetrics(ctx, "org-1", app.ID)
+	if err != nil {
+		t.Fatalf("metrics: %v", err)
+	}
+	if len(m.CPU) != metricsPoints || len(m.Memory) != metricsPoints || len(m.Requests) != metricsPoints {
+		t.Fatalf("expected %d points each, got cpu=%d mem=%d req=%d", metricsPoints, len(m.CPU), len(m.Memory), len(m.Requests))
+	}
+	// Deterministic: a second call yields identical series.
+	m2, _ := svc.AppMetrics(ctx, "org-1", app.ID)
+	for i := range m.CPU {
+		if m.CPU[i].V != m2.CPU[i].V {
+			t.Fatalf("metrics not deterministic at %d: %v vs %v", i, m.CPU[i].V, m2.CPU[i].V)
+		}
+	}
+}

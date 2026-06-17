@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import {
   Boxes,
   Database,
+  FolderGit2,
   Globe,
   LineChart,
   Settings,
@@ -26,6 +27,12 @@ const NAV: NavItem[] = [
     href: "/dashboard/apps",
     icon: Boxes,
     match: (p) => p === "/dashboard" || p.startsWith("/dashboard/apps"),
+  },
+  {
+    label: "Projects",
+    href: "/dashboard/projects",
+    icon: FolderGit2,
+    match: (p) => p.startsWith("/dashboard/projects"),
   },
   {
     label: "Databases",

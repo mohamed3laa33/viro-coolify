@@ -37,22 +37,29 @@ func (s *Server) orgAuthz(min domain.Role) func(http.Handler) http.Handler {
 
 // writePlatformError maps platform/coolify errors to HTTP codes.
 func (s *Server) writePlatformError(w http.ResponseWriter, action string, err error) {
-	if errors.Is(err, platform.ErrNotFound) {
+	switch {
+	case errors.Is(err, platform.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not found")
-		return
+	case errors.Is(err, platform.ErrQuotaExceeded):
+		writeError(w, http.StatusPaymentRequired, err.Error())
+	case errors.Is(err, platform.ErrInvalidTemplate):
+		writeError(w, http.StatusBadRequest, "unknown catalog template")
+	default:
+		s.logger.Error(action, "err", err)
+		writeError(w, http.StatusBadGateway, "upstream error from deploy backend")
 	}
-	s.logger.Error(action, "err", err)
-	writeError(w, http.StatusBadGateway, "upstream error from deploy backend")
 }
 
 type createAppRequest struct {
-	Name          string `json:"name"`
-	ProjectID     string `json:"projectId"`
-	GitRepository string `json:"gitRepository"`
-	GitBranch     string `json:"gitBranch"`
-	BuildPack     string `json:"buildPack"`
-	ProjectUUID   string `json:"projectUuid"`
-	ServerUUID    string `json:"serverUuid"`
+	Name          string  `json:"name"`
+	ProjectID     string  `json:"projectId"`
+	GitRepository string  `json:"gitRepository"`
+	GitBranch     string  `json:"gitBranch"`
+	BuildPack     string  `json:"buildPack"`
+	CPU           float64 `json:"cpu"`
+	MemoryMB      int     `json:"memoryMb"`
+	ProjectUUID   string  `json:"projectUuid"`
+	ServerUUID    string  `json:"serverUuid"`
 }
 
 func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
@@ -87,6 +94,8 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		GitRepository: req.GitRepository,
 		GitBranch:     req.GitBranch,
 		BuildPack:     req.BuildPack,
+		CPU:           req.CPU,
+		MemoryMB:      req.MemoryMB,
 		ProjectUUID:   req.ProjectUUID,
 		ServerUUID:    req.ServerUUID,
 	})

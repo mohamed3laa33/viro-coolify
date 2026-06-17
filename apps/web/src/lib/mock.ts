@@ -3,10 +3,16 @@
 
 import type {
   App,
+  AppMetrics,
   BillingResponse,
   Database,
+  Domain,
+  EnvVar,
+  Invitation,
+  Member,
   Org,
   Plan,
+  Project,
   User,
 } from "@/lib/api";
 
@@ -178,3 +184,112 @@ export const mockRegions = [
   "syd",
   "gru",
 ] as const;
+
+export const mockProjects: Project[] = [
+  {
+    id: "proj_default",
+    name: "Default",
+    slug: "default",
+    isDefault: true,
+    createdAt: "2026-01-12T10:00:00Z",
+  },
+  {
+    id: "proj_platform",
+    name: "Platform",
+    slug: "platform",
+    isDefault: false,
+    createdAt: "2026-02-20T10:00:00Z",
+  },
+  {
+    id: "proj_growth",
+    name: "Growth",
+    slug: "growth",
+    isDefault: false,
+    createdAt: "2026-03-08T10:00:00Z",
+  },
+];
+
+export const mockMembers: Member[] = [
+  {
+    userId: "usr_demo",
+    email: "you@viro.dev",
+    name: "Demo User",
+    role: "owner",
+  },
+  {
+    userId: "usr_grace",
+    email: "grace@acme.dev",
+    name: "Grace Hopper",
+    role: "admin",
+  },
+  {
+    userId: "usr_alan",
+    email: "alan@acme.dev",
+    name: "Alan Turing",
+    role: "member",
+  },
+  {
+    userId: "usr_kj",
+    email: "kj@acme.dev",
+    name: "Katherine Johnson",
+    role: "member",
+  },
+];
+
+export const mockInvitations: Invitation[] = [
+  {
+    id: "inv_01",
+    email: "ada@acme.dev",
+    role: "member",
+    projectId: "proj_platform",
+    token: "inv_tok_ada_8f21c4",
+    status: "pending",
+    createdAt: "2026-06-10T10:00:00Z",
+  },
+  {
+    id: "inv_02",
+    email: "linus@acme.dev",
+    role: "admin",
+    projectId: null,
+    token: "inv_tok_linus_3a90fe",
+    status: "pending",
+    createdAt: "2026-06-14T10:00:00Z",
+  },
+];
+
+export const mockEnv: EnvVar[] = [
+  { key: "NODE_ENV", value: "production" },
+  { key: "PORT", value: "8080" },
+  {
+    key: "DATABASE_URL",
+    value: "postgres://app:s3cr3t@primary-postgres.internal:5432/app",
+  },
+  { key: "REDIS_URL", value: "redis://app:s3cr3t@session-cache.internal:6379" },
+  { key: "LOG_LEVEL", value: "info" },
+];
+
+export const mockDomains: Domain[] = [
+  { id: "dom_01", domain: "acme.com", verified: true },
+  { id: "dom_02", domain: "www.acme.com", verified: true },
+  { id: "dom_03", domain: "staging.acme.com", verified: false },
+];
+
+function metricSeries(seed: number, base: number, n = 24): { t: string; v: number }[] {
+  const out: { t: string; v: number }[] = [];
+  const now = Date.now();
+  let v = base + (seed % 17);
+  for (let i = n - 1; i >= 0; i--) {
+    v += Math.sin(i / 2 + seed) * 6 + ((seed * (i + 1)) % 9) - 4;
+    out.push({
+      t: new Date(now - i * 60_000).toISOString(),
+      v: Math.max(1, Math.round(v)),
+    });
+  }
+  return out;
+}
+
+export const mockMetrics: AppMetrics = {
+  cpu: metricSeries(3, 38),
+  memory: metricSeries(11, 52),
+  requests: metricSeries(7, 120),
+};

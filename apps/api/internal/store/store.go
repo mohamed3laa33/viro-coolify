@@ -43,6 +43,24 @@ type Store interface {
 	CreateDatabase(ctx context.Context, d *domain.Database) error
 	ListDatabasesByOrg(ctx context.Context, orgID string) ([]domain.Database, error)
 
+	// Services (one-click catalog instances, tenant-scoped).
+	CreateService(ctx context.Context, svc *domain.Service) error
+	GetService(ctx context.Context, id string) (*domain.Service, error)
+	ListServicesByOrg(ctx context.Context, orgID string) ([]domain.Service, error)
+	UpdateService(ctx context.Context, svc *domain.Service) error
+	DeleteService(ctx context.Context, id string) error
+
+	// App environment variables (per app; key -> value).
+	GetAppEnv(ctx context.Context, appID string) (map[string]string, error)
+	SetAppEnv(ctx context.Context, appID, key, value string) error
+	DeleteAppEnv(ctx context.Context, appID, key string) error
+
+	// App domains.
+	CreateDomain(ctx context.Context, d *domain.Domain) error
+	GetDomain(ctx context.Context, id string) (*domain.Domain, error)
+	ListDomainsByApp(ctx context.Context, appID string) ([]domain.Domain, error)
+	DeleteDomain(ctx context.Context, id string) error
+
 	// Projects (Org → Project → App).
 	CreateProject(ctx context.Context, p *domain.Project) error
 	GetProject(ctx context.Context, id string) (*domain.Project, error)

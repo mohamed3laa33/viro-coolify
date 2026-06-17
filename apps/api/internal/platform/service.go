@@ -10,10 +10,12 @@ package platform
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/billing"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/coolify"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/domain"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/store"
@@ -21,6 +23,70 @@ import (
 
 // ErrNotFound is returned when a resource does not exist within the org.
 var ErrNotFound = errors.New("platform: not found")
+
+// ErrQuotaExceeded is returned when a requested workload exceeds the org's plan.
+var ErrQuotaExceeded = errors.New("platform: plan quota exceeded")
+
+// ErrInvalidTemplate is returned when a catalog template key is unknown.
+var ErrInvalidTemplate = errors.New("platform: unknown catalog template")
+
+// Default resource request for a workload when the caller leaves it unset.
+const (
+	defaultCPU      = 0.25
+	defaultMemoryMB = 256
+)
+
+// planLimits returns the resource limits for the org's plan (hobby if none).
+func (s *Service) planLimits(ctx context.Context, orgID string) billing.Limits {
+	planID := "hobby"
+	if sub, err := s.store.GetSubscription(ctx, orgID); err == nil && sub != nil {
+		planID = sub.PlanID
+	}
+	return billing.PlanLimits(planID)
+}
+
+// normalizeResources applies defaults to a workload's resource request.
+func normalizeResources(cpu float64, memMB int) (float64, int) {
+	if cpu <= 0 {
+		cpu = defaultCPU
+	}
+	if memMB <= 0 {
+		memMB = defaultMemoryMB
+	}
+	return cpu, memMB
+}
+
+// checkQuota validates a requested workload (cpu/memory and total count) against
+// the org's plan limits.
+func (s *Service) checkQuota(ctx context.Context, orgID string, cpu float64, memMB, currentCount int) error {
+	lim := s.planLimits(ctx, orgID)
+	if cpu > lim.MaxCPU {
+		return fmt.Errorf("%w: cpu %.2f exceeds plan max %.2f", ErrQuotaExceeded, cpu, lim.MaxCPU)
+	}
+	if memMB > lim.MaxMemoryMB {
+		return fmt.Errorf("%w: memory %dMB exceeds plan max %dMB", ErrQuotaExceeded, memMB, lim.MaxMemoryMB)
+	}
+	if currentCount >= lim.MaxApps {
+		return fmt.Errorf("%w: workload count %d reaches plan max %d", ErrQuotaExceeded, currentCount, lim.MaxApps)
+	}
+	return nil
+}
+
+// workloadCount returns the org's current app + service count (counts against MaxApps).
+func (s *Service) workloadCount(ctx context.Context, orgID string) (int, error) {
+	apps, err := s.store.ListAppsByOrg(ctx, orgID)
+	if err != nil {
+		return 0, err
+	}
+	svcs, err := s.store.ListServicesByOrg(ctx, orgID)
+	if err != nil {
+		return 0, err
+	}
+	return len(apps) + len(svcs), nil
+}
+
+// memoryLimitString renders a memory limit in Coolify's "<n>M" form.
+func memoryLimitString(memMB int) string { return fmt.Sprintf("%dM", memMB) }
 
 // Service provides org-scoped app and database operations.
 type Service struct {
@@ -42,16 +108,29 @@ type CreateAppInput struct {
 	GitRepository string
 	GitBranch     string
 	BuildPack     string
-	ProjectUUID   string // Coolify project placement (optional)
+	CPU           float64 // requested vCPU (defaulted when 0)
+	MemoryMB      int     // requested memory in MB (defaulted when 0)
+	ProjectUUID   string  // Coolify project placement (optional)
 	ServerUUID    string
 }
 
 // CreateApp creates an app for the org, provisioning it in Coolify when configured.
+// Requested CPU/memory are validated against the org's plan quota.
 func (s *Service) CreateApp(ctx context.Context, orgID string, in CreateAppInput) (*domain.App, error) {
 	branch := in.GitBranch
 	if branch == "" {
 		branch = "main"
 	}
+	cpu, memMB := normalizeResources(in.CPU, in.MemoryMB)
+
+	count, err := s.workloadCount(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.checkQuota(ctx, orgID, cpu, memMB, count); err != nil {
+		return nil, err
+	}
+
 	app := &domain.App{
 		ID:            s.idgen(),
 		OrgID:         orgID,
@@ -60,6 +139,8 @@ func (s *Service) CreateApp(ctx context.Context, orgID string, in CreateAppInput
 		GitRepository: in.GitRepository,
 		GitBranch:     branch,
 		BuildPack:     in.BuildPack,
+		CPU:           cpu,
+		MemoryMB:      memMB,
 		Status:        "created",
 		CreatedAt:     s.now(),
 	}
@@ -72,6 +153,8 @@ func (s *Service) CreateApp(ctx context.Context, orgID string, in CreateAppInput
 			GitBranch:     branch,
 			BuildPack:     in.BuildPack,
 			Name:          app.Name,
+			LimitsCPUs:    cpu,
+			LimitsMemory:  memoryLimitString(memMB),
 		})
 		if err != nil {
 			return nil, err

@@ -32,7 +32,13 @@ export default function LoginPage() {
     setLoading(true);
     try {
       await login({ email, password });
-      router.push("/dashboard");
+      // Honor a post-login redirect target (e.g. accepting an invite).
+      let next = "/dashboard";
+      if (typeof window !== "undefined") {
+        const param = new URLSearchParams(window.location.search).get("next");
+        if (param && param.startsWith("/")) next = param;
+      }
+      router.push(next);
     } catch (err) {
       if (err instanceof ApiError) {
         setError(err.message);

@@ -152,6 +152,138 @@ describe("api client", () => {
     stubFetch({ message: "nope" }, 401);
     await expect(api.me("bad")).rejects.toThrow("nope");
   });
+
+  it("lists projects under the org scope", async () => {
+    const calls = stubFetch({ data: [] });
+    await api.listProjects("org_1", "tok");
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/orgs/org_1/projects`);
+    expect(calls[0].init.method).toBe("GET");
+  });
+
+  it("creates a project with a name body", async () => {
+    const calls = stubFetch({ id: "proj_1", name: "Platform" });
+    await api.createProject("org_1", "Platform", "tok");
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/orgs/org_1/projects`);
+    expect(calls[0].init.method).toBe("POST");
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({
+      name: "Platform",
+    });
+  });
+
+  it("lists apps for a project", async () => {
+    const calls = stubFetch({ data: [] });
+    await api.listProjectApps("org_1", "proj_2", "tok");
+    expect(calls[0].url).toBe(
+      `${API_BASE_URL}/v1/orgs/org_1/projects/proj_2/apps`,
+    );
+  });
+
+  it("lists members under the org scope", async () => {
+    const calls = stubFetch({ data: [] });
+    await api.listMembers("org_1", "tok");
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/orgs/org_1/members`);
+  });
+
+  it("lists invitations under the org scope", async () => {
+    const calls = stubFetch({ data: [] });
+    await api.listInvitations("org_1", "tok");
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/orgs/org_1/invitations`);
+  });
+
+  it("posts an invitation with email, role and optional project", async () => {
+    const calls = stubFetch({ id: "inv_1" });
+    await api.invite(
+      "org_1",
+      { email: "a@b.c", role: "admin", projectId: "proj_2" },
+      "tok",
+    );
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/orgs/org_1/invitations`);
+    expect(calls[0].init.method).toBe("POST");
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({
+      email: "a@b.c",
+      role: "admin",
+      projectId: "proj_2",
+    });
+  });
+
+  it("accepts an invitation by token", async () => {
+    const calls = stubFetch({ id: "inv_1", status: "accepted" });
+    await api.acceptInvitation("inv_tok_xyz", "tok");
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/invitations/accept`);
+    expect(calls[0].init.method).toBe("POST");
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({
+      token: "inv_tok_xyz",
+    });
+  });
+
+  it("lists env vars for an app", async () => {
+    const calls = stubFetch({ data: [] });
+    await api.listEnv("org_1", "app_1", "tok");
+    expect(calls[0].url).toBe(
+      `${API_BASE_URL}/v1/orgs/org_1/apps/app_1/env`,
+    );
+  });
+
+  it("sets an env var via PUT", async () => {
+    const calls = stubFetch({ key: "K", value: "V" });
+    await api.setEnv("org_1", "app_1", { key: "K", value: "V" }, "tok");
+    expect(calls[0].url).toBe(
+      `${API_BASE_URL}/v1/orgs/org_1/apps/app_1/env`,
+    );
+    expect(calls[0].init.method).toBe("PUT");
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({
+      key: "K",
+      value: "V",
+    });
+  });
+
+  it("deletes an env var by url-encoded key", async () => {
+    const calls = stubFetch({});
+    await api.deleteEnv("org_1", "app_1", "MY KEY", "tok");
+    expect(calls[0].url).toBe(
+      `${API_BASE_URL}/v1/orgs/org_1/apps/app_1/env/MY%20KEY`,
+    );
+    expect(calls[0].init.method).toBe("DELETE");
+  });
+
+  it("lists domains for an app", async () => {
+    const calls = stubFetch({ data: [] });
+    await api.listDomains("org_1", "app_1", "tok");
+    expect(calls[0].url).toBe(
+      `${API_BASE_URL}/v1/orgs/org_1/apps/app_1/domains`,
+    );
+  });
+
+  it("adds a domain with a domain body", async () => {
+    const calls = stubFetch({ id: "dom_1", domain: "acme.com", verified: false });
+    await api.addDomain("org_1", "app_1", "acme.com", "tok");
+    expect(calls[0].url).toBe(
+      `${API_BASE_URL}/v1/orgs/org_1/apps/app_1/domains`,
+    );
+    expect(calls[0].init.method).toBe("POST");
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({
+      domain: "acme.com",
+    });
+  });
+
+  it("deletes a domain by id", async () => {
+    const calls = stubFetch({});
+    await api.deleteDomain("org_1", "app_1", "dom_9", "tok");
+    expect(calls[0].url).toBe(
+      `${API_BASE_URL}/v1/orgs/org_1/apps/app_1/domains/dom_9`,
+    );
+    expect(calls[0].init.method).toBe("DELETE");
+  });
+
+  it("fetches app metrics", async () => {
+    const calls = stubFetch({ cpu: [], memory: [], requests: [] });
+    await api.getMetrics("org_1", "app_1", "tok");
+    expect(calls[0].url).toBe(
+      `${API_BASE_URL}/v1/orgs/org_1/apps/app_1/metrics`,
+    );
+    const headers = calls[0].init.headers as Record<string, string>;
+    expect(headers.Authorization).toBe("Bearer tok");
+  });
 });
 
 describe("environment", () => {

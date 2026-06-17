@@ -111,8 +111,36 @@ type App struct {
 	GitRepository string    `json:"gitRepository,omitempty"`
 	GitBranch     string    `json:"gitBranch,omitempty"`
 	BuildPack     string    `json:"buildPack,omitempty"`
+	CPU           float64   `json:"cpu"`      // requested vCPU
+	MemoryMB      int       `json:"memoryMb"` // requested memory in MB
 	Status        string    `json:"status"`
 	CreatedAt     time.Time `json:"createdAt"`
+}
+
+// Service is a one-click catalog instance (WordPress, a database, etc.) owned by
+// an organization and grouped under a project. Provisioned via Coolify when
+// configured; managed as a store record in demo mode.
+type Service struct {
+	ID          string    `json:"id"`
+	OrgID       string    `json:"orgId"`
+	ProjectID   string    `json:"projectId"`
+	Template    string    `json:"template"` // catalog template key
+	Name        string    `json:"name"`
+	CoolifyUUID string    `json:"coolifyUuid,omitempty"`
+	CPU         float64   `json:"cpu"`
+	MemoryMB    int       `json:"memoryMb"`
+	Status      string    `json:"status"`
+	CreatedAt   time.Time `json:"createdAt"`
+}
+
+// Domain is a custom domain (FQDN) attached to an app.
+type Domain struct {
+	ID        string    `json:"id"`
+	OrgID     string    `json:"orgId"`
+	AppID     string    `json:"appId"`
+	Domain    string    `json:"domain"`
+	Verified  bool      `json:"verified"`
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 // Database is a Viro managed database owned by an organization, mirroring a
@@ -129,14 +157,14 @@ type Database struct {
 
 // Plan is a billing plan in the Viro catalog (fly.io-style usage-based pricing).
 type Plan struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	Description   string `json:"description"`
-	PriceCents    int    `json:"priceCents"`     // monthly base price
-	Currency      string `json:"currency"`       // e.g. "usd"
-	IncludedHours int    `json:"includedHours"`  // included compute-hours per month
-	OveragePerHourCents int `json:"overagePerHourCents"`
-	StripePriceID string `json:"-"`              // mapped to a Stripe price when billing is live
+	ID                  string `json:"id"`
+	Name                string `json:"name"`
+	Description         string `json:"description"`
+	PriceCents          int    `json:"priceCents"`    // monthly base price
+	Currency            string `json:"currency"`      // e.g. "usd"
+	IncludedHours       int    `json:"includedHours"` // included compute-hours per month
+	OveragePerHourCents int    `json:"overagePerHourCents"`
+	StripePriceID       string `json:"-"` // mapped to a Stripe price when billing is live
 }
 
 // SubscriptionStatus mirrors the lifecycle of a subscription.

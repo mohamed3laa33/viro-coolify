@@ -94,6 +94,8 @@ func (s *Server) handleCreateAppInProject(w http.ResponseWriter, r *http.Request
 		GitRepository: req.GitRepository,
 		GitBranch:     req.GitBranch,
 		BuildPack:     req.BuildPack,
+		CPU:           req.CPU,
+		MemoryMB:      req.MemoryMB,
 		ProjectUUID:   req.ProjectUUID,
 		ServerUUID:    req.ServerUUID,
 	})

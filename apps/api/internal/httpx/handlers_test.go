@@ -21,7 +21,10 @@ func newTestServer(t *testing.T, coolifyURL string) *Server {
 		t.Fatalf("load config: %v", err)
 	}
 	cfg.CoolifyBaseURL = coolifyURL
-	cfg.CoolifyToken = "test-token"
+	// Control-plane HTTP tests run in demo mode (no Coolify token) so resource
+	// creation is store-backed and deterministic; Coolify calls are exercised in
+	// the coolify package's own tests.
+	cfg.CoolifyToken = ""
 	return NewServer(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 

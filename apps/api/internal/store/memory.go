@@ -10,34 +10,40 @@ import (
 
 // MemoryStore is a thread-safe, in-memory Store for local development and tests.
 type MemoryStore struct {
-	mu            sync.RWMutex
-	users         map[string]domain.User // by id
-	usersByEmail  map[string]string      // email -> id
-	organizations map[string]domain.Organization
-	memberships   map[string]domain.Membership // key: orgID + "\x00" + userID
-	apps          map[string]domain.App        // by id
-	databases     map[string]domain.Database   // by id
-	subscriptions map[string]domain.Subscription // by orgID
-	usage         map[string][]domain.UsageRecord // by orgID
-	projects      map[string]domain.Project      // by id
+	mu             sync.RWMutex
+	users          map[string]domain.User // by id
+	usersByEmail   map[string]string      // email -> id
+	organizations  map[string]domain.Organization
+	memberships    map[string]domain.Membership        // key: orgID + "\x00" + userID
+	apps           map[string]domain.App               // by id
+	databases      map[string]domain.Database          // by id
+	subscriptions  map[string]domain.Subscription      // by orgID
+	usage          map[string][]domain.UsageRecord     // by orgID
+	projects       map[string]domain.Project           // by id
 	projectMembers map[string]domain.ProjectMembership // key: projectID + "\x00" + userID
-	invitations   map[string]domain.Invitation   // by id
+	invitations    map[string]domain.Invitation        // by id
+	services       map[string]domain.Service           // by id
+	appEnv         map[string]map[string]string        // appID -> key -> value
+	domains        map[string]domain.Domain            // by id
 }
 
 // NewMemoryStore returns an empty in-memory store.
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		users:         make(map[string]domain.User),
-		usersByEmail:  make(map[string]string),
-		organizations: make(map[string]domain.Organization),
-		memberships:   make(map[string]domain.Membership),
-		apps:          make(map[string]domain.App),
-		databases:     make(map[string]domain.Database),
-		subscriptions: make(map[string]domain.Subscription),
-		usage:         make(map[string][]domain.UsageRecord),
-		projects:      make(map[string]domain.Project),
+		users:          make(map[string]domain.User),
+		usersByEmail:   make(map[string]string),
+		organizations:  make(map[string]domain.Organization),
+		memberships:    make(map[string]domain.Membership),
+		apps:           make(map[string]domain.App),
+		databases:      make(map[string]domain.Database),
+		subscriptions:  make(map[string]domain.Subscription),
+		usage:          make(map[string][]domain.UsageRecord),
+		projects:       make(map[string]domain.Project),
 		projectMembers: make(map[string]domain.ProjectMembership),
-		invitations:   make(map[string]domain.Invitation),
+		invitations:    make(map[string]domain.Invitation),
+		services:       make(map[string]domain.Service),
+		appEnv:         make(map[string]map[string]string),
+		domains:        make(map[string]domain.Domain),
 	}
 }
 
@@ -350,4 +356,127 @@ func (s *MemoryStore) ListUsageByOrg(_ context.Context, orgID string) ([]domain.
 	out := make([]domain.UsageRecord, len(s.usage[orgID]))
 	copy(out, s.usage[orgID])
 	return out, nil
+}
+
+func (s *MemoryStore) CreateService(_ context.Context, svc *domain.Service) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.services[svc.ID]; exists {
+		return ErrConflict
+	}
+	s.services[svc.ID] = *svc
+	return nil
+}
+
+func (s *MemoryStore) GetService(_ context.Context, id string) (*domain.Service, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	svc, ok := s.services[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return &svc, nil
+}
+
+func (s *MemoryStore) ListServicesByOrg(_ context.Context, orgID string) ([]domain.Service, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]domain.Service, 0)
+	for _, svc := range s.services {
+		if svc.OrgID == orgID {
+			out = append(out, svc)
+		}
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) UpdateService(_ context.Context, svc *domain.Service) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.services[svc.ID]; !ok {
+		return ErrNotFound
+	}
+	s.services[svc.ID] = *svc
+	return nil
+}
+
+func (s *MemoryStore) DeleteService(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.services[id]; !ok {
+		return ErrNotFound
+	}
+	delete(s.services, id)
+	return nil
+}
+
+func (s *MemoryStore) GetAppEnv(_ context.Context, appID string) (map[string]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]string, len(s.appEnv[appID]))
+	for k, v := range s.appEnv[appID] {
+		out[k] = v
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) SetAppEnv(_ context.Context, appID, key, value string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.appEnv[appID] == nil {
+		s.appEnv[appID] = make(map[string]string)
+	}
+	s.appEnv[appID][key] = value
+	return nil
+}
+
+func (s *MemoryStore) DeleteAppEnv(_ context.Context, appID, key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if m := s.appEnv[appID]; m != nil {
+		delete(m, key)
+	}
+	return nil
+}
+
+func (s *MemoryStore) CreateDomain(_ context.Context, d *domain.Domain) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.domains[d.ID]; exists {
+		return ErrConflict
+	}
+	s.domains[d.ID] = *d
+	return nil
+}
+
+func (s *MemoryStore) GetDomain(_ context.Context, id string) (*domain.Domain, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	d, ok := s.domains[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return &d, nil
+}
+
+func (s *MemoryStore) ListDomainsByApp(_ context.Context, appID string) ([]domain.Domain, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]domain.Domain, 0)
+	for _, d := range s.domains {
+		if d.AppID == appID {
+			out = append(out, d)
+		}
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) DeleteDomain(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.domains[id]; !ok {
+		return ErrNotFound
+	}
+	delete(s.domains, id)
+	return nil
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useMemo, useState } from "react";
+import { use, useMemo, useState, type FormEvent } from "react";
 import Link from "next/link";
 import {
   ArrowLeft,
@@ -11,14 +11,34 @@ import {
   Package,
   Globe,
   Loader2,
+  Plus,
+  Trash2,
+  Eye,
+  EyeOff,
+  ShieldCheck,
+  ShieldAlert,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
-import { api, type App } from "@/lib/api";
-import { mockApps } from "@/lib/mock";
+import {
+  api,
+  type App,
+  type AppMetrics,
+  type Domain,
+  type EnvVar,
+} from "@/lib/api";
+import {
+  mockApps,
+  mockDomains,
+  mockEnv,
+  mockMetrics,
+} from "@/lib/mock";
 import { useResource } from "@/lib/use-resource";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Badge } from "@/components/ui/badge";
 import { StatusDot } from "@/components/ui/status-dot";
 import { Sparkline } from "@/components/sparkline";
 
@@ -27,21 +47,12 @@ const TABS = [
   "Logs",
   "Metrics",
   "Environment",
+  "Domains",
   "Settings",
 ] as const;
 type Tab = (typeof TABS)[number];
 
 type ActionKind = "deploy" | "stop" | "restart";
-
-function makeSeries(seed: number, n = 24): number[] {
-  const out: number[] = [];
-  let v = 40 + (seed % 20);
-  for (let i = 0; i < n; i++) {
-    v += Math.sin(i / 2 + seed) * 6 + ((seed * (i + 1)) % 9) - 4;
-    out.push(Math.max(4, Math.min(96, Math.round(v))));
-  }
-  return out;
-}
 
 const MOCK_LOGS = [
   "2026-06-17T09:01:02Z [info]  Starting machine 4d891 in iad",
@@ -54,14 +65,6 @@ const MOCK_LOGS = [
   "2026-06-17T09:02:35Z [info]  GET /api/users  200  41ms",
   "2026-06-17T09:03:02Z [warn]  Upstream latency 320ms (db pool saturated)",
   "2026-06-17T09:03:40Z [info]  Autoscaled to 3 machines (lhr, sin)",
-];
-
-const MOCK_ENV: Array<[string, string]> = [
-  ["NODE_ENV", "production"],
-  ["PORT", "8080"],
-  ["DATABASE_URL", "postgres://•••••••••@primary-postgres.internal:5432/app"],
-  ["REDIS_URL", "redis://•••••••••@session-cache.internal:6379"],
-  ["LOG_LEVEL", "info"],
 ];
 
 export default function AppDetailPage({
@@ -95,9 +98,6 @@ export default function AppDetailPage({
   const [tab, setTab] = useState<Tab>("Overview");
   const [pending, setPending] = useState<ActionKind | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-
-  const cpu = useMemo(() => makeSeries(appId.length + 3), [appId]);
-  const mem = useMemo(() => makeSeries(appId.length + 11), [appId]);
 
   async function runAction(kind: ActionKind) {
     if (!activeOrgId) {
@@ -271,47 +271,11 @@ export default function AppDetailPage({
         </Card>
       )}
 
-      {tab === "Metrics" && (
-        <div className="grid gap-4 sm:grid-cols-2">
-          <MetricCard
-            title="CPU"
-            value={`${cpu[cpu.length - 1]}%`}
-            data={cpu}
-            color="hsl(var(--primary))"
-          />
-          <MetricCard
-            title="Memory"
-            value={`${mem[mem.length - 1]}%`}
-            data={mem}
-            color="#E0218A"
-          />
-        </div>
-      )}
+      {tab === "Metrics" && <MetricsTab appId={appId} />}
 
-      {tab === "Environment" && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Environment variables</CardTitle>
-          </CardHeader>
-          <CardContent className="p-0">
-            <ul className="divide-y divide-border">
-              {MOCK_ENV.map(([key, value]) => (
-                <li
-                  key={key}
-                  className="grid grid-cols-1 gap-1 px-6 py-3 sm:grid-cols-[200px_1fr] sm:gap-4"
-                >
-                  <span className="font-mono text-sm text-foreground">
-                    {key}
-                  </span>
-                  <span className="truncate font-mono text-sm text-muted-foreground">
-                    {value}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </CardContent>
-        </Card>
-      )}
+      {tab === "Environment" && <EnvironmentTab appId={appId} />}
+
+      {tab === "Domains" && <DomainsTab appId={appId} appName={app.name} />}
 
       {tab === "Settings" && (
         <Card>
@@ -349,6 +313,422 @@ export default function AppDetailPage({
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Metrics tab
+// ---------------------------------------------------------------------------
+
+function MetricsTab({ appId }: { appId: string }) {
+  const { activeOrgId, authedCall } = useAuth();
+
+  const { data } = useResource<AppMetrics>(
+    activeOrgId
+      ? () =>
+          authedCall((token, on) =>
+            api.getMetrics(activeOrgId, appId, token, on),
+          )
+      : null,
+    mockMetrics,
+    [activeOrgId, appId],
+  );
+
+  // Fall back to client mock when the endpoint returns empty series.
+  const metrics: AppMetrics = {
+    cpu: data.cpu.length ? data.cpu : mockMetrics.cpu,
+    memory: data.memory.length ? data.memory : mockMetrics.memory,
+    requests: data.requests.length ? data.requests : mockMetrics.requests,
+  };
+
+  const cpu = metrics.cpu.map((p) => p.v);
+  const mem = metrics.memory.map((p) => p.v);
+  const req = metrics.requests.map((p) => p.v);
+
+  return (
+    <div className="grid gap-4 sm:grid-cols-2">
+      <MetricCard
+        title="CPU"
+        value={`${last(cpu)}%`}
+        data={cpu}
+        color="hsl(var(--primary))"
+      />
+      <MetricCard
+        title="Memory"
+        value={`${last(mem)}%`}
+        data={mem}
+        color="#E0218A"
+      />
+      <MetricCard
+        title="Requests"
+        value={`${last(req)}/s`}
+        data={req}
+        color="hsl(var(--success))"
+      />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Environment tab
+// ---------------------------------------------------------------------------
+
+function EnvironmentTab({ appId }: { appId: string }) {
+  const { activeOrgId, authedCall } = useAuth();
+
+  const { data, refetch } = useResource(
+    activeOrgId
+      ? () => authedCall((token, on) => api.listEnv(activeOrgId, appId, token, on))
+      : null,
+    { data: mockEnv },
+    [activeOrgId, appId],
+  );
+
+  const vars = data.data;
+
+  const [revealed, setRevealed] = useState<Record<string, boolean>>({});
+  const [key, setKey] = useState("");
+  const [value, setValue] = useState("");
+  const [pending, setPending] = useState(false);
+  const [busyKey, setBusyKey] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  async function onAdd(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const k = key.trim();
+    if (!k) return;
+    if (!activeOrgId) {
+      setNotice("Set unavailable — no active organization (demo mode).");
+      return;
+    }
+    setPending(true);
+    setNotice(null);
+    try {
+      await authedCall((token, on) =>
+        api.setEnv(activeOrgId, appId, { key: k, value }, token, on),
+      );
+      setKey("");
+      setValue("");
+      refetch();
+    } catch {
+      setNotice("Variable queued locally (API unreachable — demo mode).");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  async function onDelete(k: string) {
+    if (!activeOrgId) {
+      setNotice("Delete unavailable — no active organization (demo mode).");
+      return;
+    }
+    setBusyKey(k);
+    setNotice(null);
+    try {
+      await authedCall((token, on) =>
+        api.deleteEnv(activeOrgId, appId, k, token, on),
+      );
+      refetch();
+    } catch {
+      setNotice("Delete queued locally (API unreachable — demo mode).");
+    } finally {
+      setBusyKey(null);
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      {notice && (
+        <div className="rounded-md border border-primary/30 bg-primary/10 px-4 py-2 text-sm text-primary">
+          {notice}
+        </div>
+      )}
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Environment variables</CardTitle>
+        </CardHeader>
+        <CardContent className="p-0">
+          {vars.length === 0 ? (
+            <p className="px-6 py-4 text-sm text-muted-foreground">
+              No environment variables yet.
+            </p>
+          ) : (
+            <ul className="divide-y divide-border">
+              {vars.map((v: EnvVar) => {
+                const show = revealed[v.key];
+                return (
+                  <li
+                    key={v.key}
+                    className="flex items-center gap-4 px-6 py-3"
+                  >
+                    <span className="w-[200px] shrink-0 truncate font-mono text-sm text-foreground">
+                      {v.key}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate font-mono text-sm text-muted-foreground">
+                      {show ? v.value : "•".repeat(Math.min(24, v.value.length || 8))}
+                    </span>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() =>
+                        setRevealed((r) => ({ ...r, [v.key]: !r[v.key] }))
+                      }
+                      aria-label={show ? "Hide value" : "Reveal value"}
+                    >
+                      {show ? (
+                        <EyeOff className="h-4 w-4" />
+                      ) : (
+                        <Eye className="h-4 w-4" />
+                      )}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => onDelete(v.key)}
+                      disabled={busyKey === v.key}
+                      aria-label="Delete variable"
+                    >
+                      {busyKey === v.key ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Trash2 className="h-4 w-4 text-destructive" />
+                      )}
+                    </Button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Add variable</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <form
+            onSubmit={onAdd}
+            className="grid gap-4 sm:grid-cols-[200px_1fr_auto] sm:items-end"
+          >
+            <div className="space-y-2">
+              <Label htmlFor="env-key">Key</Label>
+              <Input
+                id="env-key"
+                className="font-mono"
+                placeholder="API_KEY"
+                value={key}
+                onChange={(e) => setKey(e.target.value)}
+                required
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="env-value">Value</Label>
+              <Input
+                id="env-value"
+                className="font-mono"
+                placeholder="value"
+                value={value}
+                onChange={(e) => setValue(e.target.value)}
+              />
+            </div>
+            <Button type="submit" disabled={pending}>
+              {pending ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Plus className="h-4 w-4" />
+              )}
+              Save
+            </Button>
+          </form>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Domains tab
+// ---------------------------------------------------------------------------
+
+function DomainsTab({ appId, appName }: { appId: string; appName: string }) {
+  const { activeOrgId, authedCall } = useAuth();
+
+  const { data, refetch } = useResource(
+    activeOrgId
+      ? () =>
+          authedCall((token, on) =>
+            api.listDomains(activeOrgId, appId, token, on),
+          )
+      : null,
+    { data: mockDomains },
+    [activeOrgId, appId],
+  );
+
+  const domains = data.data;
+  const fqdn = `${appName}.viro.app`;
+
+  const [domain, setDomain] = useState("");
+  const [pending, setPending] = useState(false);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  async function onAdd(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const d = domain.trim();
+    if (!d) return;
+    if (!activeOrgId) {
+      setNotice("Add unavailable — no active organization (demo mode).");
+      return;
+    }
+    setPending(true);
+    setNotice(null);
+    try {
+      await authedCall((token, on) =>
+        api.addDomain(activeOrgId, appId, d, token, on),
+      );
+      setDomain("");
+      refetch();
+    } catch {
+      setNotice("Domain queued locally (API unreachable — demo mode).");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  async function onDelete(id: string) {
+    if (!activeOrgId) {
+      setNotice("Delete unavailable — no active organization (demo mode).");
+      return;
+    }
+    setBusyId(id);
+    setNotice(null);
+    try {
+      await authedCall((token, on) =>
+        api.deleteDomain(activeOrgId, appId, id, token, on),
+      );
+      refetch();
+    } catch {
+      setNotice("Delete queued locally (API unreachable — demo mode).");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      {notice && (
+        <div className="rounded-md border border-primary/30 bg-primary/10 px-4 py-2 text-sm text-primary">
+          {notice}
+        </div>
+      )}
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Default domain</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <span className="inline-flex items-center gap-2 font-mono text-sm">
+            <Globe className="h-4 w-4 text-muted-foreground" />
+            {fqdn}
+            <Badge variant="success">
+              <ShieldCheck className="mr-1 h-3 w-3" />
+              TLS
+            </Badge>
+          </span>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Custom domains</CardTitle>
+        </CardHeader>
+        <CardContent className="p-0">
+          {domains.length === 0 ? (
+            <p className="px-6 py-4 text-sm text-muted-foreground">
+              No custom domains yet.
+            </p>
+          ) : (
+            <ul className="divide-y divide-border">
+              {domains.map((d: Domain) => (
+                <li
+                  key={d.id}
+                  className="flex items-center justify-between px-6 py-3"
+                >
+                  <span className="inline-flex items-center gap-2 font-mono text-sm">
+                    <Globe className="h-4 w-4 text-muted-foreground" />
+                    {d.domain}
+                  </span>
+                  <div className="flex items-center gap-3">
+                    {d.verified ? (
+                      <Badge variant="success">
+                        <ShieldCheck className="mr-1 h-3 w-3" />
+                        Verified
+                      </Badge>
+                    ) : (
+                      <Badge variant="warning">
+                        <ShieldAlert className="mr-1 h-3 w-3" />
+                        Pending
+                      </Badge>
+                    )}
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => onDelete(d.id)}
+                      disabled={busyId === d.id}
+                      aria-label="Delete domain"
+                    >
+                      {busyId === d.id ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Trash2 className="h-4 w-4 text-destructive" />
+                      )}
+                    </Button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Add domain</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <form
+            onSubmit={onAdd}
+            className="flex flex-col gap-4 sm:flex-row sm:items-end"
+          >
+            <div className="flex-1 space-y-2">
+              <Label htmlFor="domain-host">Domain</Label>
+              <Input
+                id="domain-host"
+                className="font-mono"
+                placeholder="app.acme.com"
+                value={domain}
+                onChange={(e) => setDomain(e.target.value)}
+                required
+              />
+            </div>
+            <Button type="submit" disabled={pending}>
+              {pending ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Plus className="h-4 w-4" />
+              )}
+              Add domain
+            </Button>
+          </form>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Shared
+// ---------------------------------------------------------------------------
 
 function InfoCard({
   title,
@@ -389,6 +769,10 @@ function MetricCard({
       </div>
     </Card>
   );
+}
+
+function last(data: number[]): number {
+  return data.length ? data[data.length - 1] : 0;
 }
 
 function capitalize(s: string): string {

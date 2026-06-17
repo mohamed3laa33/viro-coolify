@@ -100,6 +100,9 @@ func (s *Server) routes() chi.Router {
 		r.Get("/billing/plans", s.handlePlans)
 		r.Post("/billing/webhook", s.handleStripeWebhook)
 
+		// Public one-click services catalog.
+		r.Get("/services/catalog", s.handleServiceCatalog)
+
 		// Authenticated endpoints.
 		r.Group(func(r chi.Router) {
 			r.Use(s.authMiddleware)
@@ -128,6 +131,8 @@ func (s *Server) routes() chi.Router {
 						// Project-scoped apps (org admins or project members).
 						r.With(s.projectAuthz(domain.RoleMember)).Get("/{projectID}/apps", s.handleListProjectApps)
 						r.With(s.projectAuthz(domain.RoleAdmin)).Post("/{projectID}/apps", s.handleCreateAppInProject)
+						// Project-scoped one-click services.
+						r.With(s.projectAuthz(domain.RoleAdmin)).Post("/{projectID}/services", s.handleCreateService)
 					})
 
 					r.Route("/apps", func(r chi.Router) {
@@ -139,6 +144,27 @@ func (s *Server) routes() chi.Router {
 						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/{appID}/deploy", s.handleDeployApp)
 						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/{appID}/stop", s.handleStopApp)
 						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/{appID}/restart", s.handleRestartApp)
+
+						// App env / secrets.
+						r.With(s.orgAuthz(domain.RoleMember)).Get("/{appID}/env", s.handleListAppEnv)
+						r.With(s.orgAuthz(domain.RoleAdmin)).Put("/{appID}/env", s.handleSetAppEnv)
+						r.With(s.orgAuthz(domain.RoleAdmin)).Delete("/{appID}/env/{key}", s.handleDeleteAppEnv)
+
+						// App domains.
+						r.With(s.orgAuthz(domain.RoleMember)).Get("/{appID}/domains", s.handleListAppDomains)
+						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/{appID}/domains", s.handleAddAppDomain)
+						r.With(s.orgAuthz(domain.RoleAdmin)).Delete("/{appID}/domains/{domainID}", s.handleDeleteAppDomain)
+
+						// App metrics.
+						r.With(s.orgAuthz(domain.RoleMember)).Get("/{appID}/metrics", s.handleAppMetrics)
+					})
+
+					r.Route("/services", func(r chi.Router) {
+						r.With(s.orgAuthz(domain.RoleMember)).Get("/", s.handleListServices)
+						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/{serviceID}/deploy", s.handleDeployService)
+						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/{serviceID}/stop", s.handleStopService)
+						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/{serviceID}/restart", s.handleRestartService)
+						r.With(s.orgAuthz(domain.RoleAdmin)).Delete("/{serviceID}", s.handleDeleteService)
 					})
 
 					r.Route("/databases", func(r chi.Router) {

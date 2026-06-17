@@ -1,10 +1,21 @@
 "use client";
 
-import { useState } from "react";
-import { Check, Loader2 } from "lucide-react";
+import { useState, type FormEvent } from "react";
+import { Check, Copy, Loader2 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
-import { api, type Plan } from "@/lib/api";
-import { mockBilling, mockPlans } from "@/lib/mock";
+import {
+  api,
+  type MemberRole,
+  type Plan,
+  type Project,
+} from "@/lib/api";
+import {
+  mockBilling,
+  mockInvitations,
+  mockMembers,
+  mockPlans,
+  mockProjects,
+} from "@/lib/mock";
 import { useResource } from "@/lib/use-resource";
 import { cn } from "@/lib/utils";
 import { PageHeader } from "@/components/page-header";
@@ -23,20 +34,23 @@ import { Badge, type BadgeVariant } from "@/components/ui/badge";
 const TABS = ["General", "Team", "Billing"] as const;
 type Tab = (typeof TABS)[number];
 
-type Role = "owner" | "admin" | "member";
-
-const ROLE_VARIANT: Record<Role, BadgeVariant> = {
+const ROLE_VARIANT: Record<MemberRole, BadgeVariant> = {
   owner: "default",
   admin: "info",
   member: "outline",
 };
 
-const MEMBERS: Array<{ name: string; email: string; role: Role }> = [
-  { name: "Demo User", email: "you@viro.dev", role: "owner" },
-  { name: "Grace Hopper", email: "grace@acme.dev", role: "admin" },
-  { name: "Alan Turing", email: "alan@acme.dev", role: "member" },
-  { name: "Katherine Johnson", email: "kj@acme.dev", role: "member" },
-];
+const SELECT_CLASS =
+  "flex h-10 w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-ring disabled:cursor-not-allowed disabled:opacity-50";
+
+function initials(name: string): string {
+  return name
+    .split(" ")
+    .map((p) => p[0])
+    .join("")
+    .slice(0, 2)
+    .toUpperCase();
+}
 
 export default function SettingsPage() {
   const { user } = useAuth();
@@ -107,49 +121,277 @@ export default function SettingsPage() {
         </Card>
       )}
 
-      {tab === "Team" && (
-        <Card>
-          <CardHeader className="flex-row items-center justify-between space-y-0">
-            <div>
-              <CardTitle>Team members</CardTitle>
-              <CardDescription className="mt-1">
-                People with access to this organization.
-              </CardDescription>
+      {tab === "Team" && <TeamTab />}
+
+      {tab === "Billing" && <BillingTab />}
+    </div>
+  );
+}
+
+function projectLabel(
+  projectId: string | null,
+  projects: Project[],
+): string {
+  if (!projectId) return "Organization-wide";
+  return projects.find((p) => p.id === projectId)?.name ?? projectId;
+}
+
+function TeamTab() {
+  const { activeOrgId, authedCall } = useAuth();
+
+  const { data: membersData } = useResource(
+    activeOrgId
+      ? () => authedCall((token, on) => api.listMembers(activeOrgId, token, on))
+      : null,
+    { data: mockMembers },
+    [activeOrgId],
+  );
+
+  const { data: invitesData, refetch: refetchInvites } = useResource(
+    activeOrgId
+      ? () =>
+          authedCall((token, on) =>
+            api.listInvitations(activeOrgId, token, on),
+          )
+      : null,
+    { data: mockInvitations },
+    [activeOrgId],
+  );
+
+  const { data: projectsData } = useResource(
+    activeOrgId
+      ? () => authedCall((token, on) => api.listProjects(activeOrgId, token, on))
+      : null,
+    { data: mockProjects },
+    [activeOrgId],
+  );
+
+  const members = membersData.data;
+  const invitations = invitesData.data;
+  const projects = projectsData.data;
+
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState<MemberRole>("member");
+  const [projectId, setProjectId] = useState("");
+  const [pending, setPending] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
+
+  async function onInvite(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const trimmed = email.trim();
+    if (!trimmed) return;
+    if (!activeOrgId) {
+      setNotice("Invite unavailable — no active organization (demo mode).");
+      return;
+    }
+    setPending(true);
+    setNotice(null);
+    try {
+      await authedCall((token, on) =>
+        api.invite(
+          activeOrgId,
+          {
+            email: trimmed,
+            role,
+            projectId: projectId || undefined,
+          },
+          token,
+          on,
+        ),
+      );
+      setEmail("");
+      setRole("member");
+      setProjectId("");
+      refetchInvites();
+    } catch {
+      setNotice("Invitation queued locally (API unreachable — demo mode).");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  async function copyToken(token: string) {
+    const link =
+      typeof window !== "undefined"
+        ? `${window.location.origin}/invite?token=${encodeURIComponent(token)}`
+        : token;
+    try {
+      if (typeof navigator !== "undefined" && navigator.clipboard) {
+        await navigator.clipboard.writeText(link);
+      }
+      setCopied(token);
+      setTimeout(() => setCopied((c) => (c === token ? null : c)), 1500);
+    } catch {
+      setCopied(null);
+    }
+  }
+
+  return (
+    <div className="space-y-6">
+      {notice && (
+        <div className="rounded-md border border-primary/30 bg-primary/10 px-4 py-2 text-sm text-primary">
+          {notice}
+        </div>
+      )}
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Team members</CardTitle>
+          <CardDescription className="mt-1">
+            People with access to this organization.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="p-0">
+          <ul className="divide-y divide-border">
+            {members.map((m) => (
+              <li
+                key={m.userId}
+                className="flex items-center justify-between px-6 py-4"
+              >
+                <div className="flex items-center gap-3">
+                  <span className="flex h-9 w-9 items-center justify-center rounded-full bg-brand-balloon text-xs font-semibold text-white">
+                    {initials(m.name || m.email)}
+                  </span>
+                  <div>
+                    <p className="text-sm font-medium">{m.name || m.email}</p>
+                    <p className="text-xs text-muted-foreground">{m.email}</p>
+                  </div>
+                </div>
+                <Badge variant={ROLE_VARIANT[m.role]} className="capitalize">
+                  {m.role}
+                </Badge>
+              </li>
+            ))}
+          </ul>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Invite a member</CardTitle>
+          <CardDescription className="mt-1">
+            Invite someone by email. Optionally scope them to a single project.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form
+            onSubmit={onInvite}
+            className="grid gap-4 sm:grid-cols-[1fr_140px_1fr_auto] sm:items-end"
+          >
+            <div className="space-y-2">
+              <Label htmlFor="invite-email">Email</Label>
+              <Input
+                id="invite-email"
+                type="email"
+                placeholder="teammate@acme.dev"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                required
+              />
             </div>
-            <Button size="sm">Invite member</Button>
-          </CardHeader>
-          <CardContent className="p-0">
+            <div className="space-y-2">
+              <Label htmlFor="invite-role">Role</Label>
+              <select
+                id="invite-role"
+                className={SELECT_CLASS}
+                value={role}
+                onChange={(e) => setRole(e.target.value as MemberRole)}
+              >
+                <option value="member">Member</option>
+                <option value="admin">Admin</option>
+                <option value="owner">Owner</option>
+              </select>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="invite-project">Project (optional)</Label>
+              <select
+                id="invite-project"
+                className={SELECT_CLASS}
+                value={projectId}
+                onChange={(e) => setProjectId(e.target.value)}
+              >
+                <option value="">Organization-wide</option>
+                {projects.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <Button type="submit" disabled={pending}>
+              {pending && <Loader2 className="h-4 w-4 animate-spin" />}
+              Send invite
+            </Button>
+          </form>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Pending invitations</CardTitle>
+          <CardDescription className="mt-1">
+            Share the invite link manually until email delivery is enabled.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="p-0">
+          {invitations.length === 0 ? (
+            <p className="px-6 py-4 text-sm text-muted-foreground">
+              No pending invitations.
+            </p>
+          ) : (
             <ul className="divide-y divide-border">
-              {MEMBERS.map((m) => (
-                <li
-                  key={m.email}
-                  className="flex items-center justify-between px-6 py-4"
-                >
-                  <div className="flex items-center gap-3">
-                    <span className="flex h-9 w-9 items-center justify-center rounded-full bg-brand-balloon text-xs font-semibold text-white">
-                      {m.name
-                        .split(" ")
-                        .map((p) => p[0])
-                        .join("")
-                        .slice(0, 2)
-                        .toUpperCase()}
-                    </span>
-                    <div>
-                      <p className="text-sm font-medium">{m.name}</p>
-                      <p className="text-xs text-muted-foreground">{m.email}</p>
+              {invitations.map((inv) => (
+                <li key={inv.id} className="px-6 py-4">
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-medium">
+                        {inv.email}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {projectLabel(inv.projectId, projects)}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Badge
+                        variant={ROLE_VARIANT[inv.role]}
+                        className="capitalize"
+                      >
+                        {inv.role}
+                      </Badge>
+                      <Badge
+                        variant={
+                          inv.status === "pending" ? "warning" : "outline"
+                        }
+                        className="capitalize"
+                      >
+                        {inv.status}
+                      </Badge>
                     </div>
                   </div>
-                  <Badge variant={ROLE_VARIANT[m.role]} className="capitalize">
-                    {m.role}
-                  </Badge>
+                  <div className="mt-3 flex items-center gap-2">
+                    <code className="flex-1 truncate rounded-md border border-border bg-surface-2 px-3 py-1.5 font-mono text-xs text-muted-foreground">
+                      {inv.token}
+                    </code>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => copyToken(inv.token)}
+                    >
+                      {copied === inv.token ? (
+                        <Check className="h-3.5 w-3.5" />
+                      ) : (
+                        <Copy className="h-3.5 w-3.5" />
+                      )}
+                      {copied === inv.token ? "Copied" : "Copy link"}
+                    </Button>
+                  </div>
                 </li>
               ))}
             </ul>
-          </CardContent>
-        </Card>
-      )}
-
-      {tab === "Billing" && <BillingTab />}
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }
