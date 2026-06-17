@@ -1,10 +1,10 @@
 <div align="center">
 
-# Viro
+# Vortex
 
 **A modern, fly.io-style application hosting platform — built on top of [Coolify](https://coolify.io).**
 
-Viro gives you a beautiful, opinionated developer experience (like fly.io) while using a
+Vortex gives you a beautiful, opinionated developer experience (like fly.io) while using a
 self-hosted Coolify instance as the deployment engine, and is designed to run on
 DigitalOcean Kubernetes (DOKS).
 
@@ -15,7 +15,7 @@ DigitalOcean Kubernetes (DOKS).
 ## What is this?
 
 [Coolify](https://coolify.io) is a powerful open-source PaaS, but its UX is general-purpose.
-**Viro** wraps Coolify with:
+**Vortex** wraps Coolify with:
 
 - 🎨 **A new, modern UI** in the visual language of **fly.io** (deep violet, near-black surfaces, mono accents).
 - 🧠 **A Go control-plane** that owns users, organizations, teams (RBAC), billing and usage — and
@@ -25,7 +25,7 @@ DigitalOcean Kubernetes (DOKS).
 
 ```
 ┌────────────┐      ┌────────────────────┐      ┌──────────────────┐
-│  Next.js   │ ───▶ │  Viro control-plane │ ───▶ │ Coolify (/api/v1) │ ──▶ servers / apps
+│  Next.js   │ ───▶ │  Vortex control-plane │ ───▶ │ Coolify (/api/v1) │ ──▶ servers / apps
 │  (web UI)  │      │   (Go API)          │      │  deploy engine    │
 └────────────┘      └────────────────────┘      └──────────────────┘
    fly.io look        auth · orgs · teams           builds · TLS ·
@@ -57,7 +57,7 @@ make api-run
 make web-dev
 ```
 
-Point Viro at a Coolify instance with `VIRO_COOLIFY_BASE_URL` and `VIRO_COOLIFY_TOKEN`
+Point Vortex at a Coolify instance with `VORTEX_COOLIFY_BASE_URL` and `VORTEX_COOLIFY_TOKEN`
 (see `.env.example`). With no Coolify configured, the API still serves health/version and
 the UI runs against mock data.
 

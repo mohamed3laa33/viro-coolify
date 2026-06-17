@@ -12,7 +12,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"service": "viro-api",
+		"service": "vortex-api",
 		"version": version.Version,
 		"commit":  version.Commit,
 		"env":     s.cfg.Env,

@@ -28,7 +28,7 @@ spec:
             - name: {{ $k }}
               value: {{ $v | quote }}
             {{- end }}
-            - name: VIRO_CORS_ORIGINS
+            - name: VORTEX_CORS_ORIGINS
               value: {{ printf "https://%s" .Values.ingress.webHost | quote }}
           envFrom:
             - secretRef:

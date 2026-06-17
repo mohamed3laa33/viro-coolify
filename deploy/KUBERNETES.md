@@ -1,13 +1,13 @@
-# Viro on Kubernetes — workload runtime
+# Vortex on Kubernetes — workload runtime
 
 Decisions (locked with the product owner):
-- **Control plane on Docker.** `viro-api` + `viro-web` run via Docker / `docker-compose`
+- **Control plane on Docker.** `vortex-api` + `vortex-web` run via Docker / `docker-compose`
   (one droplet or a small VM) — simple to operate. See `docker/docker-compose.full.yml`.
 - **All customer workloads on Kubernetes** (DOKS). No Coolify runtime. Apps, services,
   WordPress, and databases (Redis/Postgres/MySQL/Mongo) all run on **one cluster** for
   cost control + K8s scheduling/limits.
 - **One generic Helm chart for everything:** `deploy/charts/common-chart` (vendored from the
-  team's `cross-helm-charts-template`, `common-chart` v0.6.0). Viro renders per-workload
+  team's `cross-helm-charts-template`, `common-chart` v0.6.0). Vortex renders per-workload
   values and does `helm upgrade --install` into the tenant's namespace.
 - **KEDA** for autoscaling (event-driven; scale-to-zero capable) — see `keda` block in the
   chart's `values.yaml` and `templates/keda-scaledobject.yaml`.
@@ -19,7 +19,7 @@ Decisions (locked with the product owner):
 
 ## The cost lever — resource overcommit (CRITICAL)
 For a workload the user requests at, say, **4 GB / 1 CPU** (the advertised/billed size),
-Viro sets the chart's `deployment.resources`:
+Vortex sets the chart's `deployment.resources`:
 
 ```
 requests = requested × overcommitFactor   (default 0.20)   → 0.8 GB / 0.2 CPU  (reserved, scheduled on)
@@ -44,11 +44,11 @@ The DB-backed catalog (WordPress, Ghost, Redis, Postgres, …) maps each templat
 | `service` (WordPress, Ghost, n8n) | `deployment` + `service` + `ingress` (+ `persistence` if needed) | image/ports from the template |
 | `database` (Postgres, MySQL, Mongo, Redis) | `deployment.stateful: true` (StatefulSet) + `service-headless` + `persistence`/`volumeClaimTemplates` | PVC sizing from plan |
 
-Per-workload values Viro computes: image repo/tag, ports, `resources` (overcommit math above),
+Per-workload values Vortex computes: image repo/tag, ports, `resources` (overcommit math above),
 `keda` (triggers + min/max, scale-to-zero for idle web apps via the KEDA HTTP add-on),
 `ingress`/`gateway` host (custom domains), `persistence` (DBs), env via `secret`/`config`.
 
-## How Viro provisions (the Go `KubernetesBackend` — next to implement)
+## How Vortex provisions (the Go `KubernetesBackend` — next to implement)
 The platform layer talks to a `DeployBackend` interface; the Kubernetes implementation:
 1. Ensures the org namespace + `ResourceQuota`/`LimitRange` (from the plan).
 2. Renders `common-chart` values for the workload (mapping above + overcommit).

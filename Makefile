@@ -26,7 +26,7 @@ dev-logs: ## Tail local dependency logs
 api-run: ## Run the Go API (http://localhost:8080)
 	cd $(API_DIR) && $(GO) run ./cmd/api
 api-build: ## Build the API binary into apps/api/bin/
-	cd $(API_DIR) && $(GO) build -o bin/viro-api ./cmd/api
+	cd $(API_DIR) && $(GO) build -o bin/vortex-api ./cmd/api
 api-test: ## Run Go unit tests
 	cd $(API_DIR) && $(GO) test ./...
 api-vet: ## Vet the Go code

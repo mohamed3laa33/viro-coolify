@@ -28,7 +28,7 @@ spec:
             - name: {{ $k }}
               value: {{ $v | quote }}
             {{- end }}
-            - name: NEXT_PUBLIC_VIRO_API_URL
+            - name: NEXT_PUBLIC_VORTEX_API_URL
               value: {{ .Values.web_public_api_url | quote }}
           readinessProbe:
             httpGet: { path: /, port: {{ .Values.web.port }} }

@@ -72,7 +72,7 @@ func TestVersionEndpoint(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if body["service"] != "viro-api" {
+	if body["service"] != "vortex-api" {
 		t.Fatalf("service = %v", body["service"])
 	}
 }

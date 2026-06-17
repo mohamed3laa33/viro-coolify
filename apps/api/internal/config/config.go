@@ -1,4 +1,6 @@
-// Package config loads Viro API runtime configuration from the environment.
+// Package config loads Vortex API runtime configuration from the environment.
+// Variables use the VORTEX_ prefix; the legacy VIRO_ prefix is still accepted
+// as a fallback so existing deployments keep working during the rename.
 package config
 
 import (
@@ -11,7 +13,7 @@ import (
 // defaultDevJWTSecret is the insecure development fallback; it must never be used in production.
 const defaultDevJWTSecret = "dev-insecure-secret-change-me"
 
-// Config holds all runtime configuration for the Viro control-plane API.
+// Config holds all runtime configuration for the Vortex control-plane API.
 type Config struct {
 	Env      string
 	HTTPAddr string
@@ -24,7 +26,7 @@ type Config struct {
 	JWTAccessTTL  int // minutes
 	JWTRefreshTTL int // hours
 
-	// Coolify orchestration backend.
+	// Coolify orchestration backend (legacy/optional; Kubernetes backend is primary).
 	CoolifyBaseURL string
 	CoolifyToken   string
 
@@ -42,22 +44,22 @@ type Config struct {
 // Load reads configuration from environment variables, applying development defaults.
 func Load() (*Config, error) {
 	cfg := &Config{
-		Env:                 getenv("VIRO_ENV", "development"),
-		HTTPAddr:            getenv("VIRO_HTTP_ADDR", ":8080"),
-		DatabaseURL:         getenv("VIRO_DATABASE_URL", ""),
-		JWTSecret:           getenv("VIRO_JWT_SECRET", defaultDevJWTSecret),
-		JWTAccessTTL:        getenvInt("VIRO_JWT_ACCESS_TTL_MIN", 15),
-		JWTRefreshTTL:       getenvInt("VIRO_JWT_REFRESH_TTL_HOURS", 24*30),
-		CoolifyBaseURL:      getenv("VIRO_COOLIFY_BASE_URL", "http://localhost:8000"),
-		CoolifyToken:        getenv("VIRO_COOLIFY_TOKEN", ""),
-		StripeSecretKey:     getenv("VIRO_STRIPE_SECRET_KEY", ""),
-		StripeWebhookSecret: getenv("VIRO_STRIPE_WEBHOOK_SECRET", ""),
-		BillingEnabled:      getenvBool("VIRO_BILLING_ENABLED", false),
-		CORSAllowedOrigins:  splitAndTrim(getenv("VIRO_CORS_ORIGINS", "http://localhost:3000")),
-		AdminEmails:         splitAndTrim(strings.ToLower(getenv("VIRO_ADMIN_EMAILS", ""))),
+		Env:                 getenv("ENV", "development"),
+		HTTPAddr:            getenv("HTTP_ADDR", ":8080"),
+		DatabaseURL:         getenv("DATABASE_URL", ""),
+		JWTSecret:           getenv("JWT_SECRET", defaultDevJWTSecret),
+		JWTAccessTTL:        getenvInt("JWT_ACCESS_TTL_MIN", 15),
+		JWTRefreshTTL:       getenvInt("JWT_REFRESH_TTL_HOURS", 24*30),
+		CoolifyBaseURL:      getenv("COOLIFY_BASE_URL", "http://localhost:8000"),
+		CoolifyToken:        getenv("COOLIFY_TOKEN", ""),
+		StripeSecretKey:     getenv("STRIPE_SECRET_KEY", ""),
+		StripeWebhookSecret: getenv("STRIPE_WEBHOOK_SECRET", ""),
+		BillingEnabled:      getenvBool("BILLING_ENABLED", false),
+		CORSAllowedOrigins:  splitAndTrim(getenv("CORS_ORIGINS", "http://localhost:3000")),
+		AdminEmails:         splitAndTrim(strings.ToLower(getenv("ADMIN_EMAILS", ""))),
 	}
 	if cfg.IsProduction() && (cfg.JWTSecret == "" || cfg.JWTSecret == defaultDevJWTSecret) {
-		return nil, errors.New("VIRO_JWT_SECRET must be set to a strong value in production")
+		return nil, errors.New("VORTEX_JWT_SECRET must be set to a strong value in production")
 	}
 	return cfg, nil
 }
@@ -65,15 +67,27 @@ func Load() (*Config, error) {
 // IsProduction reports whether the API is running in a production environment.
 func (c *Config) IsProduction() bool { return c.Env == "production" }
 
-func getenv(key, fallback string) string {
-	if v, ok := os.LookupEnv(key); ok && v != "" {
+// lookup returns the VORTEX_<suffix> env var, falling back to the legacy
+// VIRO_<suffix> var, then ok=false.
+func lookup(suffix string) (string, bool) {
+	if v, ok := os.LookupEnv("VORTEX_" + suffix); ok && v != "" {
+		return v, true
+	}
+	if v, ok := os.LookupEnv("VIRO_" + suffix); ok && v != "" {
+		return v, true
+	}
+	return "", false
+}
+
+func getenv(suffix, fallback string) string {
+	if v, ok := lookup(suffix); ok {
 		return v
 	}
 	return fallback
 }
 
-func getenvInt(key string, fallback int) int {
-	if v, ok := os.LookupEnv(key); ok {
+func getenvInt(suffix string, fallback int) int {
+	if v, ok := lookup(suffix); ok {
 		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
 			return n
 		}
@@ -81,8 +95,8 @@ func getenvInt(key string, fallback int) int {
 	return fallback
 }
 
-func getenvBool(key string, fallback bool) bool {
-	if v, ok := os.LookupEnv(key); ok {
+func getenvBool(suffix string, fallback bool) bool {
+	if v, ok := lookup(suffix); ok {
 		if b, err := strconv.ParseBool(strings.TrimSpace(v)); err == nil {
 			return b
 		}

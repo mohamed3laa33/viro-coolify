@@ -13,11 +13,11 @@ api:
   name: api
   replicas: 2
   port: 8080
-  image: viro-api
+  image: vortex-api
   env:
-    VIRO_ENV: production
-    VIRO_HTTP_ADDR: ":8080"
-    VIRO_BILLING_ENABLED: "false"
+    VORTEX_ENV: production
+    VORTEX_HTTP_ADDR: ":8080"
+    VORTEX_BILLING_ENABLED: "false"
   resources:
     requests: { cpu: 50m, memory: 64Mi }
     limits: { cpu: 500m, memory: 256Mi }
@@ -26,7 +26,7 @@ web:
   name: web
   replicas: 2
   port: 3000
-  image: viro-web
+  image: vortex-web
   env:
     NODE_ENV: production
   resources:
@@ -48,14 +48,15 @@ secrets:
 # Public URLs.
 web_public_api_url: "https://api.viro.example.com"
 
+# Control-plane routing. The control plane normally runs on Docker; when run on
+# K8s it routes via the Gateway API (NOT the retired ingress-nginx), attaching to
+# the shared Vortex Gateway (deploy/k8s/gateway.yaml) — one LB for everything.
 ingress:
-  enabled: true
-  className: nginx
-  annotations:
-    cert-manager.io/cluster-issuer: letsencrypt-prod
-  apiHost: api.viro.example.com
-  webHost: app.viro.example.com
-  tls: true
+  enabled: false
+  gatewayName: vortex
+  gatewayNamespace: vortex-system
+  apiHost: api.vortex.v60ai.com
+  webHost: app.vortex.v60ai.com
 
 # In-cluster Postgres is optional; production should use DigitalOcean Managed Postgres.
 postgres:

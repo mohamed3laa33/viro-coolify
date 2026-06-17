@@ -36,7 +36,7 @@ func main() {
 	}
 
 	go func() {
-		logger.Info("viro-api starting",
+		logger.Info("vortex-api starting",
 			"addr", cfg.HTTPAddr, "env", cfg.Env, "version", version.Version)
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("http server error", "err", err)
@@ -48,7 +48,7 @@ func main() {
 	defer stop()
 	<-ctx.Done()
 
-	logger.Info("viro-api shutting down")
+	logger.Info("vortex-api shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {

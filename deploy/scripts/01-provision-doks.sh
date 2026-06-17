@@ -7,12 +7,12 @@
 # Configure via env vars (defaults shown):
 set -euo pipefail
 
-CLUSTER_NAME="${VIRO_CLUSTER_NAME:-viro}"
-REGION="${VIRO_REGION:-fra1}"
-NODE_SIZE="${VIRO_NODE_SIZE:-s-2vcpu-4gb}"
-NODE_COUNT="${VIRO_NODE_COUNT:-2}"
-K8S_VERSION="${VIRO_K8S_VERSION:-latest}"
-REGISTRY_NAME="${VIRO_REGISTRY_NAME:-viro}"
+CLUSTER_NAME="${VORTEX_CLUSTER_NAME:-viro}"
+REGION="${VORTEX_REGION:-fra1}"
+NODE_SIZE="${VORTEX_NODE_SIZE:-s-2vcpu-4gb}"
+NODE_COUNT="${VORTEX_NODE_COUNT:-2}"
+K8S_VERSION="${VORTEX_K8S_VERSION:-latest}"
+REGISTRY_NAME="${VORTEX_REGISTRY_NAME:-viro}"
 
 command -v doctl >/dev/null || { echo "doctl not found; install it first"; exit 1; }
 doctl account get >/dev/null || { echo "Run 'doctl auth init' first"; exit 1; }

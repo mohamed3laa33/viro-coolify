@@ -1,0 +1,38 @@
+{{- if .Values.ingress.enabled }}
+# Control-plane routing via the Gateway API. (The control plane normally runs on
+# Docker; this is for running it on K8s.) Attaches to the shared Vortex Gateway —
+# no per-service LoadBalancer. The retired ingress-nginx is intentionally unused.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "viro.fullname" . }}-api
+  labels:
+    {{- include "viro.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    - name: {{ .Values.ingress.gatewayName }}
+      namespace: {{ .Values.ingress.gatewayNamespace }}
+  hostnames:
+    - {{ .Values.ingress.apiHost | quote }}
+  rules:
+    - backendRefs:
+        - name: {{ include "viro.fullname" . }}-api
+          port: 80
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "viro.fullname" . }}-web
+  labels:
+    {{- include "viro.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    - name: {{ .Values.ingress.gatewayName }}
+      namespace: {{ .Values.ingress.gatewayNamespace }}
+  hostnames:
+    - {{ .Values.ingress.webHost | quote }}
+  rules:
+    - backendRefs:
+        - name: {{ include "viro.fullname" . }}-web
+          port: 80
+{{- end }}

@@ -1,10 +1,10 @@
-# Viro architecture
+# Vortex architecture
 
 ## Overview
 
-Viro is a **control-plane + UI** layered over Coolify. Coolify remains the deployment engine
+Vortex is a **control-plane + UI** layered over Coolify. Coolify remains the deployment engine
 (it talks to servers over SSH, builds images, runs Traefik, provisions TLS and databases).
-Viro owns the **product**: identity, multi-tenancy, the fly.io-style experience, and billing.
+Vortex owns the **product**: identity, multi-tenancy, the fly.io-style experience, and billing.
 
 ```
             ┌──────────────────────────────────────────────┐
@@ -36,7 +36,7 @@ Viro owns the **product**: identity, multi-tenancy, the fly.io-style experience,
 
 Design rules:
 - The control-plane never embeds Coolify business logic; it **calls Coolify's API** and stores
-  the returned resource UUIDs against Viro records.
+  the returned resource UUIDs against Vortex records.
 - Everything is interface-driven so units test without a database, network, or Stripe.
 
 ### apps/web — Next.js dashboard
@@ -60,7 +60,7 @@ Each `App`/`Database` carries a `coolify_uuid` linking it to the Coolify resourc
 ## Environments
 - **Local dev**: `docker-compose` runs Postgres + Redis; the Go API and Next.js run on the host
   (or in compose). Coolify is optional locally — mock/skip when not configured.
-- **DigitalOcean**: DOKS cluster; Viro API + web deployed via Helm; managed Postgres; Coolify
+- **DigitalOcean**: DOKS cluster; Vortex API + web deployed via Helm; managed Postgres; Coolify
   runs on its own droplet/node and is reached over its API. (Prepared, not executed.)
 
 ## Security
