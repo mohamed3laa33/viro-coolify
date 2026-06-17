@@ -764,6 +764,44 @@ func (s *PostgresStore) UpdateInvitation(ctx context.Context, inv *domain.Invita
 	return nil
 }
 
+// ---- Refresh tokens (rotation + revocation) ----
+
+func (s *PostgresStore) CreateRefreshToken(ctx context.Context, rt *domain.RefreshToken) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO refresh_tokens (id, user_id, revoked, created_at) VALUES ($1, $2, $3, $4)`,
+		rt.ID, rt.UserID, rt.Revoked, rt.CreatedAt,
+	)
+	return mapErr(err)
+}
+
+func (s *PostgresStore) GetRefreshToken(ctx context.Context, id string) (*domain.RefreshToken, error) {
+	var rt domain.RefreshToken
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, user_id, revoked, created_at FROM refresh_tokens WHERE id = $1`, id,
+	).Scan(&rt.ID, &rt.UserID, &rt.Revoked, &rt.CreatedAt)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return &rt, nil
+}
+
+func (s *PostgresStore) RevokeRefreshToken(ctx context.Context, id string) error {
+	tag, err := s.pool.Exec(ctx, `UPDATE refresh_tokens SET revoked = true WHERE id = $1`, id)
+	if err != nil {
+		return mapErr(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *PostgresStore) RevokeAllUserRefreshTokens(ctx context.Context, userID string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE refresh_tokens SET revoked = true WHERE user_id = $1 AND revoked = false`, userID)
+	return mapErr(err)
+}
+
 // ---- Billing: subscriptions & usage ----
 
 func (s *PostgresStore) UpsertSubscription(ctx context.Context, sub *domain.Subscription) error {

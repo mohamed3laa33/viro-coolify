@@ -59,6 +59,99 @@ func TestCreateUser_Conflict(t *testing.T) {
 	}
 }
 
+func TestCreateRefreshToken_Postgres(t *testing.T) {
+	s, mock := newMockStore(t)
+	defer mock.Close()
+
+	rt := &domain.RefreshToken{ID: "jti-1", UserID: "u1", CreatedAt: time.Now()}
+	mock.ExpectExec("INSERT INTO refresh_tokens").
+		WithArgs("jti-1", "u1", false, rt.CreatedAt).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+
+	if err := s.CreateRefreshToken(context.Background(), rt); err != nil {
+		t.Fatalf("CreateRefreshToken: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+}
+
+func TestGetRefreshToken_Postgres(t *testing.T) {
+	s, mock := newMockStore(t)
+	defer mock.Close()
+
+	created := time.Now()
+	mock.ExpectQuery("SELECT id, user_id, revoked, created_at FROM refresh_tokens").
+		WithArgs("jti-1").
+		WillReturnRows(pgxmock.NewRows([]string{"id", "user_id", "revoked", "created_at"}).
+			AddRow("jti-1", "u1", true, created))
+
+	got, err := s.GetRefreshToken(context.Background(), "jti-1")
+	if err != nil {
+		t.Fatalf("GetRefreshToken: %v", err)
+	}
+	if got.ID != "jti-1" || got.UserID != "u1" || !got.Revoked {
+		t.Fatalf("unexpected record: %+v", got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+}
+
+func TestGetRefreshToken_NotFound_Postgres(t *testing.T) {
+	s, mock := newMockStore(t)
+	defer mock.Close()
+
+	mock.ExpectQuery("SELECT id, user_id, revoked, created_at FROM refresh_tokens").
+		WithArgs("missing").
+		WillReturnError(pgx.ErrNoRows)
+
+	if _, err := s.GetRefreshToken(context.Background(), "missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+}
+
+func TestRevokeRefreshToken_Postgres(t *testing.T) {
+	s, mock := newMockStore(t)
+	defer mock.Close()
+
+	mock.ExpectExec("UPDATE refresh_tokens SET revoked = true WHERE id").
+		WithArgs("jti-1").
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	if err := s.RevokeRefreshToken(context.Background(), "jti-1"); err != nil {
+		t.Fatalf("RevokeRefreshToken: %v", err)
+	}
+
+	// No rows affected -> ErrNotFound.
+	mock.ExpectExec("UPDATE refresh_tokens SET revoked = true WHERE id").
+		WithArgs("missing").
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	if err := s.RevokeRefreshToken(context.Background(), "missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+}
+
+func TestRevokeAllUserRefreshTokens_Postgres(t *testing.T) {
+	s, mock := newMockStore(t)
+	defer mock.Close()
+
+	mock.ExpectExec("UPDATE refresh_tokens SET revoked = true WHERE user_id").
+		WithArgs("u1").
+		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
+	if err := s.RevokeAllUserRefreshTokens(context.Background(), "u1"); err != nil {
+		t.Fatalf("RevokeAllUserRefreshTokens: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+}
+
 func TestGetUserByEmail_NotFound(t *testing.T) {
 	s, mock := newMockStore(t)
 	defer mock.Close()

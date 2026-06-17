@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 )
 
 // TokenType distinguishes access and refresh tokens.
@@ -50,18 +51,30 @@ func (m *TokenManager) ttl(t TokenType) time.Duration {
 	return m.accessTTL
 }
 
-// Issue signs a token of the given type for the user.
+// Issue signs a token of the given type for the user. A unique token id (jti) is
+// embedded so that refresh tokens can be tracked, rotated and revoked; callers
+// that need the jti (e.g. to persist a refresh-token record) should use
+// IssueWithID.
 func (m *TokenManager) Issue(userID string, t TokenType) (string, error) {
+	tok, _, err := m.IssueWithID(userID, t)
+	return tok, err
+}
+
+// IssueWithID signs a token like Issue and additionally returns its jti claim.
+func (m *TokenManager) IssueWithID(userID string, t TokenType) (token, jti string, err error) {
 	now := m.now()
+	jti = uuid.NewString()
 	claims := Claims{
 		Type: t,
 		RegisteredClaims: jwt.RegisteredClaims{
+			ID:        jti,
 			Subject:   userID,
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(m.ttl(t))),
 		},
 	}
-	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(m.secret)
+	token, err = jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(m.secret)
+	return token, jti, err
 }
 
 // Verify parses and validates a token, requiring it to be of the expected type.

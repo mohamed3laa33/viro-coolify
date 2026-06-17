@@ -99,6 +99,71 @@ func TestRefresh(t *testing.T) {
 	}
 }
 
+// TestRefreshRotationRevokesOldToken asserts refresh-token rotation: after a
+// successful refresh the OLD refresh token is revoked and rejected (401),
+// while the freshly issued one works.
+func TestRefreshRotationRevokesOldToken(t *testing.T) {
+	svc := newService()
+	ctx := context.Background()
+	res, err := svc.Signup(ctx, "rot@example.com", "Rot", "supersecret")
+	if err != nil {
+		t.Fatalf("signup: %v", err)
+	}
+	rotated, err := svc.Refresh(ctx, res.Refresh)
+	if err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	// Reusing the original refresh token after rotation must fail.
+	if _, err := svc.Refresh(ctx, res.Refresh); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("expected reused refresh token to be rejected, got %v", err)
+	}
+	// The newly issued refresh token works.
+	if _, err := svc.Refresh(ctx, rotated.Refresh); err != nil {
+		t.Fatalf("rotated refresh token should work: %v", err)
+	}
+}
+
+// TestRefreshUnknownJTIRejected asserts a structurally-valid refresh token whose
+// jti has no stored record (e.g. issued by a prior key or never persisted) is
+// rejected.
+func TestRefreshUnknownJTIRejected(t *testing.T) {
+	svc := newService()
+	ctx := context.Background()
+	res, err := svc.Signup(ctx, "unknown@example.com", "U", "supersecret")
+	if err != nil {
+		t.Fatalf("signup: %v", err)
+	}
+	// Issue a refresh token directly via the token manager (no stored record).
+	orphan, err := svc.tokens.Issue(res.User.ID, auth.RefreshToken)
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+	if _, err := svc.Refresh(ctx, orphan); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("expected unknown-jti refresh to be rejected, got %v", err)
+	}
+}
+
+// TestLogoutRevokesRefreshToken asserts logout revokes the caller's refresh
+// token so it can no longer be used.
+func TestLogoutRevokesRefreshToken(t *testing.T) {
+	svc := newService()
+	ctx := context.Background()
+	res, err := svc.Signup(ctx, "logout@example.com", "L", "supersecret")
+	if err != nil {
+		t.Fatalf("signup: %v", err)
+	}
+	if err := svc.Logout(ctx, res.Refresh); err != nil {
+		t.Fatalf("logout: %v", err)
+	}
+	if _, err := svc.Refresh(ctx, res.Refresh); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("expected refresh after logout to fail, got %v", err)
+	}
+	// Logout is idempotent / tolerant of empty or invalid tokens.
+	if err := svc.Logout(ctx, ""); err != nil {
+		t.Fatalf("logout empty: %v", err)
+	}
+}
+
 func TestAuthorizeRequiresMembership(t *testing.T) {
 	svc := newService()
 	ctx := context.Background()

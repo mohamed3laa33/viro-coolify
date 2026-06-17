@@ -79,6 +79,12 @@ type Store interface {
 	ListInvitationsByOrg(ctx context.Context, orgID string) ([]domain.Invitation, error)
 	UpdateInvitation(ctx context.Context, inv *domain.Invitation) error
 
+	// Refresh tokens (rotation + revocation; keyed by jti).
+	CreateRefreshToken(ctx context.Context, rt *domain.RefreshToken) error
+	GetRefreshToken(ctx context.Context, id string) (*domain.RefreshToken, error)
+	RevokeRefreshToken(ctx context.Context, id string) error
+	RevokeAllUserRefreshTokens(ctx context.Context, userID string) error
+
 	// Billing.
 	UpsertSubscription(ctx context.Context, s *domain.Subscription) error
 	GetSubscription(ctx context.Context, orgID string) (*domain.Subscription, error)

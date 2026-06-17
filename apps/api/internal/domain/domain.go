@@ -264,3 +264,15 @@ type UsageRecord struct {
 	Quantity int64     `json:"quantity"`
 	At       time.Time `json:"at"`
 }
+
+// RefreshToken is a persisted record of an issued refresh token, keyed by the
+// token's jti claim. It backs refresh-token rotation and revocation: a token is
+// only honored while a matching, non-revoked record exists. On rotation the old
+// record is revoked and a new one stored, so a revoked or unknown jti is treated
+// as a reuse attempt and rejected.
+type RefreshToken struct {
+	ID        string    `json:"id"` // jti embedded in the refresh JWT
+	UserID    string    `json:"userId"`
+	Revoked   bool      `json:"revoked"`
+	CreatedAt time.Time `json:"createdAt"`
+}

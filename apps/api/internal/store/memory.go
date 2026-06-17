@@ -28,6 +28,7 @@ type MemoryStore struct {
 	plans          map[string]domain.Plan              // by id
 	templates      map[string]domain.ServiceTemplate   // by key
 	pricing        map[string]domain.PricingComponent  // by key
+	refreshTokens  map[string]domain.RefreshToken      // by jti
 	settings       domain.PlatformSettings             // singleton
 }
 
@@ -52,6 +53,7 @@ func NewMemoryStore() *MemoryStore {
 		plans:          make(map[string]domain.Plan),
 		templates:      make(map[string]domain.ServiceTemplate),
 		pricing:        make(map[string]domain.PricingComponent),
+		refreshTokens:  make(map[string]domain.RefreshToken),
 	}
 	s.seed()
 	return s
@@ -467,6 +469,52 @@ func (s *MemoryStore) UpdateInvitation(_ context.Context, inv *domain.Invitation
 		return ErrNotFound
 	}
 	s.invitations[inv.ID] = *inv
+	return nil
+}
+
+// ---- Refresh tokens (rotation + revocation) ----
+
+func (s *MemoryStore) CreateRefreshToken(_ context.Context, rt *domain.RefreshToken) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.refreshTokens[rt.ID]; exists {
+		return ErrConflict
+	}
+	s.refreshTokens[rt.ID] = *rt
+	return nil
+}
+
+func (s *MemoryStore) GetRefreshToken(_ context.Context, id string) (*domain.RefreshToken, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rt, ok := s.refreshTokens[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return &rt, nil
+}
+
+func (s *MemoryStore) RevokeRefreshToken(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rt, ok := s.refreshTokens[id]
+	if !ok {
+		return ErrNotFound
+	}
+	rt.Revoked = true
+	s.refreshTokens[id] = rt
+	return nil
+}
+
+func (s *MemoryStore) RevokeAllUserRefreshTokens(_ context.Context, userID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, rt := range s.refreshTokens {
+		if rt.UserID == userID && !rt.Revoked {
+			rt.Revoked = true
+			s.refreshTokens[id] = rt
+		}
+	}
 	return nil
 }
 

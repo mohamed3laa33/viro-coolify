@@ -193,6 +193,7 @@ func (s *Server) routes() chi.Router {
 			r.Use(s.authMiddleware)
 
 			r.Get("/me", s.handleMe)
+			r.Post("/auth/logout", s.handleLogout)
 
 			// Accept an invitation (to an org or a project) as the current user.
 			r.Post("/invitations/accept", s.handleAcceptInvitation)
