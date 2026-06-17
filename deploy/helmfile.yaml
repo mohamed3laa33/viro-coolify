@@ -1,15 +1,15 @@
-# Vortex — full control-plane deployment for Kubernetes (one command).
+# Vortex — full control-plane deployment for Kubernetes, FULLY AUTOMATED.
+# Point it at any plain/new cluster and run ONE command — no manual kubectl:
 #
-# Brings up the platform prerequisites (Gateway API controller, KEDA, cert-manager,
-# metrics-server) and the Vortex control plane (api + web) wired to Postgres.
+#   VORTEX_JWT_SECRET=$(openssl rand -hex 32) \
+#   VORTEX_DO_TOKEN=dop_v1_xxx \
+#     helmfile -f deploy/helmfile.yaml apply
 #
-#   # 1) one-time raw manifests (Postgres + the shared Gateway):
-#   kubectl apply -f deploy/k8s/postgres.yaml
-#   kubectl apply -f deploy/k8s/gateway.yaml
-#   # 2) install Gateway API CRDs (once):
-#   kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml
-#   # 3) everything else:
-#   helmfile -f deploy/helmfile.yaml apply
+# It installs (in dependency order via `needs`): Gateway API CRDs + Envoy Gateway,
+# cert-manager, KEDA, metrics-server, then the vortex-bootstrap chart (Postgres +
+# shared Gateway + GatewayClass + DNS-01 issuer + wildcard TLS), then the Vortex
+# control plane (api + web) wired to Postgres. Envoy Gateway's chart bundles the
+# Gateway API CRDs, so there is nothing to apply by hand.
 #
 # Config via env vars (see defaults below).
 
@@ -32,6 +32,8 @@ environments:
         adminEmails: '{{ env "VORTEX_ADMIN_EMAILS" | default "" }}'
         stripeSecretKey: '{{ env "VORTEX_STRIPE_SECRET_KEY" | default "" }}'
         stripeWebhookSecret: '{{ env "VORTEX_STRIPE_WEBHOOK_SECRET" | default "" }}'
+        pgPassword: '{{ env "VORTEX_PG_PASSWORD" | default "change-me-in-production" }}'
+        doToken: '{{ env "VORTEX_DO_TOKEN" | default "" }}'
 
 ---
 
@@ -62,11 +64,28 @@ releases:
       - args:
           - --kubelet-insecure-tls
 
+  # ---- Cluster bootstrap: Postgres + shared Gateway + DNS-01 issuer + wildcard TLS ----
+  - name: vortex-bootstrap
+    namespace: vortex
+    createNamespace: true
+    chart: ./charts/vortex-bootstrap
+    needs:
+      - cert-manager/cert-manager
+      - envoy-gateway-system/envoy-gateway
+    values:
+      - baseDomain: '{{ .Values.baseDomain }}'
+        postgres:
+          password: '{{ .Values.pgPassword }}'
+        tls:
+          digitalOceanToken: '{{ .Values.doToken }}'
+
   # ---- Vortex control plane (api + web) wired to Postgres ----
   - name: vortex
     namespace: vortex
     createNamespace: true
     chart: ./helm/viro
+    needs:
+      - vortex/vortex-bootstrap
     values:
       - image:
           registry: '{{ .Values.registry }}'
@@ -80,6 +99,8 @@ releases:
         web_public_api_url: 'https://api.{{ .Values.baseDomain }}'
         ingress:
           enabled: true
+          gatewayName: vortex
+          gatewayNamespace: vortex
           apiHost: 'api.{{ .Values.baseDomain }}'
           webHost: 'app.{{ .Values.baseDomain }}'
         secrets:

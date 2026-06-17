@@ -1,30 +1,20 @@
-# In-cluster Postgres for the Vortex control plane (self-contained clusters / dev).
-# For production, prefer DigitalOcean Managed Postgres (deploy/terraform) and point
-# the control plane at it via secrets.databaseUrl — then skip this file.
-# Uses the official postgres image (no deprecated Bitnami dependency).
-#   kubectl apply -f deploy/k8s/postgres.yaml
----
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: vortex
----
+{{- if .Values.postgres.enabled }}
 apiVersion: v1
 kind: Secret
 metadata:
   name: vortex-postgres
-  namespace: vortex
+  namespace: {{ .Release.Namespace }}
 type: Opaque
 stringData:
   POSTGRES_USER: vortex
-  POSTGRES_PASSWORD: "change-me-in-production"
+  POSTGRES_PASSWORD: {{ .Values.postgres.password | quote }}
   POSTGRES_DB: vortex
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: vortex-postgres
-  namespace: vortex
+  namespace: {{ .Release.Namespace }}
   labels: { app: vortex-postgres }
 spec:
   selector: { app: vortex-postgres }
@@ -36,7 +26,7 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: vortex-postgres
-  namespace: vortex
+  namespace: {{ .Release.Namespace }}
 spec:
   serviceName: vortex-postgres
   replicas: 1
@@ -53,7 +43,7 @@ spec:
         fsGroup: 70
       containers:
         - name: postgres
-          image: postgres:16-alpine
+          image: {{ .Values.postgres.image | quote }}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -61,8 +51,7 @@ spec:
           ports:
             - containerPort: 5432
           envFrom:
-            - secretRef:
-                name: vortex-postgres
+            - secretRef: { name: vortex-postgres }
           env:
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
@@ -81,10 +70,10 @@ spec:
             - name: data
               mountPath: /var/lib/postgresql/data
   volumeClaimTemplates:
-    - metadata:
-        name: data
+    - metadata: { name: data }
       spec:
         accessModes: ["ReadWriteOnce"]
         resources:
           requests:
-            storage: 10Gi
+            storage: {{ .Values.postgres.storage }}
+{{- end }}

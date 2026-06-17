@@ -1,0 +1,18 @@
+baseDomain: vortex.v60ai.com
+acmeEmail: admin@v60ai.com
+
+postgres:
+  enabled: true
+  image: postgres:16-alpine
+  password: change-me-in-production
+  storage: 10Gi
+
+gateway:
+  name: vortex
+  className: vortex
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+
+tls:
+  enabled: true
+  # DigitalOcean API token for cert-manager DNS-01 wildcard issuance.
+  digitalOceanToken: ""

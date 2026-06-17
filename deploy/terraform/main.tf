@@ -32,6 +32,14 @@ resource "digitalocean_kubernetes_cluster" "viro" {
   version  = var.k8s_version
   vpc_uuid = digitalocean_vpc.viro.id
 
+  # Security/maintenance: keep the cluster patched automatically.
+  auto_upgrade  = true
+  surge_upgrade = true
+  maintenance_policy {
+    start_time = "04:00"
+    day        = "sunday"
+  }
+
   node_pool {
     name       = "default"
     size       = var.node_size

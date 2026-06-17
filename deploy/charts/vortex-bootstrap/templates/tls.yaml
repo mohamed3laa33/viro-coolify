@@ -1,0 +1,46 @@
+{{- if .Values.tls.enabled }}
+# cert-manager resolves a ClusterIssuer's DNS-01 token from its own namespace
+# (cluster-resource-namespace, default "cert-manager").
+apiVersion: v1
+kind: Secret
+metadata:
+  name: do-dns
+  namespace: cert-manager
+type: Opaque
+stringData:
+  access-token: {{ .Values.tls.digitalOceanToken | quote }}
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: vortex-letsencrypt
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: {{ .Values.acmeEmail }}
+    privateKeySecretRef:
+      name: vortex-letsencrypt-account
+    solvers:
+      - dns01:
+          digitalocean:
+            tokenSecretRef:
+              name: do-dns
+              key: access-token
+---
+# Platform wildcard (api., app., and <org>.<baseDomain>). Deeper per-tenant
+# subdomains (<app>.<project>.<org>.<baseDomain>) are covered by per-org wildcard
+# certs the control plane issues on org creation.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: vortex-wildcard
+  namespace: {{ .Release.Namespace }}
+spec:
+  secretName: vortex-wildcard-tls
+  issuerRef:
+    name: vortex-letsencrypt
+    kind: ClusterIssuer
+  dnsNames:
+    - "{{ .Values.baseDomain }}"
+    - "*.{{ .Values.baseDomain }}"
+{{- end }}

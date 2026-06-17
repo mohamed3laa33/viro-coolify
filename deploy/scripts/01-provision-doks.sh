@@ -31,44 +31,16 @@ else
   echo "    cluster already exists"
 fi
 
-echo "==> Wiring kubeconfig + registry credentials into the cluster"
+echo "==> Saving kubeconfig"
 doctl kubernetes cluster kubeconfig save "${CLUSTER_NAME}"
-doctl registry kubernetes-manifest | kubectl apply -f -
 
-# NOTE: ingress-nginx (kubernetes/ingress-nginx) is being RETIRED
-# (https://kubernetes.io/blog/2025/11/11/ingress-nginx-retirement/) — do NOT use it.
-# Vortex routes via the Gateway API: ONE shared Gateway (= one LoadBalancer) +
-# per-app HTTPRoute. Default controller: Envoy Gateway (Gateway-API-native, CNCF).
-GATEWAY_API_VERSION="${VORTEX_GATEWAY_API_VERSION:-v1.2.1}"
-ENVOY_GATEWAY_VERSION="${VORTEX_ENVOY_GATEWAY_VERSION:-v1.2.4}"
-CERT_MANAGER_VERSION="${VORTEX_CERT_MANAGER_VERSION:-v1.16.3}"
-KEDA_VERSION="${VORTEX_KEDA_VERSION:-2.16.0}"
+echo "==> Registry: enable the DOCR integration for this cluster"
+doctl kubernetes cluster registry add "${CLUSTER_NAME}" 2>/dev/null || \
+  echo "    (enable DOCR integration in the DO control panel if the above is unavailable)"
 
-echo "==> Installing Gateway API CRDs (${GATEWAY_API_VERSION})"
-kubectl apply -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
-
-echo "==> Installing Envoy Gateway (${ENVOY_GATEWAY_VERSION})"
-helm upgrade --install envoy-gateway oci://docker.io/envoyproxy/gateway-helm \
-  --version "${ENVOY_GATEWAY_VERSION}" -n envoy-gateway-system --create-namespace --wait
-
-echo "==> Installing cert-manager (${CERT_MANAGER_VERSION}) — supports Gateway API"
-kubectl apply -f "https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml"
-
-echo "==> Installing KEDA (${KEDA_VERSION}) for event-driven autoscaling + scale-to-zero"
-helm repo add kedacore https://kedacore.github.io/charts >/dev/null 2>&1 || true
-helm repo update >/dev/null
-helm upgrade --install keda kedacore/keda --version "${KEDA_VERSION}" \
-  -n keda --create-namespace --wait
-
-echo "==> Installing metrics-server (for HPA/KEDA cpu/mem + the metrics UI)"
-helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/ >/dev/null 2>&1 || true
-helm repo update >/dev/null
-helm upgrade --install metrics-server metrics-server/metrics-server \
-  -n kube-system --set 'args={--kubelet-insecure-tls}' --wait || true
-
-echo "==> Applying the single shared Gateway (one LoadBalancer) + wildcard TLS"
-echo "    (edit deploy/k8s/gateway.yaml for your domain + DNS-01 issuer first)"
-kubectl apply -f "$(cd "$(dirname "${BASH_SOURCE[0]}")/../k8s" && pwd)/gateway.yaml" || \
-  echo "    skipped — configure deploy/k8s/gateway.yaml then: kubectl apply -f deploy/k8s/gateway.yaml"
+# Everything else — Gateway API + Envoy Gateway, cert-manager, KEDA, metrics-server,
+# Postgres, the shared Gateway + wildcard TLS, and the Vortex control plane — is
+# installed by helmfile in dependency order. NO manual kubectl. ingress-nginx is
+# retired (k8s blog 2025-11-11) and intentionally unused; routing is the Gateway API.
 
 echo "==> Done. Next: ./deploy/scripts/02-build-and-push.sh"

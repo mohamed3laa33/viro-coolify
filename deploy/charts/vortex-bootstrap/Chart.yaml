@@ -1,0 +1,6 @@
+apiVersion: v2
+name: vortex-bootstrap
+description: Vortex cluster bootstrap — Postgres + shared Gateway + GatewayClass + cert-manager DNS-01 issuer + wildcard TLS. Makes a plain K8s cluster ready for the Vortex control plane, fully automated (no manual kubectl).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
