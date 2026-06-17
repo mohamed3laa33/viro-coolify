@@ -83,6 +83,18 @@ func (s *Service) CreateApp(ctx context.Context, orgID string, in CreateAppInput
 	return app, nil
 }
 
+// AppLogs returns recent logs for an org's app (empty in demo mode / no Coolify).
+func (s *Service) AppLogs(ctx context.Context, orgID, appID string) (string, error) {
+	app, err := s.ownedApp(ctx, orgID, appID)
+	if err != nil {
+		return "", err
+	}
+	if !s.coolify.Configured() || app.CoolifyUUID == "" {
+		return "", nil
+	}
+	return s.coolify.GetApplicationLogs(ctx, app.CoolifyUUID)
+}
+
 // ListApps returns the apps belonging to the org.
 func (s *Service) ListApps(ctx context.Context, orgID string) ([]domain.App, error) {
 	return s.store.ListAppsByOrg(ctx, orgID)

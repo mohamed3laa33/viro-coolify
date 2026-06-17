@@ -131,6 +131,15 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, app)
 }
 
+func (s *Server) handleAppLogs(w http.ResponseWriter, r *http.Request) {
+	logs, err := s.platform.AppLogs(r.Context(), chi.URLParam(r, "orgID"), chi.URLParam(r, "appID"))
+	if err != nil {
+		s.writePlatformError(w, "app logs", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"logs": logs})
+}
+
 type createDatabaseRequest struct {
 	Name   string `json:"name"`
 	Engine string `json:"engine"`

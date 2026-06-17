@@ -117,6 +117,7 @@ func (s *Server) routes() chi.Router {
 						r.With(s.orgAuthz(domain.RoleMember)).Get("/", s.handleListApps)
 						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/", s.handleCreateApp)
 						r.With(s.orgAuthz(domain.RoleMember)).Get("/{appID}", s.handleGetApp)
+						r.With(s.orgAuthz(domain.RoleMember)).Get("/{appID}/logs", s.handleAppLogs)
 						r.With(s.orgAuthz(domain.RoleAdmin)).Delete("/{appID}", s.handleDeleteApp)
 						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/{appID}/deploy", s.handleDeployApp)
 						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/{appID}/stop", s.handleStopApp)

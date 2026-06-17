@@ -131,6 +131,17 @@ func (c *Client) ListDatabases(ctx context.Context) ([]Database, error) {
 	return dbs, nil
 }
 
+// GetApplicationLogs returns recent logs for the application.
+func (c *Client) GetApplicationLogs(ctx context.Context, uuid string) (string, error) {
+	var out struct {
+		Logs string `json:"logs"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/applications/"+url.PathEscape(uuid)+"/logs", nil, &out); err != nil {
+		return "", err
+	}
+	return out.Logs, nil
+}
+
 // Version returns the Coolify instance version string.
 func (c *Client) Version(ctx context.Context) (string, error) {
 	var v string
