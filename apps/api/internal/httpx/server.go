@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/auth"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/billing"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/config"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/coolify"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/domain"
@@ -26,6 +27,7 @@ type Server struct {
 	tokens   *auth.TokenManager
 	identity *identity.Service
 	platform *platform.Service
+	billing  *billing.Service
 	router   chi.Router
 }
 
@@ -42,6 +44,22 @@ func NewServer(cfg *config.Config, logger *slog.Logger) *Server {
 		time.Duration(cfg.JWTRefreshTTL)*time.Hour,
 	)
 	cool := coolify.NewClient(cfg.CoolifyBaseURL, cfg.CoolifyToken)
+
+	// Payment provider: Stripe when billing is enabled and configured, else a mock
+	// that activates subscriptions locally (so the billing UX works in dev).
+	var provider billing.PaymentProvider = billing.MockProvider{}
+	if cfg.BillingEnabled && cfg.StripeSecretKey != "" {
+		webBase := "http://localhost:3000"
+		if len(cfg.CORSAllowedOrigins) > 0 {
+			webBase = cfg.CORSAllowedOrigins[0]
+		}
+		provider = billing.NewStripeProvider(
+			cfg.StripeSecretKey,
+			webBase+"/dashboard/settings?billing=success",
+			webBase+"/dashboard/settings?billing=cancel",
+		)
+	}
+
 	s := &Server{
 		cfg:      cfg,
 		logger:   logger,
@@ -50,6 +68,7 @@ func NewServer(cfg *config.Config, logger *slog.Logger) *Server {
 		tokens:   tokens,
 		identity: identity.NewService(st, tokens),
 		platform: platform.NewService(st, cool),
+		billing:  billing.NewService(st, provider),
 	}
 	s.router = s.routes()
 	return s
@@ -76,6 +95,10 @@ func (s *Server) routes() chi.Router {
 		r.Post("/auth/signup", s.handleSignup)
 		r.Post("/auth/login", s.handleLogin)
 		r.Post("/auth/refresh", s.handleRefresh)
+
+		// Public billing: the plan catalog and the Stripe webhook (signature-verified).
+		r.Get("/billing/plans", s.handlePlans)
+		r.Post("/billing/webhook", s.handleStripeWebhook)
 
 		// Authenticated endpoints.
 		r.Group(func(r chi.Router) {
@@ -104,6 +127,9 @@ func (s *Server) routes() chi.Router {
 						r.With(s.orgAuthz(domain.RoleMember)).Get("/", s.handleListDatabases)
 						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/", s.handleCreateDatabase)
 					})
+
+					r.With(s.orgAuthz(domain.RoleMember)).Get("/billing", s.handleGetBilling)
+					r.With(s.orgAuthz(domain.RoleAdmin)).Post("/billing/subscribe", s.handleSubscribe)
 				})
 			})
 		})

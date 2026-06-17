@@ -82,3 +82,45 @@ type Database struct {
 	Status      string    `json:"status"`
 	CreatedAt   time.Time `json:"createdAt"`
 }
+
+// Plan is a billing plan in the Viro catalog (fly.io-style usage-based pricing).
+type Plan struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Description   string `json:"description"`
+	PriceCents    int    `json:"priceCents"`     // monthly base price
+	Currency      string `json:"currency"`       // e.g. "usd"
+	IncludedHours int    `json:"includedHours"`  // included compute-hours per month
+	OveragePerHourCents int `json:"overagePerHourCents"`
+	StripePriceID string `json:"-"`              // mapped to a Stripe price when billing is live
+}
+
+// SubscriptionStatus mirrors the lifecycle of a subscription.
+type SubscriptionStatus string
+
+const (
+	SubActive     SubscriptionStatus = "active"
+	SubTrialing   SubscriptionStatus = "trialing"
+	SubIncomplete SubscriptionStatus = "incomplete"
+	SubCanceled   SubscriptionStatus = "canceled"
+)
+
+// Subscription is an organization's billing subscription.
+type Subscription struct {
+	OrgID                string             `json:"orgId"`
+	PlanID               string             `json:"planId"`
+	Status               SubscriptionStatus `json:"status"`
+	StripeCustomerID     string             `json:"-"`
+	StripeSubscriptionID string             `json:"-"`
+	CreatedAt            time.Time          `json:"createdAt"`
+	CurrentPeriodEnd     time.Time          `json:"currentPeriodEnd"`
+}
+
+// UsageRecord is a metered usage event for an organization.
+type UsageRecord struct {
+	ID       string    `json:"id"`
+	OrgID    string    `json:"orgId"`
+	Metric   string    `json:"metric"` // e.g. "compute_hours", "builds", "egress_gb"
+	Quantity int64     `json:"quantity"`
+	At       time.Time `json:"at"`
+}

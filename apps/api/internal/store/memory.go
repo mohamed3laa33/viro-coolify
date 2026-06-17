@@ -17,6 +17,8 @@ type MemoryStore struct {
 	memberships   map[string]domain.Membership // key: orgID + "\x00" + userID
 	apps          map[string]domain.App        // by id
 	databases     map[string]domain.Database   // by id
+	subscriptions map[string]domain.Subscription // by orgID
+	usage         map[string][]domain.UsageRecord // by orgID
 }
 
 // NewMemoryStore returns an empty in-memory store.
@@ -28,6 +30,8 @@ func NewMemoryStore() *MemoryStore {
 		memberships:   make(map[string]domain.Membership),
 		apps:          make(map[string]domain.App),
 		databases:     make(map[string]domain.Database),
+		subscriptions: make(map[string]domain.Subscription),
+		usage:         make(map[string][]domain.UsageRecord),
 	}
 }
 
@@ -209,5 +213,37 @@ func (s *MemoryStore) ListDatabasesByOrg(_ context.Context, orgID string) ([]dom
 			out = append(out, d)
 		}
 	}
+	return out, nil
+}
+
+func (s *MemoryStore) UpsertSubscription(_ context.Context, sub *domain.Subscription) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.subscriptions[sub.OrgID] = *sub
+	return nil
+}
+
+func (s *MemoryStore) GetSubscription(_ context.Context, orgID string) (*domain.Subscription, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	sub, ok := s.subscriptions[orgID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return &sub, nil
+}
+
+func (s *MemoryStore) AddUsage(_ context.Context, u *domain.UsageRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.usage[u.OrgID] = append(s.usage[u.OrgID], *u)
+	return nil
+}
+
+func (s *MemoryStore) ListUsageByOrg(_ context.Context, orgID string) ([]domain.UsageRecord, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]domain.UsageRecord, len(s.usage[orgID]))
+	copy(out, s.usage[orgID])
 	return out, nil
 }

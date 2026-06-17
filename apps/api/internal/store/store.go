@@ -42,4 +42,10 @@ type Store interface {
 	// Databases (tenant-scoped).
 	CreateDatabase(ctx context.Context, d *domain.Database) error
 	ListDatabasesByOrg(ctx context.Context, orgID string) ([]domain.Database, error)
+
+	// Billing.
+	UpsertSubscription(ctx context.Context, s *domain.Subscription) error
+	GetSubscription(ctx context.Context, orgID string) (*domain.Subscription, error)
+	AddUsage(ctx context.Context, u *domain.UsageRecord) error
+	ListUsageByOrg(ctx context.Context, orgID string) ([]domain.UsageRecord, error)
 }

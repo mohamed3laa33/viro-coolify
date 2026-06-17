@@ -1,0 +1,104 @@
+package billing
+
+import (
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/domain"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/store"
+)
+
+func TestPlanByID(t *testing.T) {
+	if _, ok := PlanByID("launch"); !ok {
+		t.Fatal("expected launch plan in catalog")
+	}
+	if _, ok := PlanByID("nope"); ok {
+		t.Fatal("did not expect unknown plan")
+	}
+}
+
+func TestSubscribeAndGetBilling(t *testing.T) {
+	svc := NewService(store.NewMemoryStore(), MockProvider{})
+	ctx := context.Background()
+
+	res, err := svc.Subscribe(ctx, "org-1", "launch", "owner@example.com")
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	if res.Subscription.Status != domain.SubActive {
+		t.Fatalf("status = %q, want active", res.Subscription.Status)
+	}
+	if res.Subscription.StripeCustomerID != "cus_mock_org-1" {
+		t.Fatalf("customer id = %q", res.Subscription.StripeCustomerID)
+	}
+
+	if err := svc.RecordUsage(ctx, "org-1", "compute_hours", 5); err != nil {
+		t.Fatalf("usage: %v", err)
+	}
+	if err := svc.RecordUsage(ctx, "org-1", "compute_hours", 3); err != nil {
+		t.Fatalf("usage: %v", err)
+	}
+
+	sum, err := svc.GetBilling(ctx, "org-1")
+	if err != nil {
+		t.Fatalf("get billing: %v", err)
+	}
+	if sum.Plan == nil || sum.Plan.ID != "launch" {
+		t.Fatalf("plan = %+v", sum.Plan)
+	}
+	if sum.Usage["compute_hours"] != 8 {
+		t.Fatalf("usage sum = %d, want 8", sum.Usage["compute_hours"])
+	}
+}
+
+func TestSubscribeUnknownPlan(t *testing.T) {
+	svc := NewService(store.NewMemoryStore(), MockProvider{})
+	if _, err := svc.Subscribe(context.Background(), "org-1", "enterprise", "x@y.z"); !errors.Is(err, ErrUnknownPlan) {
+		t.Fatalf("expected ErrUnknownPlan, got %v", err)
+	}
+}
+
+func TestGetBillingNoSubscription(t *testing.T) {
+	svc := NewService(store.NewMemoryStore(), nil) // nil -> MockProvider
+	sum, err := svc.GetBilling(context.Background(), "org-x")
+	if err != nil {
+		t.Fatalf("get billing: %v", err)
+	}
+	if sum.Subscription != nil {
+		t.Fatalf("expected no subscription, got %+v", sum.Subscription)
+	}
+}
+
+func TestVerifyWebhookSignature(t *testing.T) {
+	secret := "whsec_test"
+	payload := []byte(`{"type":"customer.subscription.updated"}`)
+	ts := "1700000000"
+
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(ts + "."))
+	mac.Write(payload)
+	sig := hex.EncodeToString(mac.Sum(nil))
+	header := "t=" + ts + ",v1=" + sig
+
+	// Valid signature (tolerance 0 disables the freshness check).
+	if err := VerifyWebhookSignature(payload, header, secret, 0, time.Now()); err != nil {
+		t.Fatalf("expected valid signature, got %v", err)
+	}
+	// Tampered payload.
+	if err := VerifyWebhookSignature([]byte(`{"type":"evil"}`), header, secret, 0, time.Now()); !errors.Is(err, ErrInvalidSignature) {
+		t.Fatalf("expected ErrInvalidSignature for tampered payload, got %v", err)
+	}
+	// Wrong secret.
+	if err := VerifyWebhookSignature(payload, header, "whsec_other", 0, time.Now()); !errors.Is(err, ErrInvalidSignature) {
+		t.Fatalf("expected ErrInvalidSignature for wrong secret, got %v", err)
+	}
+	// Missing secret.
+	if err := VerifyWebhookSignature(payload, header, "", 0, time.Now()); !errors.Is(err, ErrInvalidSignature) {
+		t.Fatalf("expected ErrInvalidSignature for empty secret, got %v", err)
+	}
+}

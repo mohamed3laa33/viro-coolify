@@ -34,8 +34,12 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
 - ⬜ Managed databases (Postgres/Redis/MySQL/Mongo) via Coolify
 - ⬜ Custom domains + TLS; metrics + logs providers; unit tests
 
-## Milestone 5 — Billing & usage (Stripe test-mode) ⬜
-- ⬜ Plans, subscriptions, usage metering, webhooks (feature-flagged); unit tests
+## Milestone 5 — Billing & usage (Stripe test-mode) ✅
+- ✅ Plan catalog (Hobby/Launch/Scale, fly.io-style usage pricing), public `/v1/billing/plans`
+- ✅ `PaymentProvider` interface: MockProvider (default/dev) + StripeProvider (HTTP, no SDK), feature-flagged
+- ✅ Subscriptions + usage metering; org-scoped `/v1/orgs/{orgID}/billing` (member) + `/subscribe` (admin)
+- ✅ Stripe webhook with HMAC-SHA256 signature verification (timestamp tolerance)
+- ✅ Unit tests: catalog, subscribe/usage/summary, signature verify (valid/tampered/wrong-secret), HTTP authz
 
 ## Milestone 6 — Web UI (fly.io look) ✅
 - ✅ Next.js 15 (App Router, RSC) + Tailwind + fly.io theme (violet #7C3AED / near-black / mono)
