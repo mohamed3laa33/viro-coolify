@@ -39,7 +39,7 @@ export default function SignupPage() {
         setError(err.message);
       } else {
         setError(
-          "Could not reach the Viro API. Make sure the control-plane is running.",
+          "Could not reach the Vortex API. Make sure the control-plane is running.",
         );
       }
     } finally {
@@ -75,7 +75,7 @@ export default function SignupPage() {
               id="email"
               type="email"
               autoComplete="email"
-              placeholder="you@viro.dev"
+              placeholder="you@vortex.v60ai.com"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               required

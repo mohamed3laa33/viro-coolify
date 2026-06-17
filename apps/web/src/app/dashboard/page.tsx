@@ -1,10 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { Boxes, Rocket, Globe2, ArrowUpRight } from "lucide-react";
+import { Boxes, Rocket, Globe2, ArrowUpRight, Database } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
-import { mockApps, mockRegions } from "@/lib/mock";
+import { mockApps, mockDatabases, mockSettings } from "@/lib/mock";
 import { useResource } from "@/lib/use-resource";
 import { PageHeader } from "@/components/page-header";
 import { StatCard } from "@/components/stat-card";
@@ -23,6 +23,26 @@ export default function DashboardOverview() {
     [activeOrgId],
   );
   const apps = data.data;
+
+  const { data: dbData } = useResource(
+    activeOrgId
+      ? () => authedCall((token, on) => api.listDatabases(activeOrgId, token, on))
+      : null,
+    { data: mockDatabases },
+    [activeOrgId],
+  );
+  const databases = dbData.data;
+
+  // Regions are platform config (admin settings); fall back to mock when the
+  // public/admin endpoint is unreachable or the user isn't an admin.
+  const { data: settings } = useResource(
+    user?.isAdmin
+      ? () => authedCall((token, on) => api.getSettings(token, on))
+      : null,
+    mockSettings,
+    [user?.isAdmin],
+  );
+  const regions = settings.regions ?? [];
 
   const running = apps.filter((a) => a.status === "running").length;
   const firstName = (user?.name ?? "there").split(" ")[0];
@@ -50,16 +70,20 @@ export default function DashboardOverview() {
           hint={`${running} running`}
         />
         <StatCard
-          label="Deploys (30d)"
-          value={128}
-          icon={Rocket}
-          hint="+18% vs. last month"
+          label="Databases"
+          value={databases.length}
+          icon={Database}
+          hint={`${databases.filter((d) => d.status === "running").length} running`}
         />
         <StatCard
           label="Regions"
-          value={mockRegions.length}
+          value={regions.length}
           icon={Globe2}
-          hint={mockRegions.slice(0, 3).join(", ") + "…"}
+          hint={
+            regions.length > 0
+              ? regions.slice(0, 3).join(", ") + (regions.length > 3 ? "…" : "")
+              : "—"
+          }
         />
       </div>
 

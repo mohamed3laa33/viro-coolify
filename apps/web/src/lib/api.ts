@@ -1,12 +1,15 @@
-// Typed API client for the Viro Go control-plane.
+// Typed API client for the Vortex Go control-plane.
 //
-// Reads the base URL from NEXT_PUBLIC_VIRO_API_URL (default http://localhost:8080)
-// and attaches `Authorization: Bearer <token>` when a token is provided.
+// Reads the base URL from NEXT_PUBLIC_VORTEX_API_URL (falling back to the legacy
+// NEXT_PUBLIC_VIRO_API_URL, then http://localhost:8080) and attaches
+// `Authorization: Bearer <token>` when a token is provided.
 //
 // Resource endpoints are org-scoped: /v1/orgs/{orgId}/...
 
 export const API_BASE_URL =
-  process.env.NEXT_PUBLIC_VIRO_API_URL ?? "http://localhost:8080";
+  process.env.NEXT_PUBLIC_VORTEX_API_URL ??
+  process.env.NEXT_PUBLIC_VIRO_API_URL ??
+  "http://localhost:8080";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -90,9 +93,10 @@ export interface AdminPlan extends Plan {
   stripePriceId: string;
 }
 
-// Payload for creating/updating an admin plan. The id is server-assigned on
-// create, so it is omitted from the input.
-export type AdminPlanInput = Omit<AdminPlan, "id">;
+// Payload for creating/updating an admin plan. The backend requires an `id`
+// (the plan slug) in the create body; it is immutable on update (taken from the
+// path), so callers may send the full plan shape including the id.
+export type AdminPlanInput = AdminPlan;
 
 export type TemplateKind = "service" | "database" | "app";
 
@@ -129,23 +133,34 @@ export interface AdminOverview {
 }
 
 export interface Subscription {
-  id: string;
   orgId: string;
   planId: string;
   status: string;
+  createdAt?: string;
   currentPeriodEnd?: string;
 }
 
-export interface Usage {
-  hoursUsed: number;
-  includedHours: number;
-  overageHours: number;
-}
+// The backend reports usage as a metric -> quantity map (e.g.
+// { "compute_hours": 412, "builds": 30 }); it is never a fixed shape.
+export type Usage = Record<string, number>;
 
 export interface BillingResponse {
   subscription: Subscription | null;
   plan: Plan | null;
-  usage: Usage | null;
+  usage: Usage;
+}
+
+// Metric key the backend records for metered compute, used to derive the
+// "hours used" figure shown in the billing UI.
+export const COMPUTE_HOURS_METRICS = ["compute_hours", "machine_hours", "hours"];
+
+/** Sum the compute-hours-style usage metrics from a usage map. */
+export function computeHoursUsed(usage: Usage | null | undefined): number {
+  if (!usage) return 0;
+  for (const key of COMPUTE_HOURS_METRICS) {
+    if (typeof usage[key] === "number") return usage[key];
+  }
+  return 0;
 }
 
 export interface SubscribeResponse {
@@ -711,6 +726,12 @@ export const api = {
     });
   },
 
+  // Public one-click services catalog (no auth required). Mirrors the
+  // admin-managed templates but is readable by any signed-in user.
+  getServiceCatalog(): Promise<ListResponse<Template>> {
+    return request<ListResponse<Template>>("/v1/services/catalog");
+  },
+
   // Billing
   getPlans(): Promise<PlansResponse> {
     return request<PlansResponse>("/v1/billing/plans");
@@ -881,4 +902,4 @@ export const api = {
   },
 };
 
-export type ViroApi = typeof api;
+export type VortexApi = typeof api;

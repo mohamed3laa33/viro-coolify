@@ -17,7 +17,7 @@ const FEATURES = [
   {
     icon: Globe2,
     title: "Global deploys",
-    body: "Run your app in 30+ regions. Viro routes every request to the nearest healthy instance automatically.",
+    body: "Run your app in 30+ regions. Vortex routes every request to the nearest healthy instance automatically.",
   },
   {
     icon: Gauge,
@@ -37,12 +37,15 @@ const FEATURES = [
 ];
 
 const CLI_LINES = [
-  { prompt: true, text: "viro launch" },
+  { prompt: true, text: "vortex launch" },
   { prompt: false, text: "Detected a Dockerfile — using it to build." },
   { prompt: false, text: "Provisioning app marketing-site in iad, lhr, sin..." },
   { prompt: false, text: "✓ Built image in 18.2s" },
   { prompt: false, text: "✓ Deployed v1 across 3 regions" },
-  { prompt: false, text: "✓ https://marketing-site.viro.app is live" },
+  {
+    prompt: false,
+    text: "✓ https://marketing-site.acme.personal.vortex.v60ai.com is live",
+  },
 ];
 
 export default function LandingPage() {
@@ -67,9 +70,10 @@ export default function LandingPage() {
               Deploy apps close to your users.
             </h1>
             <p className="mx-auto mt-6 max-w-2xl text-balance text-lg text-muted-foreground">
-              Viro takes your container and runs it on a global network of
+              Vortex takes your container and runs it on a global network of
               machines, milliseconds from every user. No clusters, no YAML
-              sprawl — just <span className="text-foreground">viro launch</span>.
+              sprawl — just{" "}
+              <span className="text-foreground">vortex launch</span>.
             </p>
             <div className="mt-10 flex flex-col items-center justify-center gap-3 sm:flex-row">
               <Link href="/signup">
@@ -136,7 +140,7 @@ export default function LandingPage() {
               One command from git to globe.
             </h2>
             <p className="mt-4 text-muted-foreground">
-              The Viro CLI detects your stack, builds an image, and rolls it out
+              The Vortex CLI detects your stack, builds an image, and rolls it out
               across regions with health checks and automatic TLS. No pipelines
               to wire up.
             </p>
@@ -216,7 +220,7 @@ export default function LandingPage() {
             </Link>
           </nav>
           <p className="text-xs text-muted-foreground">
-            © {new Date().getFullYear()} Viro. All rights reserved.
+            © {new Date().getFullYear()} Vortex. All rights reserved.
           </p>
         </div>
       </footer>

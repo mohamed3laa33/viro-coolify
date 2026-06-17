@@ -16,9 +16,9 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Viro — Deploy apps close to your users",
+  title: "Vortex — Deploy apps close to your users",
   description:
-    "Viro is a global application platform. Ship containers to the edge, scale instantly, and run managed databases with zero-config TLS.",
+    "Vortex is a global application platform. Ship containers to the edge, scale instantly, and run managed databases with zero-config TLS.",
 };
 
 export default function RootLayout({

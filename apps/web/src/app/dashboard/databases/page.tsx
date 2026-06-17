@@ -36,9 +36,9 @@ export default function DatabasesPage() {
   );
   const databases = data.data;
 
-  // Engine catalog is driven by admin templates of kind "database".
+  // Engine catalog is driven by the public services catalog (kind "database").
   const { data: templatesData } = useResource(
-    () => authedCall((token, on) => api.listTemplates(token, on)),
+    () => api.getServiceCatalog(),
     { data: mockTemplates },
     [],
   );

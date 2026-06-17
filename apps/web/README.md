@@ -1,6 +1,6 @@
-# Viro Web Dashboard
+# Vortex Web Dashboard
 
-The web dashboard for Viro — a global application platform. Built with Next.js 15
+The web dashboard for Vortex — a global application platform. Built with Next.js 15
 (App Router), React 19, TypeScript, and Tailwind CSS, styled as a dark,
 fly.io-grade control panel.
 
@@ -26,8 +26,9 @@ cp .env.local.example .env.local
 npm run dev          # http://localhost:3000
 ```
 
-The dashboard talks to the Viro Go control-plane. Set the base URL via
-`NEXT_PUBLIC_VIRO_API_URL` (defaults to `http://localhost:8080`). When the API is
+The dashboard talks to the Vortex Go control-plane. Set the base URL via
+`NEXT_PUBLIC_VORTEX_API_URL` (defaults to `http://localhost:8080`; the legacy
+`NEXT_PUBLIC_VIRO_API_URL` is honored as a fallback). When the API is
 unreachable, every data view falls back to bundled mock data so the UI renders
 standalone — useful for design work and demos.
 
@@ -66,19 +67,22 @@ src/
 
 ## API contract
 
-Typed in `src/lib/api.ts`. Base URL from `NEXT_PUBLIC_VIRO_API_URL`. All
-authenticated calls attach `Authorization: Bearer <token>`.
+Typed in `src/lib/api.ts`. Base URL from `NEXT_PUBLIC_VORTEX_API_URL`. All
+authenticated calls attach `Authorization: Bearer <token>`. Resource endpoints
+are org-scoped under `/v1/orgs/{orgId}/...`; admin endpoints under `/v1/admin/*`.
 
-| Method | Path                                | Notes                       |
-| ------ | ----------------------------------- | --------------------------- |
-| POST   | `/v1/auth/signup`                   | `{email,name,password}`     |
-| POST   | `/v1/auth/login`                    | `{email,password}`          |
-| POST   | `/v1/auth/refresh`                  | `{refreshToken}`            |
-| GET    | `/v1/me`                            | bearer                      |
-| GET    | `/v1/orgs` / POST `/v1/orgs`        | bearer                      |
-| GET    | `/v1/apps` / `/v1/apps/{uuid}`      | bearer                      |
-| POST   | `/v1/apps/{uuid}/{deploy\|stop\|restart}` | bearer, returns `{status}` |
-| GET    | `/v1/databases`                     | bearer                      |
+| Method | Path                                                  | Notes                       |
+| ------ | ----------------------------------------------------- | --------------------------- |
+| POST   | `/v1/auth/signup`                                     | `{email,name,password}`     |
+| POST   | `/v1/auth/login`                                      | `{email,password}`          |
+| POST   | `/v1/auth/refresh`                                    | `{refreshToken}`            |
+| GET    | `/v1/me`                                              | `{id,email,name,isAdmin}`   |
+| GET    | `/v1/orgs` · POST `/v1/orgs`                          | bearer                      |
+| GET    | `/v1/orgs/{orgId}/apps` · `/{appId}`                  | bearer                      |
+| POST   | `/v1/orgs/{orgId}/apps/{appId}/{deploy\|stop\|restart}` | bearer, returns the App  |
+| GET    | `/v1/orgs/{orgId}/databases`                          | bearer                      |
+| GET    | `/v1/services/catalog`                                | public catalog              |
+| GET    | `/v1/billing/plans`                                   | public plan catalog         |
 
 ## Notes
 

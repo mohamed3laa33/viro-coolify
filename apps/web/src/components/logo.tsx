@@ -7,7 +7,7 @@ export interface LogoProps {
 }
 
 /**
- * Viro brand mark — a hot-air balloon with a violet→magenta gradient,
+ * Vortex brand mark — a hot-air balloon with a violet→magenta gradient,
  * a nod to fly.io's balloon iconography.
  */
 export function Logo({ className, size = 28, withWordmark = false }: LogoProps) {
@@ -56,7 +56,7 @@ export function Logo({ className, size = 28, withWordmark = false }: LogoProps) 
       </svg>
       {withWordmark && (
         <span className="text-lg font-semibold tracking-tight text-foreground">
-          Viro
+          Vortex
         </span>
       )}
     </span>

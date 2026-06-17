@@ -18,6 +18,9 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/lib/auth";
+import { api } from "@/lib/api";
+import { mockApps, mockBilling } from "@/lib/mock";
+import { useResource } from "@/lib/use-resource";
 import { Logo } from "@/components/logo";
 
 interface NavItem {
@@ -119,7 +122,32 @@ function NavLink({ item, pathname }: { item: NavItem; pathname: string }) {
 
 export function Sidebar() {
   const pathname = usePathname() ?? "";
-  const { user } = useAuth();
+  const { user, activeOrgId, authedCall } = useAuth();
+
+  // Plan + quota usage are sourced from the billing endpoint and the live app
+  // count — never hardcoded. Falls back to mock data when the API is offline.
+  const { data: billing } = useResource(
+    activeOrgId
+      ? () => authedCall((token, on) => api.getBilling(activeOrgId, token, on))
+      : null,
+    mockBilling,
+    [activeOrgId],
+  );
+  const { data: appsData } = useResource(
+    activeOrgId
+      ? () => authedCall((token, on) => api.listApps(activeOrgId, token, on))
+      : null,
+    { data: mockApps },
+    [activeOrgId],
+  );
+
+  const planName = billing.plan?.name ?? null;
+  const maxApps = billing.plan?.maxApps;
+  const appCount = appsData.data.length;
+  const usagePct =
+    typeof maxApps === "number" && maxApps > 0
+      ? Math.min(100, Math.round((appCount / maxApps) * 100))
+      : 0;
 
   return (
     <aside className="hidden w-60 shrink-0 flex-col border-r border-border bg-card md:flex">
@@ -149,17 +177,28 @@ export function Sidebar() {
         )}
       </nav>
 
-      <div className="border-t border-border p-4">
-        <div className="rounded-lg border border-border bg-surface-2 p-3">
-          <p className="text-xs font-medium text-foreground">Free plan</p>
-          <p className="mt-1 text-xs text-muted-foreground">
-            3 of 5 apps used
-          </p>
-          <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-muted">
-            <div className="h-full w-3/5 rounded-full bg-brand-balloon" />
+      {planName && (
+        <div className="border-t border-border p-4">
+          <div className="rounded-lg border border-border bg-surface-2 p-3">
+            <p className="text-xs font-medium text-foreground">
+              {planName} plan
+            </p>
+            {typeof maxApps === "number" && maxApps > 0 && (
+              <>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {appCount} of {maxApps} apps used
+                </p>
+                <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                  <div
+                    className="h-full rounded-full bg-brand-balloon"
+                    style={{ width: `${usagePct}%` }}
+                  />
+                </div>
+              </>
+            )}
           </div>
         </div>
-      </div>
+      )}
     </aside>
   );
 }

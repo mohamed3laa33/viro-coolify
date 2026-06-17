@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { api, buildUrl, API_BASE_URL } from "@/lib/api";
+import { api, buildUrl, API_BASE_URL, computeHoursUsed } from "@/lib/api";
 
 interface CapturedCall {
   url: string;
@@ -118,6 +118,16 @@ describe("api client", () => {
     await api.getPlans();
 
     expect(calls[0].url).toBe(`${API_BASE_URL}/v1/billing/plans`);
+    const headers = calls[0].init.headers as Record<string, string>;
+    expect(headers.Authorization).toBeUndefined();
+  });
+
+  it("fetches the public services catalog without a bearer header", async () => {
+    const calls = stubFetch({ data: [] });
+
+    await api.getServiceCatalog();
+
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/services/catalog`);
     const headers = calls[0].init.headers as Record<string, string>;
     expect(headers.Authorization).toBeUndefined();
   });
@@ -306,6 +316,7 @@ describe("admin api client", () => {
     const calls = stubFetch({ id: "scale" }, 201);
     await api.createPlan(
       {
+        id: "scale",
         name: "Scale",
         description: "big",
         priceCents: 9900,
@@ -325,6 +336,7 @@ describe("admin api client", () => {
     expect(calls[0].url).toBe(`${API_BASE_URL}/v1/admin/plans`);
     expect(calls[0].init.method).toBe("POST");
     const body = JSON.parse(calls[0].init.body as string);
+    expect(body.id).toBe("scale");
     expect(body.maxCpu).toBe(8);
     expect(body.maxMemoryMb).toBe(8192);
     expect(body.maxApps).toBe(100);
@@ -430,6 +442,23 @@ describe("admin api client", () => {
     expect(calls[0].url).toBe(`${API_BASE_URL}/v1/admin/overview`);
     const headers = calls[0].init.headers as Record<string, string>;
     expect(headers.Authorization).toBe("Bearer tok");
+  });
+});
+
+describe("computeHoursUsed", () => {
+  it("reads the compute_hours metric from a usage map", () => {
+    expect(computeHoursUsed({ compute_hours: 412, builds: 9 })).toBe(412);
+  });
+
+  it("falls back across known compute metric keys", () => {
+    expect(computeHoursUsed({ machine_hours: 100 })).toBe(100);
+    expect(computeHoursUsed({ hours: 50 })).toBe(50);
+  });
+
+  it("returns 0 for null, undefined, or unrelated metrics", () => {
+    expect(computeHoursUsed(null)).toBe(0);
+    expect(computeHoursUsed(undefined)).toBe(0);
+    expect(computeHoursUsed({ builds: 9 })).toBe(0);
   });
 });
 

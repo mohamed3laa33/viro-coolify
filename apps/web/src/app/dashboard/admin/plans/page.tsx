@@ -15,6 +15,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 
 const EMPTY_PLAN: AdminPlanInput = {
+  id: "",
   name: "",
   description: "",
   priceCents: 0,
@@ -31,9 +32,7 @@ const EMPTY_PLAN: AdminPlanInput = {
 };
 
 function toInput(plan: AdminPlan): AdminPlanInput {
-  const { id: _id, ...rest } = plan;
-  void _id;
-  return rest;
+  return { ...plan };
 }
 
 function formatPrice(plan: AdminPlan): string {
@@ -113,6 +112,7 @@ export default function AdminPlansPage() {
           key="new"
           initial={EMPTY_PLAN}
           title="Create plan"
+          idEditable
           onCancel={() => setEditing(null)}
           onSubmit={async (input) => {
             try {
@@ -237,11 +237,13 @@ export default function AdminPlansPage() {
 function PlanForm({
   initial,
   title,
+  idEditable = false,
   onCancel,
   onSubmit,
 }: {
   initial: AdminPlanInput;
   title: string;
+  idEditable?: boolean;
   onCancel: () => void;
   onSubmit: (input: AdminPlanInput) => Promise<void>;
 }) {
@@ -271,6 +273,16 @@ function PlanForm({
         <h3 className="mb-4 text-base font-semibold">{title}</h3>
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="Plan ID (slug)" htmlFor="plan-id">
+              <Input
+                id="plan-id"
+                value={form.id}
+                onChange={(e) => set("id", e.target.value)}
+                disabled={!idEditable}
+                required
+                placeholder="hobby"
+              />
+            </Field>
             <Field label="Name" htmlFor="plan-name">
               <Input
                 id="plan-name"
@@ -279,6 +291,9 @@ function PlanForm({
                 required
               />
             </Field>
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-2">
             <Field label="Stripe price ID" htmlFor="plan-stripe">
               <Input
                 id="plan-stripe"

@@ -22,7 +22,7 @@ import type {
 
 export const mockUser: User = {
   id: "usr_demo",
-  email: "you@viro.dev",
+  email: "you@vortex.v60ai.com",
   name: "Demo User",
   isAdmin: true,
 };
@@ -191,17 +191,15 @@ export const mockPlans: AdminPlan[] = [
 
 export const mockBilling: BillingResponse = {
   subscription: {
-    id: "sub_demo",
     orgId: "org_acme",
     planId: "launch",
     status: "active",
+    createdAt: "2026-05-30T00:00:00Z",
     currentPeriodEnd: "2026-06-30T00:00:00Z",
   },
   plan: mockPlans[1],
   usage: {
-    hoursUsed: 412,
-    includedHours: 750,
-    overageHours: 0,
+    compute_hours: 412,
   },
 };
 
@@ -347,7 +345,7 @@ export const mockProjects: Project[] = [
 export const mockMembers: Member[] = [
   {
     userId: "usr_demo",
-    email: "you@viro.dev",
+    email: "you@vortex.v60ai.com",
     name: "Demo User",
     role: "owner",
   },

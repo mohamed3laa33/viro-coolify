@@ -5,6 +5,7 @@ import { Check, Copy, Loader2 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import {
   api,
+  computeHoursUsed,
   type MemberRole,
   type Plan,
   type Project,
@@ -15,6 +16,7 @@ import {
   mockMembers,
   mockPlans,
   mockProjects,
+  mockSettings,
 } from "@/lib/mock";
 import { useResource } from "@/lib/use-resource";
 import { cn } from "@/lib/utils";
@@ -53,7 +55,6 @@ function initials(name: string): string {
 }
 
 export default function SettingsPage() {
-  const { user } = useAuth();
   const [tab, setTab] = useState<Tab>("General");
 
   return (
@@ -83,48 +84,80 @@ export default function SettingsPage() {
         </nav>
       </div>
 
-      {tab === "General" && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Organization</CardTitle>
-            <CardDescription>
-              Update your organization profile and contact details.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="space-y-2">
-                <Label htmlFor="org-name">Organization name</Label>
-                <Input id="org-name" defaultValue="Acme Corp" />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="org-slug">Slug</Label>
-                <Input id="org-slug" defaultValue="acme-corp" />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="billing-email">Billing email</Label>
-                <Input
-                  id="billing-email"
-                  type="email"
-                  defaultValue={user?.email ?? "billing@acme.dev"}
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="region">Default region</Label>
-                <Input id="region" defaultValue="iad" />
-              </div>
-            </div>
-            <div className="flex justify-end">
-              <Button>Save changes</Button>
-            </div>
-          </CardContent>
-        </Card>
-      )}
+      {tab === "General" && <GeneralTab />}
 
       {tab === "Team" && <TeamTab />}
 
       {tab === "Billing" && <BillingTab />}
     </div>
+  );
+}
+
+function GeneralTab() {
+  const { user, orgs, activeOrgId, authedCall } = useAuth();
+
+  const activeOrg = orgs.find((o) => o.id === activeOrgId) ?? orgs[0] ?? null;
+
+  // The default region is platform config; show it but only let admins edit it
+  // on the admin settings page. Falls back to mock settings when unreachable.
+  const { data: settings } = useResource(
+    user?.isAdmin
+      ? () => authedCall((token, on) => api.getSettings(token, on))
+      : null,
+    mockSettings,
+    [user?.isAdmin],
+  );
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Organization</CardTitle>
+        <CardDescription>
+          Update your organization profile and contact details.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div className="space-y-2">
+            <Label htmlFor="org-name">Organization name</Label>
+            <Input
+              id="org-name"
+              key={`name-${activeOrg?.id ?? "none"}`}
+              defaultValue={activeOrg?.name ?? ""}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="org-slug">Slug</Label>
+            <Input
+              id="org-slug"
+              key={`slug-${activeOrg?.id ?? "none"}`}
+              defaultValue={activeOrg?.slug ?? ""}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="billing-email">Billing email</Label>
+            <Input
+              id="billing-email"
+              type="email"
+              key={`email-${user?.id ?? "none"}`}
+              defaultValue={user?.email ?? ""}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="region">Default region</Label>
+            <Input
+              id="region"
+              key={`region-${settings.defaultRegion}`}
+              defaultValue={settings.defaultRegion}
+              readOnly
+            />
+          </div>
+        </div>
+        <div className="flex justify-end">
+          <Button>Save changes</Button>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -426,9 +459,9 @@ function BillingTab() {
   );
 
   const currentPlanId = billing.plan?.id ?? billing.subscription?.planId ?? null;
-  const usage = billing.usage;
-  const usedHours = usage?.hoursUsed ?? 0;
-  const totalHours = usage?.includedHours ?? billing.plan?.includedHours ?? 0;
+  const usedHours = computeHoursUsed(billing.usage);
+  const totalHours = billing.plan?.includedHours ?? 0;
+  const overageHours = Math.max(0, usedHours - totalHours);
   const usagePct =
     totalHours > 0 ? Math.min(100, Math.round((usedHours / totalHours) * 100)) : 0;
 
@@ -489,9 +522,9 @@ function BillingTab() {
               style={{ width: `${usagePct}%` }}
             />
           </div>
-          {usage && usage.overageHours > 0 && (
+          {overageHours > 0 && (
             <p className="text-sm text-warning">
-              {usage.overageHours}h over your included hours this period.
+              {overageHours}h over your included hours this period.
             </p>
           )}
         </CardContent>

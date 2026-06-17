@@ -56,7 +56,7 @@ type ActionKind = "deploy" | "stop" | "restart";
 
 const MOCK_LOGS = [
   "2026-06-17T09:01:02Z [info]  Starting machine 4d891 in iad",
-  "2026-06-17T09:01:03Z [info]  Pulling image registry.viro.app/app:v42",
+  "2026-06-17T09:01:03Z [info]  Pulling image registry.vortex.v60ai.com/app:v42",
   "2026-06-17T09:01:08Z [info]  Image pulled in 5.1s",
   "2026-06-17T09:01:09Z [info]  Running health checks on :8080/healthz",
   "2026-06-17T09:01:11Z [info]  ✓ Health check passed",
@@ -550,8 +550,27 @@ function EnvironmentTab({ appId }: { appId: string }) {
 // Domains tab
 // ---------------------------------------------------------------------------
 
+// Base domain for platform-issued app hostnames.
+const VORTEX_BASE_DOMAIN = "vortex.v60ai.com";
+
+function slugify(value: string): string {
+  return (
+    value
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "app"
+  );
+}
+
 function DomainsTab({ appId, appName }: { appId: string; appName: string }) {
-  const { activeOrgId, authedCall } = useAuth();
+  const { activeOrgId, authedCall, orgs } = useAuth();
+
+  // Build the default hostname as <app>.<project>.<org>.vortex.v60ai.com.
+  // The project segment defaults to "default" until apps expose their project.
+  const orgSlug = slugify(
+    orgs.find((o) => o.id === activeOrgId)?.slug ?? "personal",
+  );
 
   const { data, refetch } = useResource(
     activeOrgId
@@ -565,7 +584,7 @@ function DomainsTab({ appId, appName }: { appId: string; appName: string }) {
   );
 
   const domains = data.data;
-  const fqdn = `${appName}.viro.app`;
+  const fqdn = `${slugify(appName)}.default.${orgSlug}.${VORTEX_BASE_DOMAIN}`;
 
   const [domain, setDomain] = useState("");
   const [pending, setPending] = useState(false);

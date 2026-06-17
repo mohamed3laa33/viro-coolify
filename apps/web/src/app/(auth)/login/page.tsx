@@ -44,7 +44,7 @@ export default function LoginPage() {
         setError(err.message);
       } else {
         setError(
-          "Could not reach the Viro API. Make sure the control-plane is running.",
+          "Could not reach the Vortex API. Make sure the control-plane is running.",
         );
       }
     } finally {
@@ -57,7 +57,7 @@ export default function LoginPage() {
       <CardHeader>
         <CardTitle className="text-xl">Welcome back</CardTitle>
         <CardDescription>
-          Log in to your Viro account to manage your apps.
+          Log in to your Vortex account to manage your apps.
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -68,7 +68,7 @@ export default function LoginPage() {
               id="email"
               type="email"
               autoComplete="email"
-              placeholder="you@viro.dev"
+              placeholder="you@vortex.v60ai.com"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               required

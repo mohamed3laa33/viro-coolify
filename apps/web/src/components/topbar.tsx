@@ -35,7 +35,7 @@ export function Topbar() {
   }, []);
 
   const displayName = user?.name ?? "Demo User";
-  const displayEmail = user?.email ?? "you@viro.dev";
+  const displayEmail = user?.email ?? "you@vortex.v60ai.com";
   const initials = displayName
     .split(" ")
     .map((p) => p[0])
