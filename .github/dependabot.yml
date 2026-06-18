@@ -26,6 +26,13 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: react-dom
         update-types: ["version-update:semver-major"]
+      # eslint 10 has no compatible eslint-plugin-jsx-a11y / eslint-config-next
+      # yet (peer dep tops out at eslint 9) — hold majors until the ecosystem
+      # catches up, otherwise `npm ci` fails ERESOLVE.
+      - dependency-name: eslint
+        update-types: ["version-update:semver-major"]
+      - dependency-name: eslint-config-next
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /
