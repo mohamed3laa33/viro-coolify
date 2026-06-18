@@ -172,7 +172,7 @@ jobs:
           NEXT_PUBLIC_VORTEX_API_URL: "https://api.vortex.v60ai.com"
       - name: Upload Playwright report
         if: steps.detect.outputs.present == 'true' && always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-report
           path: apps/web/playwright-report
