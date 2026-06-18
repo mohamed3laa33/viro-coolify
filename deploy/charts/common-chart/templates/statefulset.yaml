@@ -51,6 +51,12 @@ spec:
         - name: {{ template "common-chart.fullname" . }}
           image: "{{ .Values.deployment.image.repository }}:{{ .Values.deployment.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.deployment.image.pullPolicy }}
+          {{- with .Values.deployment.command }}
+          command: {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.deployment.args }}
+          args: {{- toYaml . | nindent 12 }}
+          {{- end }}
           ports:
           {{- range .Values.deployment.ports }}
             - name: {{ .name }}
@@ -113,6 +119,9 @@ spec:
         resources:
           requests:
             storage: {{ .resources.requests.storage }}
+        {{- with .storageClassName }}
+        storageClassName: {{ . }}
+        {{- end }}
         {{- with .volumeMode }}
         volumeMode: {{ . }}
         {{- end }}

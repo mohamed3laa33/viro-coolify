@@ -191,7 +191,20 @@ type Database struct {
 	Engine      string  `json:"engine"`
 	CPU         float64 `json:"cpu"`      // requested vCPU
 	MemoryMB    int     `json:"memoryMb"` // requested memory in MB
+	StorageGB   int     `json:"storageGb"`
 	Status      string  `json:"status"`
+	// Generated connection credentials. The engine container initializes itself
+	// with these on first boot. These are NEVER serialized on the bare model
+	// (json:"-") so a bulk listing can't leak every database's plaintext
+	// password; credentials are exposed ONLY through the connection-info detail
+	// endpoint, whose DatabaseConnInfo DTO carries them via explicit fields.
+	//
+	// TODO(security): these are stored plaintext-at-rest for now. A later security
+	// wave must encrypt them (or move the source of truth to a K8s Secret and have
+	// the chart mount it via envFrom). Do not block durability/usability on it.
+	Username     string `json:"-"`
+	Password     string `json:"-"`
+	DatabaseName string `json:"-"`
 	// Kubernetes placement returned by the deploy backend (kube.Backend).
 	Namespace string    `json:"namespace,omitempty"` // per-org-project namespace
 	Release   string    `json:"release,omitempty"`   // Helm release name

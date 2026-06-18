@@ -45,6 +45,9 @@ func milliCPU(cores float64) string {
 // mib renders a memory amount in MiB, e.g. 358 -> "358Mi".
 func mib(mb int) string { return fmt.Sprintf("%dMi", mb) }
 
+// gib renders a storage amount in GiB, e.g. 1 -> "1Gi".
+func gib(gb int) string { return fmt.Sprintf("%dGi", gb) }
+
 // overcommitResources computes the chart `deployment.resources` block.
 //
 //	requests.cpu    = CPU      * cpuFactor   (cores -> millicores)

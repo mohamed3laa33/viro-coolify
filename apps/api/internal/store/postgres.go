@@ -538,16 +538,16 @@ func (s *PostgresStore) UpdateBuild(ctx context.Context, b *domain.Build) error 
 
 func (s *PostgresStore) CreateDatabase(ctx context.Context, d *domain.Database) error {
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO databases (id, org_id, project_id, coolify_uuid, name, engine, cpu, memory_mb, status, namespace, "release", host, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
-		d.ID, d.OrgID, d.ProjectID, d.CoolifyUUID, d.Name, d.Engine, d.CPU, d.MemoryMB, d.Status, d.Namespace, d.Release, d.Host, d.CreatedAt,
+		`INSERT INTO databases (id, org_id, project_id, coolify_uuid, name, engine, cpu, memory_mb, storage_gb, db_user, db_password, db_name, status, namespace, "release", host, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
+		d.ID, d.OrgID, d.ProjectID, d.CoolifyUUID, d.Name, d.Engine, d.CPU, d.MemoryMB, d.StorageGB, d.Username, d.Password, d.DatabaseName, d.Status, d.Namespace, d.Release, d.Host, d.CreatedAt,
 	)
 	return mapErr(err)
 }
 
 func (s *PostgresStore) scanDatabase(row pgx.Row) (*domain.Database, error) {
 	var d domain.Database
-	if err := row.Scan(&d.ID, &d.OrgID, &d.ProjectID, &d.CoolifyUUID, &d.Name, &d.Engine, &d.CPU, &d.MemoryMB, &d.Status, &d.Namespace, &d.Release, &d.Host, &d.CreatedAt); err != nil {
+	if err := row.Scan(&d.ID, &d.OrgID, &d.ProjectID, &d.CoolifyUUID, &d.Name, &d.Engine, &d.CPU, &d.MemoryMB, &d.StorageGB, &d.Username, &d.Password, &d.DatabaseName, &d.Status, &d.Namespace, &d.Release, &d.Host, &d.CreatedAt); err != nil {
 		return nil, mapErr(err)
 	}
 	return &d, nil
@@ -555,13 +555,13 @@ func (s *PostgresStore) scanDatabase(row pgx.Row) (*domain.Database, error) {
 
 func (s *PostgresStore) GetDatabase(ctx context.Context, id string) (*domain.Database, error) {
 	return s.scanDatabase(s.pool.QueryRow(ctx,
-		`SELECT id, org_id, project_id, coolify_uuid, name, engine, cpu, memory_mb, status, namespace, "release", host, created_at
+		`SELECT id, org_id, project_id, coolify_uuid, name, engine, cpu, memory_mb, storage_gb, db_user, db_password, db_name, status, namespace, "release", host, created_at
 		 FROM databases WHERE id = $1`, id))
 }
 
 func (s *PostgresStore) ListDatabasesByOrg(ctx context.Context, orgID string) ([]domain.Database, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, org_id, project_id, coolify_uuid, name, engine, cpu, memory_mb, status, namespace, "release", host, created_at
+		`SELECT id, org_id, project_id, coolify_uuid, name, engine, cpu, memory_mb, storage_gb, db_user, db_password, db_name, status, namespace, "release", host, created_at
 		 FROM databases WHERE org_id = $1`, orgID)
 	if err != nil {
 		return nil, mapErr(err)
@@ -581,8 +581,9 @@ func (s *PostgresStore) ListDatabasesByOrg(ctx context.Context, orgID string) ([
 func (s *PostgresStore) UpdateDatabase(ctx context.Context, d *domain.Database) error {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE databases SET org_id = $2, project_id = $3, coolify_uuid = $4, name = $5, engine = $6,
-		 cpu = $7, memory_mb = $8, status = $9, namespace = $10, "release" = $11, host = $12, created_at = $13 WHERE id = $1`,
-		d.ID, d.OrgID, d.ProjectID, d.CoolifyUUID, d.Name, d.Engine, d.CPU, d.MemoryMB, d.Status, d.Namespace, d.Release, d.Host, d.CreatedAt,
+		 cpu = $7, memory_mb = $8, storage_gb = $9, db_user = $10, db_password = $11, db_name = $12,
+		 status = $13, namespace = $14, "release" = $15, host = $16, created_at = $17 WHERE id = $1`,
+		d.ID, d.OrgID, d.ProjectID, d.CoolifyUUID, d.Name, d.Engine, d.CPU, d.MemoryMB, d.StorageGB, d.Username, d.Password, d.DatabaseName, d.Status, d.Namespace, d.Release, d.Host, d.CreatedAt,
 	)
 	if err != nil {
 		return mapErr(err)

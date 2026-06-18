@@ -188,6 +188,7 @@ type createDatabaseRequest struct {
 	ProjectID string  `json:"projectId"`
 	CPU       float64 `json:"cpu"`
 	MemoryMB  int     `json:"memoryMb"`
+	StorageGB int     `json:"storageGb"`
 }
 
 func (s *Server) handleListDatabases(w http.ResponseWriter, r *http.Request) {
@@ -221,12 +222,52 @@ func (s *Server) handleCreateDatabase(w http.ResponseWriter, r *http.Request) {
 		ProjectID: projectID,
 		CPU:       req.CPU,
 		MemoryMB:  req.MemoryMB,
+		StorageGB: req.StorageGB,
 	})
 	if err != nil {
 		s.writePlatformError(w, "create database", err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, db)
+}
+
+// handleGetDatabase returns one database plus its in-cluster connection info
+// (host/port/credentials/connectionString). Databases are internal-only so the
+// host is the cluster-internal service DNS. Cross-tenant access is hidden as 404.
+func (s *Server) handleGetDatabase(w http.ResponseWriter, r *http.Request) {
+	detail, err := s.platform.GetDatabaseDetail(r.Context(), chi.URLParam(r, "orgID"), chi.URLParam(r, "databaseID"))
+	if err != nil {
+		s.writePlatformError(w, "get database", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, detail)
+}
+
+func (s *Server) handleDeployDatabase(w http.ResponseWriter, r *http.Request) {
+	db, err := s.platform.DeployDatabase(r.Context(), chi.URLParam(r, "orgID"), chi.URLParam(r, "databaseID"))
+	if err != nil {
+		s.writePlatformError(w, "deploy database", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, db)
+}
+
+func (s *Server) handleStopDatabase(w http.ResponseWriter, r *http.Request) {
+	db, err := s.platform.StopDatabase(r.Context(), chi.URLParam(r, "orgID"), chi.URLParam(r, "databaseID"))
+	if err != nil {
+		s.writePlatformError(w, "stop database", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, db)
+}
+
+func (s *Server) handleRestartDatabase(w http.ResponseWriter, r *http.Request) {
+	db, err := s.platform.RestartDatabase(r.Context(), chi.URLParam(r, "orgID"), chi.URLParam(r, "databaseID"))
+	if err != nil {
+		s.writePlatformError(w, "restart database", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, db)
 }
 
 func (s *Server) handleDeleteDatabase(w http.ResponseWriter, r *http.Request) {

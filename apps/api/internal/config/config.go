@@ -41,6 +41,13 @@ type Config struct {
 	HelmTimeoutSec   int    // per-Apply helm deadline (seconds); --wait --atomic
 	ReconcileSec     int    // status reconciler interval (seconds)
 
+	// DBDefaultStorageGB is the default persistent-volume size (GiB) for a managed
+	// database when the create request does not specify one. Admin-tunable.
+	DBDefaultStorageGB int
+	// DBStorageClass optionally overrides the StorageClass for managed-database
+	// data volumes. Empty leaves the cluster/chart default in force.
+	DBStorageClass string
+
 	// Git image builder (kaniko Job pipeline). All admin-tunable via VORTEX_BUILD_*.
 	BuildRegistry    string // push target host/repo prefix, e.g. ghcr.io/<owner> or registry.digitalocean.com/<reg>
 	BuildNamespace   string // namespace where kaniko build Jobs run
@@ -100,12 +107,15 @@ func Load() (*Config, error) {
 		GatewayNamespace: getenv("GATEWAY_NAMESPACE", "vortex"),
 		HelmTimeoutSec:   getenvInt("HELM_TIMEOUT_SEC", 300),
 		ReconcileSec:     getenvInt("RECONCILE_SEC", 30),
-		BuildRegistry:    getenv("BUILD_REGISTRY", ""),
-		BuildNamespace:   getenv("BUILD_NAMESPACE", "vortex-builds"),
-		BuildPushSecret:  getenv("BUILD_PUSH_SECRET", "vortex-registry-push"),
-		BuildGitCreds:    getenv("BUILD_GIT_CREDS_SECRET", ""),
-		BuildKanikoImage: getenv("BUILD_KANIKO_IMAGE", "gcr.io/kaniko-project/executor:v1.23.2"),
-		BuildTimeoutSec:  getenvInt("BUILD_TIMEOUT_SEC", 600),
+
+		DBDefaultStorageGB: getenvInt("DB_DEFAULT_STORAGE_GB", 1),
+		DBStorageClass:     getenv("DB_STORAGE_CLASS", ""),
+		BuildRegistry:      getenv("BUILD_REGISTRY", ""),
+		BuildNamespace:     getenv("BUILD_NAMESPACE", "vortex-builds"),
+		BuildPushSecret:    getenv("BUILD_PUSH_SECRET", "vortex-registry-push"),
+		BuildGitCreds:      getenv("BUILD_GIT_CREDS_SECRET", ""),
+		BuildKanikoImage:   getenv("BUILD_KANIKO_IMAGE", "gcr.io/kaniko-project/executor:v1.23.2"),
+		BuildTimeoutSec:    getenvInt("BUILD_TIMEOUT_SEC", 600),
 
 		RegistryPullSecret:          getenv("REGISTRY_PULL_SECRET", "vortex-registry-pull"),
 		RegistryPullSecretSource:    getenv("REGISTRY_PULL_SECRET_SOURCE", ""),

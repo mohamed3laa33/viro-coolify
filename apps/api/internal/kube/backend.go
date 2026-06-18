@@ -50,6 +50,16 @@ type Workload struct {
 	ServiceTemplateKey string   // e.g. wordpress, redis, postgresql
 	Domains            []string // extra custom hostnames in addition to the generated host
 
+	// StorageGB is the persistent volume size (GiB) for a stateful (database)
+	// workload. When >0 and Kind=="database", buildValues renders a
+	// volumeClaimTemplate (data mount at the engine's data dir) with a RETAIN PVC
+	// retention policy so Stop/scale/restart never wipe data. Ignored for
+	// stateless app/service workloads.
+	StorageGB int
+	// StorageClass optionally overrides the PVC storageClassName for the data
+	// volume. Empty leaves the cluster default / chart default in force.
+	StorageClass string
+
 	// ImagePullSecret, when set, names a kubernetes.io/dockerconfigjson Secret in
 	// the workload's tenant namespace that is attached to the pod's
 	// imagePullSecrets so a PRIVATE built image can be pulled. The platform sets

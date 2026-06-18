@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -122,6 +123,14 @@ type Service struct {
 	pullSecretName string
 	// buildTimeout bounds the async build worker's detached context.
 	buildTimeout time.Duration
+
+	// dbStorageGB is the default persistent-volume size (GiB) for a managed
+	// database when the create request omits it. Zero falls back to
+	// defaultDBStorageGB. Admin-tunable via VORTEX_DB_DEFAULT_STORAGE_GB.
+	dbStorageGB int
+	// dbStorageClass optionally overrides the StorageClass for managed-database
+	// data volumes. Empty leaves the cluster/chart default.
+	dbStorageClass string
 	// buildWG, when set, tracks in-flight async builds so a graceful shutdown can
 	// Wait() for them to drain (mirrors the metering/reconciler WaitGroup).
 	buildWG *sync.WaitGroup
@@ -165,6 +174,22 @@ func WithBuildTimeout(d time.Duration) Option {
 // shutdown.
 func WithBuildWaitGroup(wg *sync.WaitGroup) Option {
 	return func(s *Service) { s.buildWG = wg }
+}
+
+// WithDBStorageDefault sets the default persistent-volume size (GiB) for managed
+// databases. Non-positive values are ignored (the built-in default stands).
+func WithDBStorageDefault(gb int) Option {
+	return func(s *Service) {
+		if gb > 0 {
+			s.dbStorageGB = gb
+		}
+	}
+}
+
+// WithDBStorageClass sets the StorageClass for managed-database data volumes.
+// Empty is ignored (cluster/chart default stands).
+func WithDBStorageClass(class string) Option {
+	return func(s *Service) { s.dbStorageClass = strings.TrimSpace(class) }
 }
 
 // NewService builds a platform service. The backend is the Kubernetes deploy
@@ -791,6 +816,54 @@ type CreateDatabaseInput struct {
 	ProjectID string // tenant project; defaults to the org's default project
 	CPU       float64
 	MemoryMB  int
+	StorageGB int // persistent-volume size; <=0 falls back to the platform default
+}
+
+// dbStorage resolves the persistent-volume size (GiB) for a managed database,
+// preferring the explicit request, then the admin-configured default, then the
+// built-in minimum. It never returns 0 so a database is always durable.
+func (s *Service) dbStorage(req int) int {
+	if req > 0 {
+		return req
+	}
+	if s.dbStorageGB > 0 {
+		return s.dbStorageGB
+	}
+	return defaultDBStorageGB
+}
+
+// dbWorkload renders the full kube.Workload for a stored database from its engine
+// template (image/port/kind), resolved resources, persistent-volume size, and
+// the engine-appropriate credential ENV (so a redeploy re-applies identical
+// chart values via helm upgrade). The stored credentials make the env injection
+// deterministic across deploys.
+func (s *Service) dbWorkload(ctx context.Context, db *domain.Database, orgSlug, projSlug string) (kube.Workload, error) {
+	tmpl, ok := s.templateByKey(ctx, db.Engine)
+	if !ok || catalog.Kind(tmpl.Kind) != catalog.KindDatabase {
+		return kube.Workload{}, fmt.Errorf("%w: %q", ErrInvalidTemplate, db.Engine)
+	}
+	cpuF, memF := s.overcommitFactors(ctx)
+	// Clamp the volume size to the platform minimum/default on the guaranteed
+	// render path: a 0/legacy StorageGB must NEVER reach the chart, or it would
+	// render a volume-less StatefulSet with Delete retention (any restart/Stop
+	// would wipe the data). dbStorage never returns 0.
+	storageGB := s.dbStorage(db.StorageGB)
+	return kube.Workload{
+		OrgSlug:                orgSlug,
+		ProjectSlug:            projSlug,
+		Name:                   db.Name,
+		Kind:                   "database",
+		Image:                  tmpl.Image,
+		Port:                   tmpl.DefaultPort,
+		CPU:                    db.CPU,
+		MemoryMB:               db.MemoryMB,
+		StorageGB:              storageGB,
+		StorageClass:           s.dbStorageClass,
+		Env:                    kube.DatabaseEnv(tmpl.Key, db.DatabaseName, db.Username, db.Password),
+		ServiceTemplateKey:     tmpl.Key,
+		CPUOvercommitFactor:    cpuF,
+		MemoryOvercommitFactor: memF,
+	}, nil
 }
 
 // CreateDatabase provisions a managed database for the org: it resolves the
@@ -826,38 +899,42 @@ func (s *Service) CreateDatabase(ctx context.Context, orgID string, in CreateDat
 		return nil, err
 	}
 
-	cpuF, memF := s.overcommitFactors(ctx)
-	release, host, err := s.backend.Apply(ctx, kube.Workload{
-		OrgSlug:                orgSlug,
-		ProjectSlug:            projSlug,
-		Name:                   name,
-		Kind:                   "database",
-		Image:                  tmpl.Image,
-		Port:                   tmpl.DefaultPort,
-		CPU:                    cpu,
-		MemoryMB:               memMB,
-		ServiceTemplateKey:     tmpl.Key,
-		CPUOvercommitFactor:    cpuF,
-		MemoryOvercommitFactor: memF,
-	})
+	// Generate a strong random password + SQL-safe db/user so the engine container
+	// initializes itself with real credentials and the connection-info endpoint can
+	// return them. (Stored plaintext-at-rest for now — see Database doc TODO.)
+	dbName, user, password, err := generateDBCredentials(name)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("platform: generate db credentials: %w", err)
 	}
 
 	db := &domain.Database{
-		ID:        s.idgen(),
-		OrgID:     orgID,
-		ProjectID: in.ProjectID,
-		Name:      name,
-		Engine:    engine,
-		CPU:       cpu,
-		MemoryMB:  memMB,
-		Status:    "deploying",
-		Namespace: namespace,
-		Release:   release,
-		Host:      host,
-		CreatedAt: s.now(),
+		ID:           s.idgen(),
+		OrgID:        orgID,
+		ProjectID:    in.ProjectID,
+		Name:         name,
+		Engine:       engine,
+		CPU:          cpu,
+		MemoryMB:     memMB,
+		StorageGB:    s.dbStorage(in.StorageGB),
+		Username:     user,
+		Password:     password,
+		DatabaseName: dbName,
+		Status:       "deploying",
+		Namespace:    namespace,
+		CreatedAt:    s.now(),
 	}
+
+	w, err := s.dbWorkload(ctx, db, orgSlug, projSlug)
+	if err != nil {
+		return nil, err
+	}
+	release, host, err := s.backend.Apply(ctx, w)
+	if err != nil {
+		return nil, err
+	}
+	db.Release = release
+	db.Host = host
+
 	if err := s.store.CreateDatabase(ctx, db); err != nil {
 		return nil, err
 	}
@@ -872,6 +949,159 @@ func (s *Service) ListDatabases(ctx context.Context, orgID string) ([]domain.Dat
 // GetDatabase returns one database scoped to the org.
 func (s *Service) GetDatabase(ctx context.Context, orgID, dbID string) (*domain.Database, error) {
 	return s.ownedDatabase(ctx, orgID, dbID)
+}
+
+// DatabaseConnInfo is the connection detail for a managed database. Databases
+// are internal-only (ClusterIP, no public gateway), so Host is the in-cluster
+// service DNS — reachable from the org's own workloads, not the public internet.
+type DatabaseConnInfo struct {
+	Host             string `json:"host"`     // <release>.<namespace>.svc.cluster.local
+	Port             int    `json:"port"`     // engine default port
+	Database         string `json:"database"` // initialized database name
+	Username         string `json:"username"`
+	Password         string `json:"password"`
+	ConnectionString string `json:"connectionString"`
+}
+
+// DatabaseDetail bundles a database record with its (internal) connection info,
+// returned by the connection-info endpoint.
+type DatabaseDetail struct {
+	*domain.Database
+	Connection DatabaseConnInfo `json:"connection"`
+}
+
+// GetDatabaseDetail returns one database scoped to the org plus its in-cluster
+// connection info (host/port/credentials/connectionString). Cross-tenant access
+// is hidden as ErrNotFound by ownedDatabase.
+func (s *Service) GetDatabaseDetail(ctx context.Context, orgID, dbID string) (*DatabaseDetail, error) {
+	db, err := s.ownedDatabase(ctx, orgID, dbID)
+	if err != nil {
+		return nil, err
+	}
+	return &DatabaseDetail{Database: db, Connection: s.databaseConnInfo(db)}, nil
+}
+
+// databaseConnInfo derives the in-cluster connection info for a database from
+// its placement (release/namespace) and stored credentials. The host is the
+// stable Kubernetes service DNS so the value survives pod restarts/rescheduling.
+func (s *Service) databaseConnInfo(db *domain.Database) DatabaseConnInfo {
+	host := db.Host
+	if db.Release != "" && db.Namespace != "" {
+		host = db.Release + "." + db.Namespace + ".svc.cluster.local"
+	}
+	port := enginePort(db.Engine)
+	ci := DatabaseConnInfo{
+		Host:     host,
+		Port:     port,
+		Database: db.DatabaseName,
+		Username: db.Username,
+		Password: db.Password,
+	}
+	ci.ConnectionString = connectionString(db.Engine, ci)
+	return ci
+}
+
+// enginePort returns the default service port for a database engine.
+func enginePort(engine string) int {
+	switch strings.ToLower(strings.TrimSpace(engine)) {
+	case "redis":
+		return 6379
+	case "postgresql", "postgres":
+		return 5432
+	case "mysql", "mariadb":
+		return 3306
+	case "mongodb", "mongo":
+		return 27017
+	default:
+		return 5432
+	}
+}
+
+// connectionString renders a ready-to-use, engine-appropriate URI from the
+// connection info. Credentials are URL-escaped so a special character in the
+// generated password can't break the URI.
+func connectionString(engine string, ci DatabaseConnInfo) string {
+	u, p := url.QueryEscape(ci.Username), url.QueryEscape(ci.Password)
+	hostPort := fmt.Sprintf("%s:%d", ci.Host, ci.Port)
+	switch strings.ToLower(strings.TrimSpace(engine)) {
+	case "redis":
+		// redis AUTH uses the password only (no username on the default ACL user).
+		return fmt.Sprintf("redis://:%s@%s", p, hostPort)
+	case "mysql", "mariadb":
+		return fmt.Sprintf("mysql://%s:%s@%s/%s", u, p, hostPort, ci.Database)
+	case "mongodb", "mongo":
+		// The root user is created in the `admin` db (MONGO_INITDB_ROOT_*), so
+		// authentication must target it via authSource=admin or auth fails.
+		return fmt.Sprintf("mongodb://%s:%s@%s/%s?authSource=admin", u, p, hostPort, ci.Database)
+	default: // postgresql
+		return fmt.Sprintf("postgres://%s:%s@%s/%s", u, p, hostPort, ci.Database)
+	}
+}
+
+// DeployDatabase (re)deploys a managed database: it re-renders the workload from
+// its engine template + stored credentials/resources/storage and runs a helm
+// upgrade via backend.Apply, so a stopped database is brought back up with
+// identical wiring (and its retained PVC reattached).
+func (s *Service) DeployDatabase(ctx context.Context, orgID, dbID string) (*domain.Database, error) {
+	db, err := s.ownedDatabase(ctx, orgID, dbID)
+	if err != nil {
+		return nil, err
+	}
+	orgSlug := s.orgSlug(ctx, orgID)
+	projSlug := s.projectSlug(ctx, db.ProjectID)
+
+	w, err := s.dbWorkload(ctx, db, orgSlug, projSlug)
+	if err != nil {
+		return nil, err
+	}
+	release, host, err := s.backend.Apply(ctx, w)
+	if err != nil {
+		return nil, err
+	}
+	db.Release = release
+	db.Host = host
+	db.Status = "deploying"
+	if err := s.store.UpdateDatabase(ctx, db); err != nil {
+		return nil, err
+	}
+	return db, nil
+}
+
+// StopDatabase scales the database to zero on the backend (its retained PVC is
+// kept so data survives).
+func (s *Service) StopDatabase(ctx context.Context, orgID, dbID string) (*domain.Database, error) {
+	return s.databaseAction(ctx, orgID, dbID, "stopped", s.backend.Stop)
+}
+
+// StartDatabase scales a stopped database back up on the backend, reattaching
+// its retained volume.
+func (s *Service) StartDatabase(ctx context.Context, orgID, dbID string) (*domain.Database, error) {
+	return s.databaseAction(ctx, orgID, dbID, "running", s.backend.Start)
+}
+
+// RestartDatabase triggers a rollout restart of the database on the backend.
+func (s *Service) RestartDatabase(ctx context.Context, orgID, dbID string) (*domain.Database, error) {
+	return s.databaseAction(ctx, orgID, dbID, "restarting", s.backend.Restart)
+}
+
+// databaseAction applies a status transition, invoking the backend lifecycle
+// call for the database's release when it has been deployed (release is kept).
+func (s *Service) databaseAction(ctx context.Context, orgID, dbID, status string,
+	fn func(context.Context, string, string) error) (*domain.Database, error) {
+	db, err := s.ownedDatabase(ctx, orgID, dbID)
+	if err != nil {
+		return nil, err
+	}
+	if db.Release != "" {
+		if err := fn(ctx, db.Namespace, db.Release); err != nil {
+			return nil, err
+		}
+	}
+	db.Status = status
+	if err := s.store.UpdateDatabase(ctx, db); err != nil {
+		return nil, err
+	}
+	return db, nil
 }
 
 // DeleteDatabase uninstalls the database's release from the backend (when

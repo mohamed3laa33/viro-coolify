@@ -56,6 +56,12 @@ type Config struct {
 // is unset.
 const defaultHelmTimeout = 5 * time.Minute
 
+// minDBStorageGB is the safe-minimum persistent-volume size (GiB) the backend
+// clamps a database to when its StorageGB is 0/unset, so a stateful workload is
+// never rendered volume-less (which would lose data on restart/Stop). The
+// platform normally supplies a larger admin-configured default before Apply.
+const minDBStorageGB = 1
+
 // KEDA ScaledObject GroupVersionResource, used to pause/resume autoscaling so
 // Stop/Start are not reverted by the autoscaler.
 var scaledObjectGVR = schema.GroupVersionResource{
@@ -468,6 +474,22 @@ func (b *KubeBackend) buildValues(w Workload, h string) map[string]any {
 		"protocol":      "TCP",
 	}}
 
+	// Persistence: stateful (database) workloads get a PersistentVolume so data
+	// survives Stop/scale/restart. The chart renders volumeClaimTemplates on the
+	// StatefulSet and a RETAIN PVC retention policy; the data volume is mounted at
+	// the engine's on-disk data dir. Stateless app/service workloads never get a
+	// volume (no StorageGB rendered) so the apps path is unchanged.
+	persistence := b.buildPersistence(w, stateful, deployment)
+
+	// Redis has no password env honored by the official image, so enforce auth via
+	// the container command (redis-server --requirepass <pw>). The password comes
+	// from the injected REDIS_PASSWORD env (set by the platform on CreateDatabase).
+	if stateful {
+		if args := redisArgs(w.ServiceTemplateKey, env["REDIS_PASSWORD"]); len(args) > 0 {
+			deployment["command"] = args
+		}
+	}
+
 	// WordPress: DB-independent probes per the volo recipe so import-driven DB
 	// credential changes don't trigger restarts.
 	if isWordPress(w) {
@@ -552,7 +574,7 @@ func (b *KubeBackend) buildValues(w Workload, h string) map[string]any {
 		"backendPort": port,
 	}
 
-	return map[string]any{
+	values := map[string]any{
 		// Force the chart to name every rendered object (Deployment, StatefulSet,
 		// Service, ScaledObject) EXACTLY the release name. Without this the
 		// common-chart's fullname template appends "-common-chart", so the
@@ -564,6 +586,70 @@ func (b *KubeBackend) buildValues(w Workload, h string) map[string]any {
 		"service":          service,
 		"keda":             keda,
 		"gateway":          gateway,
+	}
+	for k, v := range persistence {
+		values[k] = v
+	}
+	return values
+}
+
+// buildPersistence renders the chart's StatefulSet persistence knobs for a
+// stateful (database) workload: a volumeClaimTemplate sized from StorageGB and
+// mounted at the engine's data dir, plus a RETAIN PVC retention policy so a
+// Stop (KEDA pause + scale 0), scale, or restart NEVER deletes the data volume.
+// It also appends the data volumeMount to deployment.extraVolumeMounts.
+//
+// For stateless workloads it returns nil, leaving the apps path and chart
+// defaults untouched. For a stateful (database) workload it NEVER returns nil:
+// a 0/legacy StorageGB is clamped to a safe minimum so the chart always renders
+// a retained volume rather than a volume-less StatefulSet with Delete retention
+// (which would wipe data on any restart/Stop).
+func (b *KubeBackend) buildPersistence(w Workload, stateful bool, deployment map[string]any) map[string]any {
+	if !stateful {
+		return nil
+	}
+	storageGB := w.StorageGB
+	if storageGB <= 0 {
+		// Defense-in-depth: a database must always be durable. Fall back to the
+		// minimum size rather than rendering a volume-less StatefulSet.
+		storageGB = minDBStorageGB
+	}
+	mountPath := dataDir(w.ServiceTemplateKey)
+	if mountPath == "" {
+		// Fall back to a generic data dir so an unknown engine still gets durable
+		// storage rather than silently losing data.
+		mountPath = "/data"
+	}
+	const volName = "data"
+
+	// Mount the volumeClaimTemplate into the container at the engine data dir.
+	mount := map[string]any{"name": volName, "mountPath": mountPath}
+	if existing, ok := deployment["extraVolumeMounts"].([]map[string]any); ok {
+		deployment["extraVolumeMounts"] = append(existing, mount)
+	} else {
+		deployment["extraVolumeMounts"] = []map[string]any{mount}
+	}
+
+	vct := map[string]any{
+		"name":        volName,
+		"accessModes": []string{"ReadWriteOnce"},
+		"resources": map[string]any{
+			"requests": map[string]any{"storage": gib(storageGB)},
+		},
+		"volumeMode": "Filesystem",
+	}
+	if sc := strings.TrimSpace(w.StorageClass); sc != "" {
+		vct["storageClassName"] = sc
+	}
+
+	return map[string]any{
+		"volumeClaimTemplates": []map[string]any{vct},
+		// RETAIN on both axes: Stop scales the StatefulSet to 0 (whenScaled) and a
+		// later teardown deletes it (whenDeleted) — neither must wipe the PVC.
+		"persistentVolumeClaimRetentionPolicy": map[string]any{
+			"whenScaled":  "Retain",
+			"whenDeleted": "Retain",
+		},
 	}
 }
 

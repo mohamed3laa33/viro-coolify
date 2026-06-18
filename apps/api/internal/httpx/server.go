@@ -135,6 +135,8 @@ func NewServer(cfg *config.Config, logger *slog.Logger, st store.Store, opts ...
 		platform.WithPullSecretName(pullSecretName),
 		platform.WithBuildTimeout(time.Duration(cfg.BuildTimeoutSec)*time.Second),
 		platform.WithBuildWaitGroup(&s.buildWG),
+		platform.WithDBStorageDefault(cfg.DBDefaultStorageGB),
+		platform.WithDBStorageClass(cfg.DBStorageClass),
 	)
 	s.router = s.routes()
 	return s
@@ -602,6 +604,10 @@ func (s *Server) routes() chi.Router {
 					r.Route("/databases", func(r chi.Router) {
 						r.With(s.orgAuthz(domain.RoleMember)).Get("/", s.handleListDatabases)
 						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/", s.handleCreateDatabase)
+						r.With(s.orgAuthz(domain.RoleMember)).Get("/{databaseID}", s.handleGetDatabase)
+						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/{databaseID}/deploy", s.handleDeployDatabase)
+						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/{databaseID}/stop", s.handleStopDatabase)
+						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/{databaseID}/restart", s.handleRestartDatabase)
 						r.With(s.orgAuthz(domain.RoleAdmin)).Delete("/{databaseID}", s.handleDeleteDatabase)
 					})
 

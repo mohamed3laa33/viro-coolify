@@ -177,7 +177,10 @@ func TestMemoryStoreUpdateDatabase(t *testing.T) {
 	s := NewMemoryStore()
 	ctx := context.Background()
 
-	d := &domain.Database{ID: "db1", OrgID: "o1", Name: "pg", Engine: "postgresql", Status: "deploying"}
+	d := &domain.Database{
+		ID: "db1", OrgID: "o1", Name: "pg", Engine: "postgresql", Status: "deploying",
+		StorageGB: 5, Username: "app_user", Password: "s3cret", DatabaseName: "app",
+	}
 	if err := s.CreateDatabase(ctx, d); err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -191,6 +194,10 @@ func TestMemoryStoreUpdateDatabase(t *testing.T) {
 	}
 	if got.Status != "running" {
 		t.Fatalf("status = %q, want running", got.Status)
+	}
+	// Storage + credentials round-trip.
+	if got.StorageGB != 5 || got.Username != "app_user" || got.Password != "s3cret" || got.DatabaseName != "app" {
+		t.Fatalf("storage/creds not round-tripped: %+v", got)
 	}
 	// Updating a missing database is a not-found error.
 	if err := s.UpdateDatabase(ctx, &domain.Database{ID: "missing"}); !errors.Is(err, ErrNotFound) {

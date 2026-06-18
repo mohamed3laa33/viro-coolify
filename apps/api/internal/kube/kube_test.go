@@ -238,6 +238,127 @@ func TestApplyDatabaseIsStateful(t *testing.T) {
 	}
 }
 
+// TestApplyDatabaseRendersRetainedVolume asserts a kind=database workload with a
+// StorageGB renders a volumeClaimTemplate (data mount at the engine data dir)
+// with a RETAIN PVC retention policy so Stop/scale/restart never wipe data.
+func TestApplyDatabaseRendersRetainedVolume(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	mh := &mockHelm{}
+	b := NewWithClient(testConfig(), cs, mh)
+	_, _, err := b.Apply(context.Background(), Workload{
+		OrgSlug: "acme", ProjectSlug: "web", Name: "pg", Kind: "database",
+		ServiceTemplateKey: "postgresql", Image: "postgres:16", CPU: 1, MemoryMB: 1024,
+		StorageGB: 3, StorageClass: "fast",
+		Env: map[string]string{"POSTGRES_PASSWORD": "s3cret"},
+	})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	vcts, ok := mh.lastValues["volumeClaimTemplates"].([]any)
+	if !ok || len(vcts) != 1 {
+		t.Fatalf("volumeClaimTemplates = %v, want 1 entry", mh.lastValues["volumeClaimTemplates"])
+	}
+	vct := vcts[0].(map[string]any)
+	if vct["name"] != "data" {
+		t.Errorf("vct name = %v, want data", vct["name"])
+	}
+	if sc := vct["storageClassName"]; sc != "fast" {
+		t.Errorf("vct storageClassName = %v, want fast", sc)
+	}
+	reqs := vct["resources"].(map[string]any)["requests"].(map[string]any)
+	if reqs["storage"] != "3Gi" {
+		t.Errorf("vct storage = %v, want 3Gi", reqs["storage"])
+	}
+
+	pol := mh.lastValues["persistentVolumeClaimRetentionPolicy"].(map[string]any)
+	if pol["whenScaled"] != "Retain" || pol["whenDeleted"] != "Retain" {
+		t.Errorf("pvc retention = %v, want Retain/Retain", pol)
+	}
+
+	// Data mount at the engine data dir.
+	dep := mh.lastValues["deployment"].(map[string]any)
+	mounts := dep["extraVolumeMounts"].([]any)
+	if len(mounts) != 1 {
+		t.Fatalf("extraVolumeMounts = %v, want 1 entry", mounts)
+	}
+	m0 := mounts[0].(map[string]any)
+	if m0["mountPath"] != "/var/lib/postgresql/data" || m0["name"] != "data" {
+		t.Errorf("extraVolumeMounts[0] = %v, want data->/var/lib/postgresql/data", m0)
+	}
+}
+
+// TestApplyDatabaseZeroStorageStillRetainsVolume asserts a kind=database
+// workload with StorageGB<=0 (a legacy/unclamped value) still renders a
+// volumeClaimTemplate clamped to the safe minimum with a RETAIN policy, never a
+// volume-less StatefulSet (which the chart would default to Delete retention).
+func TestApplyDatabaseZeroStorageStillRetainsVolume(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	mh := &mockHelm{}
+	b := NewWithClient(testConfig(), cs, mh)
+	_, _, err := b.Apply(context.Background(), Workload{
+		OrgSlug: "acme", ProjectSlug: "web", Name: "pg", Kind: "database",
+		ServiceTemplateKey: "postgresql", Image: "postgres:16", CPU: 1, MemoryMB: 1024,
+		StorageGB: 0,
+		Env:       map[string]string{"POSTGRES_PASSWORD": "s3cret"},
+	})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	vcts, ok := mh.lastValues["volumeClaimTemplates"].([]any)
+	if !ok || len(vcts) != 1 {
+		t.Fatalf("volumeClaimTemplates = %v, want 1 entry even with StorageGB=0", mh.lastValues["volumeClaimTemplates"])
+	}
+	reqs := vcts[0].(map[string]any)["resources"].(map[string]any)["requests"].(map[string]any)
+	if reqs["storage"] != gib(minDBStorageGB) {
+		t.Errorf("vct storage = %v, want %v", reqs["storage"], gib(minDBStorageGB))
+	}
+	pol := mh.lastValues["persistentVolumeClaimRetentionPolicy"].(map[string]any)
+	if pol["whenScaled"] != "Retain" || pol["whenDeleted"] != "Retain" {
+		t.Errorf("pvc retention = %v, want Retain/Retain", pol)
+	}
+}
+
+// TestApplyStatelessHasNoVolume asserts a stateless app never gets a
+// volumeClaimTemplate (the apps path is unchanged by the DB persistence work).
+func TestApplyStatelessHasNoVolume(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	mh := &mockHelm{}
+	b := NewWithClient(testConfig(), cs, mh)
+	_, _, err := b.Apply(context.Background(), Workload{
+		OrgSlug: "acme", ProjectSlug: "web", Name: "api", Kind: "app",
+		Image: "nginx:1.27", CPU: 1, MemoryMB: 256, StorageGB: 5,
+	})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if _, ok := mh.lastValues["volumeClaimTemplates"]; ok {
+		t.Errorf("stateless app should not render volumeClaimTemplates")
+	}
+}
+
+// TestApplyRedisRendersRequirepassCommand asserts redis gets its password
+// enforced via the container command (the official image has no password env).
+func TestApplyRedisRendersRequirepassCommand(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	mh := &mockHelm{}
+	b := NewWithClient(testConfig(), cs, mh)
+	_, _, err := b.Apply(context.Background(), Workload{
+		OrgSlug: "acme", ProjectSlug: "web", Name: "cache", Kind: "database",
+		ServiceTemplateKey: "redis", Image: "redis:7", CPU: 1, MemoryMB: 256, StorageGB: 1,
+		Env: map[string]string{"REDIS_PASSWORD": "s3cret"},
+	})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	dep := mh.lastValues["deployment"].(map[string]any)
+	cmd, ok := dep["command"].([]any)
+	if !ok || len(cmd) != 3 || cmd[0] != "redis-server" || cmd[1] != "--requirepass" || cmd[2] != "s3cret" {
+		t.Errorf("redis command = %v, want [redis-server --requirepass s3cret]", dep["command"])
+	}
+}
+
 func TestStopScalesDeploymentToZero(t *testing.T) {
 	one := int32(1)
 	dep := &appsv1.Deployment{
@@ -261,6 +382,35 @@ func TestStopScalesDeploymentToZero(t *testing.T) {
 	got, _ = cs.AppsV1().Deployments("vortex-acme-web").Get(context.Background(), "api", metav1.GetOptions{})
 	if got.Spec.Replicas == nil || *got.Spec.Replicas != 1 {
 		t.Errorf("replicas after Start = %v, want 1", got.Spec.Replicas)
+	}
+}
+
+// TestStopStatefulSetRetainsPVC asserts Stop scales a database StatefulSet to 0
+// without deleting its PersistentVolumeClaim (data survives a stop). The RETAIN
+// retention policy is rendered into the StatefulSet by buildValues; here we
+// assert the control-plane Stop path itself never touches the PVC.
+func TestStopStatefulSetRetainsPVC(t *testing.T) {
+	one := int32(1)
+	sts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "pg", Namespace: "vortex-acme-web"},
+		Spec:       appsv1.StatefulSetSpec{Replicas: &one},
+	}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "data-pg-0", Namespace: "vortex-acme-web"},
+	}
+	cs := fake.NewSimpleClientset(sts, pvc)
+	b := NewWithClient(testConfig(), cs, &mockHelm{})
+
+	if err := b.Stop(context.Background(), "vortex-acme-web", "pg"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	got, _ := cs.AppsV1().StatefulSets("vortex-acme-web").Get(context.Background(), "pg", metav1.GetOptions{})
+	if got.Spec.Replicas == nil || *got.Spec.Replicas != 0 {
+		t.Errorf("replicas = %v, want 0", got.Spec.Replicas)
+	}
+	// The PVC must still exist after a stop.
+	if _, err := cs.CoreV1().PersistentVolumeClaims("vortex-acme-web").Get(context.Background(), "data-pg-0", metav1.GetOptions{}); err != nil {
+		t.Errorf("PVC was removed on Stop: %v", err)
 	}
 }
 
