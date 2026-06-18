@@ -1,0 +1,131 @@
+# kube-prometheus-stack — lightweight metrics retention for tenant + control-plane.
+#
+# WHY this chart: the common-chart emits `monitoring.coreos.com/v1` ServiceMonitor
+# objects (deploy/charts/common-chart/templates/servicemonitor.yaml) when a workload
+# enables scraping, and the Vortex API exposes /internal/metrics. ServiceMonitors
+# require the Prometheus Operator + its CRDs, which this chart bundles. We trim it to
+# the essentials (Prometheus + Grafana + the operator) and disable the kube-prometheus
+# "full cluster monitoring" extras to keep the footprint small.
+#
+# Grafana ships here as the single UI for metrics AND Loki logs (Loki is added as a
+# datasource by the loki helm release / observability agent). We do NOT author
+# dashboards or alert rules here — that is the observability agent's job. This file
+# only stands up the stack with sane, overcommit-friendly resource requests.
+#
+# Chart: prometheus-community/kube-prometheus-stack.
+
+# Install/keep the Prometheus Operator CRDs so ServiceMonitor/PodMonitor from the
+# tenant common-chart releases are recognized cluster-wide.
+crds:
+  enabled: true
+
+# --- Trim the bundled "monitor everything" exporters: this stack is for app +
+#     control-plane telemetry, not deep node/kubelet introspection. The
+#     observability agent can re-enable any of these later. ---
+nodeExporter:
+  enabled: false
+kubeStateMetrics:
+  enabled: true
+kubeApiServer:
+  enabled: false
+kubelet:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+coreDns:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+
+# The Alertmanager is owned by the observability agent (alert rules are out of scope
+# here); leave it off so we don't ship an un-configured alerting pipeline.
+alertmanager:
+  enabled: false
+
+prometheus:
+  prometheusSpec:
+    # Discover ServiceMonitors/PodMonitors from ALL namespaces (tenant org-project
+    # namespaces included) without requiring a matching helm-release label — the
+    # tenant common-chart ServiceMonitors are not labeled for this release.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    # Bounded retention — "lightweight" retention, not infinite. Tune via the
+    # observability agent if longer history is needed.
+    retention: 15d
+    retentionSize: 8GB
+    # Persist TSDB so a Prometheus restart doesn't wipe history.
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 10Gi
+    # Overcommit philosophy (invariant #3): small requests, generous limits.
+    resources:
+      requests:
+        cpu: 100m
+        memory: 512Mi
+      limits:
+        cpu: "1"
+        memory: 1536Mi
+
+# Grafana: the single observability UI. Provisioning of dashboards/datasources
+# (including Loki) is left to the observability agent — we only set an admin
+# secret reference and resources. The admin credentials come from an existing
+# Secret so no password is committed here (invariant: never commit real secrets).
+grafana:
+  enabled: true
+  # Source admin creds from a pre-created Secret instead of an inline password.
+  # The bootstrap/observability layer creates `grafana-admin` with admin-user /
+  # admin-password keys; until then Grafana generates a random password.
+  admin:
+    existingSecret: grafana-admin
+    userKey: admin-user
+    passwordKey: admin-password
+  persistence:
+    enabled: true
+    size: 2Gi
+  # Let the observability agent drop dashboard/datasource ConfigMaps with these
+  # labels and have Grafana sidecars pick them up — without us authoring any here.
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      searchNamespace: ALL
+    datasources:
+      enabled: true
+      label: grafana_datasource
+      searchNamespace: ALL
+  resources:
+    requests:
+      cpu: 25m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# Operator itself — tiny footprint.
+prometheusOperator:
+  resources:
+    requests:
+      cpu: 25m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi

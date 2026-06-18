@@ -1,0 +1,38 @@
+# promtail — the log shipper that tails pod logs and pushes them to Loki.
+#
+# WHY: Loki is only a store + query API; something has to scrape the node's
+# container logs and push them. promtail runs as a DaemonSet (one tiny agent per
+# node) and forwards every pod's stdout/stderr to Loki, labeled by namespace / pod /
+# container — which is exactly the tenant + control-plane log retention this stack
+# needs. Without it, the Loki release would hold nothing.
+#
+# Chart: grafana/promtail. Targets the loki release's gateway Service.
+
+config:
+  clients:
+    # The grafana/loki single-binary release fronts Loki with a gateway Service in
+    # the `monitoring` namespace; push there.
+    - url: http://loki-gateway.monitoring.svc.cluster.local/loki/api/v1/push
+
+# DaemonSet — one agent per node. Keep each agent tiny (overcommit philosophy,
+# invariant #3): small requests, modest burst ceiling.
+resources:
+  requests:
+    cpu: 25m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+# Tolerate all taints so logs are collected from every node (incl. tainted /
+# system pools) — log coverage gaps are worse than a tiny agent everywhere.
+tolerations:
+  - effect: NoSchedule
+    operator: Exists
+  - effect: NoExecute
+    operator: Exists
+
+# Expose promtail's own metrics so the kube-prometheus-stack can scrape it via a
+# ServiceMonitor (the observability agent decides whether to enable that monitor).
+serviceMonitor:
+  enabled: false

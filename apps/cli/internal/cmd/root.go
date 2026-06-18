@@ -75,12 +75,13 @@ func (a *App) newRootCmd() *cobra.Command {
 
 	pf := root.PersistentFlags()
 	pf.StringVar(&a.apiURLFlag, "api-url", "", "Vortex API base URL (overrides config)")
-	pf.StringVar(&a.orgFlag, "org", "", "organization id (overrides current context)")
-	pf.StringVar(&a.projectFlag, "project", "", "project id (overrides current context)")
+	pf.StringVar(&a.orgFlag, "org", "", "organization name or id (overrides current context)")
+	pf.StringVar(&a.projectFlag, "project", "", "project name or id (overrides current context)")
 	pf.BoolVar(&a.jsonOut, "json", false, "output JSON for scripting")
 
 	root.AddCommand(
 		a.newAuthCmd(),
+		a.newLaunchCmd(),
 		a.newOrgsCmd(),
 		a.newProjectsCmd(),
 		a.newAppsCmd(),
@@ -119,7 +120,7 @@ func (a *App) orgID() (string, error) {
 	if a.cfg.CurrentOrg != "" {
 		return a.cfg.CurrentOrg, nil
 	}
-	return "", fmt.Errorf("no organization set: pass --org or run `vortex config set-context --org <id>`")
+	return "", fmt.Errorf("no organization set: pass --org or run `vortex config set-context --org <name-or-id>`")
 }
 
 // projectID resolves the effective project: --project flag, else context.
@@ -130,5 +131,5 @@ func (a *App) projectID() (string, error) {
 	if a.cfg.CurrentProj != "" {
 		return a.cfg.CurrentProj, nil
 	}
-	return "", fmt.Errorf("no project set: pass --project or run `vortex config set-context --project <id>`")
+	return "", fmt.Errorf("no project set: pass --project or run `vortex config set-context --project <name-or-id>`")
 }

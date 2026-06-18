@@ -35,6 +35,7 @@ coverage.html
 node_modules/
 .next/
 out/
+coverage/
 .turbo/
 .pnpm-store/
 npm-debug.log*

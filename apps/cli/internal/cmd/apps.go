@@ -43,14 +43,17 @@ func (a *App) newAppsListCmd() *cobra.Command {
 			if err := a.requireAuth(); err != nil {
 				return err
 			}
-			orgID, err := a.orgID()
+			orgID, err := a.resolveOrgID(cmd)
 			if err != nil {
 				return err
 			}
 			var apps []client.App
 			// Filter by project when --project is set or persisted in context.
 			if a.projectFlag != "" || a.cfg.CurrentProj != "" {
-				projID, _ := a.projectID()
+				projID, perr := a.resolveProjectID(cmd, orgID)
+				if perr != nil {
+					return perr
+				}
 				apps, err = a.client.ListProjectApps(ctx(cmd), orgID, projID)
 			} else {
 				apps, err = a.client.ListApps(ctx(cmd), orgID)
@@ -89,7 +92,7 @@ func (a *App) newAppsCreateCmd() *cobra.Command {
 			if err := a.requireAuth(); err != nil {
 				return err
 			}
-			orgID, err := a.orgID()
+			orgID, err := a.resolveOrgID(cmd)
 			if err != nil {
 				return err
 			}
@@ -105,7 +108,9 @@ func (a *App) newAppsCreateCmd() *cobra.Command {
 			// Send projectId when a project is selected; otherwise the server
 			// defaults to the org's default project.
 			if a.projectFlag != "" || a.cfg.CurrentProj != "" {
-				in.ProjectID, _ = a.projectID()
+				if in.ProjectID, err = a.resolveProjectID(cmd, orgID); err != nil {
+					return err
+				}
 			}
 			app, err := a.client.CreateApp(ctx(cmd), orgID, in)
 			if err != nil {
@@ -133,18 +138,18 @@ func (a *App) newAppsCreateCmd() *cobra.Command {
 
 func (a *App) newAppsStatusCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "status <app-id>",
+		Use:   "status <app>",
 		Short: "Show detailed status for an app",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.requireAuth(); err != nil {
 				return err
 			}
-			orgID, err := a.orgID()
+			orgID, appID, err := a.resolveOrgApp(cmd, args[0])
 			if err != nil {
 				return err
 			}
-			d, err := a.client.GetApp(ctx(cmd), orgID, args[0])
+			d, err := a.client.GetApp(ctx(cmd), orgID, appID)
 			if err != nil {
 				return err
 			}
@@ -160,14 +165,14 @@ func (a *App) newAppsUpdateCmd() *cobra.Command {
 		memMB                     int
 	)
 	cmd := &cobra.Command{
-		Use:   "update <app-id>",
+		Use:   "update <app>",
 		Short: "Update an app's image / CPU / memory / git source (only the flags you pass change)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.requireAuth(); err != nil {
 				return err
 			}
-			orgID, err := a.orgID()
+			orgID, appID, err := a.resolveOrgApp(cmd, args[0])
 			if err != nil {
 				return err
 			}
@@ -191,7 +196,7 @@ func (a *App) newAppsUpdateCmd() *cobra.Command {
 			if in.Image == nil && in.GitRepository == nil && in.GitBranch == nil && in.CPU == nil && in.MemoryMB == nil {
 				return fmt.Errorf("nothing to update: pass --image, --cpu, --memory, --git-repo and/or --git-branch")
 			}
-			app, err := a.client.UpdateApp(ctx(cmd), orgID, args[0], in)
+			app, err := a.client.UpdateApp(ctx(cmd), orgID, appID, in)
 			if err != nil {
 				return err
 			}
@@ -210,14 +215,14 @@ func (a *App) newAppsUpdateCmd() *cobra.Command {
 func (a *App) newAppsScaleCmd() *cobra.Command {
 	var minR, maxR int
 	cmd := &cobra.Command{
-		Use:   "scale <app-id>",
+		Use:   "scale <app>",
 		Short: "Set an app's autoscaling bounds (--min/--max)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.requireAuth(); err != nil {
 				return err
 			}
-			orgID, err := a.orgID()
+			orgID, appID, err := a.resolveOrgApp(cmd, args[0])
 			if err != nil {
 				return err
 			}
@@ -232,7 +237,7 @@ func (a *App) newAppsScaleCmd() *cobra.Command {
 			if in.MinReplicas == nil && in.MaxReplicas == nil {
 				return fmt.Errorf("nothing to scale: pass --min and/or --max")
 			}
-			app, err := a.client.ScaleApp(ctx(cmd), orgID, args[0], in)
+			app, err := a.client.ScaleApp(ctx(cmd), orgID, appID, in)
 			if err != nil {
 				return err
 			}
@@ -249,18 +254,18 @@ func (a *App) newAppsScaleCmd() *cobra.Command {
 
 func (a *App) newAppsReleasesCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "releases <app-id>",
+		Use:   "releases <app>",
 		Short: "List an app's release history",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.requireAuth(); err != nil {
 				return err
 			}
-			orgID, err := a.orgID()
+			orgID, appID, err := a.resolveOrgApp(cmd, args[0])
 			if err != nil {
 				return err
 			}
-			rels, err := a.client.ListReleases(ctx(cmd), orgID, args[0])
+			rels, err := a.client.ListReleases(ctx(cmd), orgID, appID)
 			if err != nil {
 				return err
 			}
@@ -283,18 +288,18 @@ func (a *App) newAppsReleasesCmd() *cobra.Command {
 func (a *App) newAppsRollbackCmd() *cobra.Command {
 	var revision int
 	cmd := &cobra.Command{
-		Use:   "rollback <app-id>",
+		Use:   "rollback <app>",
 		Short: "Roll an app back to a prior revision (defaults to the previous release)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.requireAuth(); err != nil {
 				return err
 			}
-			orgID, err := a.orgID()
+			orgID, appID, err := a.resolveOrgApp(cmd, args[0])
 			if err != nil {
 				return err
 			}
-			app, err := a.client.Rollback(ctx(cmd), orgID, args[0], revision)
+			app, err := a.client.Rollback(ctx(cmd), orgID, appID, revision)
 			if err != nil {
 				return err
 			}
@@ -310,19 +315,19 @@ func (a *App) newAppsRollbackCmd() *cobra.Command {
 func (a *App) newAppsBuildsCmd() *cobra.Command {
 	var logsID string
 	cmd := &cobra.Command{
-		Use:   "builds <app-id>",
+		Use:   "builds <app>",
 		Short: "List an app's git-source image builds (--logs <build-id> for one build's logs)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.requireAuth(); err != nil {
 				return err
 			}
-			orgID, err := a.orgID()
+			orgID, appID, err := a.resolveOrgApp(cmd, args[0])
 			if err != nil {
 				return err
 			}
 			if logsID != "" {
-				b, err := a.client.GetBuild(ctx(cmd), orgID, args[0], logsID)
+				b, err := a.client.GetBuild(ctx(cmd), orgID, appID, logsID)
 				if err != nil {
 					return err
 				}
@@ -336,7 +341,7 @@ func (a *App) newAppsBuildsCmd() *cobra.Command {
 				fmt.Fprintln(cmd.OutOrStdout(), b.Logs)
 				return nil
 			}
-			builds, err := a.client.ListBuilds(ctx(cmd), orgID, args[0])
+			builds, err := a.client.ListBuilds(ctx(cmd), orgID, appID)
 			if err != nil {
 				return err
 			}
@@ -359,18 +364,18 @@ func (a *App) newAppsBuildsCmd() *cobra.Command {
 
 func (a *App) newAppsMetricsCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "metrics <app-id>",
+		Use:   "metrics <app>",
 		Short: "Show an app's live pod CPU/memory usage",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.requireAuth(); err != nil {
 				return err
 			}
-			orgID, err := a.orgID()
+			orgID, appID, err := a.resolveOrgApp(cmd, args[0])
 			if err != nil {
 				return err
 			}
-			m, err := a.client.AppMetrics(ctx(cmd), orgID, args[0])
+			m, err := a.client.AppMetrics(ctx(cmd), orgID, appID)
 			if err != nil {
 				return err
 			}
@@ -395,18 +400,18 @@ func (a *App) newAppsMetricsCmd() *cobra.Command {
 // appActionCmd builds a deploy/restart/stop command sharing the same shape.
 func (a *App) appActionCmd(use, short string, fn func(cmd *cobra.Command, orgID, appID string) (*client.App, error)) *cobra.Command {
 	return &cobra.Command{
-		Use:   use + " <app-id>",
+		Use:   use + " <app>",
 		Short: short,
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.requireAuth(); err != nil {
 				return err
 			}
-			orgID, err := a.orgID()
+			orgID, appID, err := a.resolveOrgApp(cmd, args[0])
 			if err != nil {
 				return err
 			}
-			app, err := fn(cmd, orgID, args[0])
+			app, err := fn(cmd, orgID, appID)
 			if err != nil {
 				return err
 			}
@@ -443,25 +448,25 @@ func (a *App) newAppsLogsCmd() *cobra.Command {
 		tail    int
 	)
 	cmd := &cobra.Command{
-		Use:   "logs <app-id>",
+		Use:   "logs <app>",
 		Short: "Show recent logs for an app (--follow streams live; --tail/--since filter the snapshot)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.requireAuth(); err != nil {
 				return err
 			}
-			orgID, err := a.orgID()
+			orgID, appID, err := a.resolveOrgApp(cmd, args[0])
 			if err != nil {
 				return err
 			}
 			// --follow consumes the live SSE stream until interrupted (Ctrl-C).
 			if follow {
 				out := cmd.OutOrStdout()
-				return a.client.FollowAppLogs(ctx(cmd), orgID, args[0], allPods, func(line string) {
+				return a.client.FollowAppLogs(ctx(cmd), orgID, appID, allPods, func(line string) {
 					fmt.Fprintln(out, line)
 				})
 			}
-			logs, err := a.client.AppLogs(ctx(cmd), orgID, args[0])
+			logs, err := a.client.AppLogs(ctx(cmd), orgID, appID)
 			if err != nil {
 				return err
 			}
@@ -511,7 +516,7 @@ func filterLogs(logs, since string, tail int) string {
 func (a *App) newAppsDestroyCmd() *cobra.Command {
 	var yes bool
 	cmd := &cobra.Command{
-		Use:     "destroy <app-id>",
+		Use:     "destroy <app>",
 		Aliases: []string{"delete", "rm"},
 		Short:   "Destroy an app",
 		Args:    cobra.ExactArgs(1),
@@ -519,7 +524,7 @@ func (a *App) newAppsDestroyCmd() *cobra.Command {
 			if err := a.requireAuth(); err != nil {
 				return err
 			}
-			orgID, err := a.orgID()
+			orgID, appID, err := a.resolveOrgApp(cmd, args[0])
 			if err != nil {
 				return err
 			}
@@ -530,7 +535,7 @@ func (a *App) newAppsDestroyCmd() *cobra.Command {
 					return nil
 				}
 			}
-			if err := a.client.DestroyApp(ctx(cmd), orgID, args[0]); err != nil {
+			if err := a.client.DestroyApp(ctx(cmd), orgID, appID); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Destroyed app %s\n", args[0])

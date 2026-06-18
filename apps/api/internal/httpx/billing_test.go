@@ -66,6 +66,43 @@ func TestBillingSubscribeAndSummary(t *testing.T) {
 	}
 }
 
+// TestBillingInvoiceHistory drives the invoice-history route end-to-end: a member
+// can read it and it returns the current open period (newest first).
+func TestBillingInvoiceHistory(t *testing.T) {
+	s := newTestServer(t, "http://unused")
+	owner := signup(t, s, "invoice-owner@example.com")
+	org := firstOrgID(t, s, owner)
+
+	if rec := doJSON(t, s, http.MethodPost, "/v1/orgs/"+org+"/billing/subscribe", `{"planId":"launch"}`, owner); rec.Code != http.StatusOK {
+		t.Fatalf("subscribe = %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec := doJSON(t, s, http.MethodGet, "/v1/orgs/"+org+"/billing/invoices?limit=3", "", owner)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("invoices = %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Data []struct {
+			Status      string `json:"status"`
+			Currency    string `json:"currency"`
+			ChargeCents int64  `json:"chargeCents"`
+			LineItems   []struct {
+				Key         string `json:"key"`
+				AmountCents int64  `json:"amountCents"`
+			} `json:"lineItems"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Data) == 0 {
+		t.Fatal("expected at least the current open-period invoice")
+	}
+	if resp.Data[0].Status != "open" {
+		t.Fatalf("newest invoice status = %q, want open", resp.Data[0].Status)
+	}
+}
+
 func TestBillingSubscribeRequiresAdmin(t *testing.T) {
 	s := newTestServer(t, "http://unused")
 	owner := signup(t, s, "bill-admin@example.com")

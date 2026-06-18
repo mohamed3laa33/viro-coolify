@@ -46,8 +46,8 @@ func (a *App) newConfigSetContextCmd() *cobra.Command {
 	}
 	// Local flags so they don't collide with the persistent --org/--project.
 	f := cmd.Flags()
-	f.StringVar(&org, "org", "", "default organization id")
-	f.StringVar(&project, "project", "", "default project id")
+	f.StringVar(&org, "org", "", "default organization name or id")
+	f.StringVar(&project, "project", "", "default project name or id")
 	f.StringVar(&apiURL, "api-url", "", "Vortex API base URL")
 	return cmd
 }
