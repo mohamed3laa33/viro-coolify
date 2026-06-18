@@ -51,6 +51,17 @@ export const viewport: Viewport = {
   initialScale: 1,
 };
 
+// Force dynamic rendering for every route. Our CSP (src/middleware.ts) mints a
+// fresh per-request nonce and relies on `strict-dynamic`, which makes the bare
+// `'self'` source ignored — so EVERY <script> Next emits must carry the nonce or
+// the browser blocks it. Statically prerendered HTML is generated at build time,
+// long before any request nonce exists, so its script tags ship without a nonce
+// and the standalone production server (output:standalone) serves dead pages:
+// zero client JS loads, React never hydrates, the AuthProvider spinner hangs.
+// Rendering on every request lets the middleware nonce be stamped into the
+// scripts, which keeps the strong nonce + strict-dynamic policy intact.
+export const dynamic = "force-dynamic";
+
 export default function RootLayout({
   children,
 }: Readonly<{

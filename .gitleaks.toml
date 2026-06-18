@@ -23,4 +23,7 @@ regexes = [
   '''dop_v1_xxx''',
   '''inv_tok_[a-z0-9_]+''',
   '''vortex\.v60ai\.com''',
+  # Obviously-fake API-token fixtures in web unit tests (settings-tokens.test.tsx,
+  # api.test.ts). The literal "abcdef0123456789" sequence marks them as non-secrets.
+  '''vrt_abcdef0123456789(ONCE)?''',
 ]

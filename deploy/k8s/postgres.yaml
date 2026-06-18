@@ -61,6 +61,7 @@ spec:
           image: postgres:16-alpine
           securityContext:
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
           ports:
@@ -85,6 +86,17 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data
+            # readOnlyRootFilesystem: postgres still needs writable scratch +
+            # socket dirs outside the data PVC.
+            - name: tmp
+              mountPath: /tmp
+            - name: run
+              mountPath: /var/run/postgresql
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: run
+          emptyDir: {}
   volumeClaimTemplates:
     - metadata:
         name: data

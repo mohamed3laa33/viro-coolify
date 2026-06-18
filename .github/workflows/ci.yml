@@ -92,10 +92,7 @@ jobs:
 
   security:
     name: Security (Trivy)
-    # Disabled on push/PR to keep the main pipeline fast and unblock delivery.
-    # Run on demand: `gh workflow run ci.yml` (or the Actions "Run workflow" button),
-    # or locally with ./scripts/security-scan.sh.
-    if: github.event_name == 'workflow_dispatch'
+    # Runs on push/PR. Mirrored locally by ./scripts/security-scan.sh.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -112,8 +109,8 @@ jobs:
             --exit-code 1 --no-progress --skip-dirs _ref-volo,_ref-viro-app,_clone .
       - name: Trivy — IaC/K8s misconfig scan
         run: |
-          trivy config --severity HIGH,CRITICAL --exit-code 1 --no-progress \
-            --skip-dirs deploy/charts/common-chart .
+          trivy config --severity HIGH,CRITICAL --exit-code 1 --quiet \
+            --skip-dirs deploy/charts/common-chart,_ref-volo,_ref-viro-app,_clone .
       - name: Gitleaks — secret scan
         run: |
           mkdir -p "$RUNNER_TEMP/bin"
@@ -135,43 +132,65 @@ jobs:
 
   e2e:
     name: E2E (Playwright)
-    # Opt-in only: keeps PRs fast. Run on demand via `gh workflow run ci.yml`
-    # or the Actions "Run workflow" button. Skips cleanly if no Playwright
-    # config/tests exist yet so it never blocks the dispatch.
-    if: github.event_name == 'workflow_dispatch'
+    # Real full-stack smoke: boots the API (in-memory store + FakeBackend, dev
+    # secrets — no cluster/DB needed) and the Next.js production STANDALONE server
+    # (the exact artifact docker/Dockerfile.web ships), seeds an account, then
+    # drives the dashboard with Playwright. This gate catches what jsdom unit
+    # tests and `next build` can't — e.g. the CSP/hydration regression.
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: apps/web
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          cache-dependency-path: apps/api/go.sum
       - uses: actions/setup-node@v6
         with:
           node-version: "22"
           cache: npm
           cache-dependency-path: apps/web/package-lock.json
-      - name: Install
-        run: npm ci
-      - name: Detect Playwright config
-        id: detect
-        run: |
-          if ls playwright.config.* >/dev/null 2>&1; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "No Playwright config found — skipping E2E."
-          fi
-      - name: Install Playwright browsers
-        if: steps.detect.outputs.present == 'true'
-        run: npx playwright install --with-deps
-      - name: Run Playwright tests
-        if: steps.detect.outputs.present == 'true'
-        run: npx playwright test
+      - name: Build API binary
+        working-directory: apps/api
+        run: go build -o "$RUNNER_TEMP/vortex-api" ./cmd/api
+      - name: Install web deps + build standalone (pointed at the local API)
+        working-directory: apps/web
         env:
           NEXT_TELEMETRY_DISABLED: "1"
-          NEXT_PUBLIC_VORTEX_API_URL: "https://api.vortex.v60ai.com"
+          NEXT_PUBLIC_VORTEX_API_URL: "http://localhost:8080"
+        run: |
+          npm ci
+          npm run build
+          # The standalone server needs static assets + public/ copied alongside it.
+          cp -r .next/static .next/standalone/.next/static
+          cp -r public .next/standalone/public
+      - name: Install Playwright browser
+        working-directory: apps/web
+        run: npx playwright install --with-deps chromium
+      - name: Boot API + web, seed account, run E2E
+        working-directory: apps/web
+        env:
+          E2E_BASE_URL: "http://localhost:3000"
+          E2E_EMAIL: "e2e@vortex.test"
+          E2E_PASSWORD: "E2ePassw0rd!23"
+        run: |
+          set -e
+          # API: dev mode → in-memory store + FakeBackend + dev secrets, CORS for the web origin.
+          VORTEX_ENV=development HTTP_ADDR=:8080 VORTEX_CORS_ORIGINS=http://localhost:3000 \
+            "$RUNNER_TEMP/vortex-api" > "$RUNNER_TEMP/api.log" 2>&1 &
+          for i in $(seq 1 30); do curl -sf localhost:8080/healthz >/dev/null && break; sleep 1; done
+          curl -sf -X POST localhost:8080/v1/auth/signup -H 'content-type: application/json' \
+            -d "{\"email\":\"$E2E_EMAIL\",\"name\":\"E2E\",\"password\":\"$E2E_PASSWORD\"}" >/dev/null
+          # Web: the production standalone server (same as docker/Dockerfile.web).
+          PORT=3000 node .next/standalone/server.js > "$RUNNER_TEMP/web.log" 2>&1 &
+          for i in $(seq 1 30); do curl -sf localhost:3000/login >/dev/null && break; sleep 1; done
+          npx playwright test
+      - name: Dump server logs on failure
+        if: failure()
+        run: |
+          echo "::group::API log"; cat "$RUNNER_TEMP/api.log" 2>/dev/null || true; echo "::endgroup::"
+          echo "::group::Web log"; cat "$RUNNER_TEMP/web.log" 2>/dev/null || true; echo "::endgroup::"
       - name: Upload Playwright report
-        if: steps.detect.outputs.present == 'true' && always()
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: playwright-report
