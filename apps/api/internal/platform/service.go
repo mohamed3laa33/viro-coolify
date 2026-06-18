@@ -365,14 +365,27 @@ type CreateAppInput struct {
 	Region string
 }
 
-// resolveRegion resolves and VALIDATES the placement region for a new workload
-// (the multi-region seam). An empty requested region defaults to the platform
-// default region (PlatformSettings.DefaultRegion). The resolved region must be a
-// member of the admin-managed PlatformSettings.Regions list, else ErrInvalidRegion.
+// resolveRegion resolves and VALIDATES the placement region for a new workload.
+// An empty requested region defaults to the platform default region
+// (PlatformSettings.DefaultRegion). The resolved region must be a member of the
+// admin-managed PlatformSettings.Regions list, else ErrInvalidRegion — region
+// naming is admin/DB-driven, never hardcoded (invariant #1).
 //
 // When platform settings carry NO regions at all (e.g. an un-seeded test store),
 // validation is skipped and the requested region passes through unchanged — region
-// is an opt-in seam and must not break a deploy on a store that never configured it.
+// is opt-in and must not break a deploy on a store that never configured it.
+//
+// The resolved region is persisted and plumbed onto kube.Workload.Region, where the
+// deploy backend translates it into REAL in-cluster scheduling (nodeSelector/
+// affinity + an optional regional-pool toleration; see kube.regionScheduling) so the
+// workload lands on the node pool matching the region. This is the foundation for
+// multi-region WITHIN a single cluster.
+//
+// TODO(multi-region, cross-CLUSTER): true global multi-region — a separate cluster
+// per physical region selected by this region value, with region-aware deploy
+// routing and per-region Gateways/DNS — is a from-scratch follow-up and is NOT
+// implemented. It needs a cluster registry + a region->Backend router here; today
+// every region resolves to the single configured cluster.
 func (s *Service) resolveRegion(ctx context.Context, requested string) (string, error) {
 	requested = strings.TrimSpace(requested)
 	set, err := s.store.GetSettings(ctx)

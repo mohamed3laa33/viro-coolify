@@ -29,6 +29,7 @@ dist/
 /apps/api/tmp/
 coverage.out
 coverage.html
+coverage/
 *.test
 
 # ---- Node / Next.js ----
