@@ -26,11 +26,11 @@ func (a *App) newSecretsListCmd() *cobra.Command {
 			if err := a.requireAuth(); err != nil {
 				return err
 			}
-			orgID, err := a.orgID()
+			orgID, resolvedApp, err := a.resolveOrgApp(cmd, appID)
 			if err != nil {
 				return err
 			}
-			env, err := a.client.ListEnv(ctx(cmd), orgID, appID)
+			env, err := a.client.ListEnv(ctx(cmd), orgID, resolvedApp)
 			if err != nil {
 				return err
 			}
@@ -47,7 +47,7 @@ func (a *App) newSecretsListCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVarP(&appID, "app", "a", "", "app id (required)")
+	cmd.Flags().StringVarP(&appID, "app", "a", "", "app name or id (required)")
 	_ = cmd.MarkFlagRequired("app")
 	return cmd
 }
@@ -65,7 +65,7 @@ func (a *App) newSecretsSetCmd() *cobra.Command {
 			if err := a.requireAuth(); err != nil {
 				return err
 			}
-			orgID, err := a.orgID()
+			orgID, resolvedApp, err := a.resolveOrgApp(cmd, appID)
 			if err != nil {
 				return err
 			}
@@ -74,7 +74,7 @@ func (a *App) newSecretsSetCmd() *cobra.Command {
 				if !ok || key == "" {
 					return fmt.Errorf("invalid KEY=VALUE pair: %q", kv)
 				}
-				if _, err := a.client.SetEnvSecret(ctx(cmd), orgID, appID, key, value, secret); err != nil {
+				if _, err := a.client.SetEnvSecret(ctx(cmd), orgID, resolvedApp, key, value, secret); err != nil {
 					return err
 				}
 			}
@@ -86,7 +86,7 @@ func (a *App) newSecretsSetCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVarP(&appID, "app", "a", "", "app id (required)")
+	cmd.Flags().StringVarP(&appID, "app", "a", "", "app name or id (required)")
 	cmd.Flags().BoolVar(&secret, "secret", false, "store the value as a secret (encrypted at rest, masked on read)")
 	_ = cmd.MarkFlagRequired("app")
 	return cmd
@@ -102,12 +102,12 @@ func (a *App) newSecretsUnsetCmd() *cobra.Command {
 			if err := a.requireAuth(); err != nil {
 				return err
 			}
-			orgID, err := a.orgID()
+			orgID, resolvedApp, err := a.resolveOrgApp(cmd, appID)
 			if err != nil {
 				return err
 			}
 			for _, key := range args {
-				if err := a.client.UnsetEnv(ctx(cmd), orgID, appID, key); err != nil {
+				if err := a.client.UnsetEnv(ctx(cmd), orgID, resolvedApp, key); err != nil {
 					return err
 				}
 			}
@@ -115,7 +115,7 @@ func (a *App) newSecretsUnsetCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVarP(&appID, "app", "a", "", "app id (required)")
+	cmd.Flags().StringVarP(&appID, "app", "a", "", "app name or id (required)")
 	_ = cmd.MarkFlagRequired("app")
 	return cmd
 }

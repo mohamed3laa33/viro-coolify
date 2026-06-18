@@ -20,7 +20,7 @@ func (a *App) newProjectsListCmd() *cobra.Command {
 			if err := a.requireAuth(); err != nil {
 				return err
 			}
-			orgID, err := a.orgID()
+			orgID, err := a.resolveOrgID(cmd)
 			if err != nil {
 				return err
 			}
@@ -56,7 +56,7 @@ func (a *App) newProjectsCreateCmd() *cobra.Command {
 			if err := a.requireAuth(); err != nil {
 				return err
 			}
-			orgID, err := a.orgID()
+			orgID, err := a.resolveOrgID(cmd)
 			if err != nil {
 				return err
 			}

@@ -9,7 +9,9 @@
 #     helmfile -f deploy/helmfile.yaml apply
 #
 # It installs (in dependency order via `needs`): Gateway API CRDs + Envoy Gateway,
-# cert-manager, KEDA, metrics-server, then the vortex-bootstrap chart (Postgres +
+# cert-manager, KEDA (+ the KEDA HTTP add-on for true HTTP scale-to-zero/wake),
+# metrics-server, a lightweight observability stack (Prometheus + Grafana + Loki +
+# promtail) and Velero for backups, then the vortex-bootstrap chart (Postgres +
 # shared Gateway + GatewayClass + DNS-01 issuer + wildcard TLS), then the Vortex
 # control plane (api + web) wired to Postgres. Envoy Gateway's chart bundles the
 # Gateway API CRDs, so there is nothing to apply by hand.
@@ -23,6 +25,12 @@ repositories:
     url: https://kedacore.github.io/charts
   - name: metrics-server
     url: https://kubernetes-sigs.github.io/metrics-server/
+  - name: prometheus-community
+    url: https://prometheus-community.github.io/helm-charts
+  - name: grafana
+    url: https://grafana.github.io/helm-charts
+  - name: vmware-tanzu
+    url: https://vmware-tanzu.github.io/helm-charts
 
 environments:
   default:
@@ -47,6 +55,14 @@ environments:
         # DNS-01 token for the wildcard cert. REQUIRED — defaulting empty silently
         # skips TLS issuance, so source it via requiredEnv to fail loudly instead.
         doToken: '{{ requiredEnv "VORTEX_DO_TOKEN" }}'
+        # Velero backups. The release is INSTALLED ONLY when a backup bucket is
+        # configured — installing Velero without a BackupStorageLocation would be a
+        # backup tool that silently backs up nowhere (a fake-success path,
+        # invariant #6). Supply the S3-compatible bucket/endpoint and a
+        # `velero-cloud-credentials` Secret (key `cloud`, AWS-style INI) to enable.
+        veleroBucket: '{{ env "VORTEX_VELERO_BUCKET" | default "" }}'
+        veleroRegion: '{{ env "VORTEX_VELERO_REGION" | default "" }}'
+        veleroS3Url: '{{ env "VORTEX_VELERO_S3_URL" | default "" }}'
 
 ---
 
@@ -70,12 +86,92 @@ releases:
     chart: kedacore/keda
     version: 2.16.0
 
+  # KEDA HTTP add-on — makes HTTP scale-to-zero actually WAKE on a request.
+  # The core `keda` release only ships CPU/memory scalers, so a ScaledObject's
+  # `http` trigger (rendered by the control plane's buildKeda when an app opts into
+  # HTTP scaling — apps/api/internal/kube/kube.go) is inert: nothing routes the
+  # inbound request through KEDA to scale a 0-replica workload back up. This add-on
+  # supplies the interceptor proxy (buffers the request during the 0->1 wake) and
+  # the external scaler, and owns the HTTPScaledObject CRD the control plane renders
+  # per app. Installed into the shared `keda` namespace; needs the core operator.
+  - name: keda-http-add-on
+    namespace: keda
+    chart: kedacore/keda-add-ons-http
+    version: 0.10.0
+    needs:
+      - keda/keda
+    values:
+      - ./helm-values/keda-http-add-on.yaml
+
   - name: metrics-server
     namespace: kube-system
     chart: metrics-server/metrics-server
     values:
       - args:
           - --kubelet-insecure-tls
+
+  # ---- Observability: lightweight metrics + logs retention ----
+  # Prometheus + Grafana (+ the Prometheus Operator so the tenant common-chart's
+  # ServiceMonitors are picked up) for metrics; Loki + promtail for logs. We stand
+  # up the stack here with overcommit-friendly resources; the OBSERVABILITY AGENT
+  # owns dashboards, datasource wiring and alert rules (not authored here).
+  - name: kube-prometheus-stack
+    namespace: monitoring
+    createNamespace: true
+    chart: prometheus-community/kube-prometheus-stack
+    version: 67.5.0
+    values:
+      - ./helm-values/kube-prometheus-stack.yaml
+
+  - name: loki
+    namespace: monitoring
+    createNamespace: true
+    chart: grafana/loki
+    version: 6.24.0
+    needs:
+      - monitoring/kube-prometheus-stack
+    values:
+      - ./helm-values/loki.yaml
+
+  - name: promtail
+    namespace: monitoring
+    createNamespace: true
+    chart: grafana/promtail
+    version: 6.16.6
+    needs:
+      - monitoring/loki
+    values:
+      - ./helm-values/promtail.yaml
+
+  # ---- Backups: Velero (only when an object-store bucket is configured) ----
+  # installed: gated on VORTEX_VELERO_BUCKET so we never ship a backup tool that has
+  # nowhere to back up to (fake-success, invariant #6). The bucket/region/endpoint
+  # and a `velero-cloud-credentials` Secret must be provided to enable it.
+  - name: velero
+    namespace: velero
+    createNamespace: true
+    chart: vmware-tanzu/velero
+    version: 8.2.0
+    installed: '{{ if .Values.veleroBucket }}true{{ else }}false{{ end }}'
+    values:
+      - ./helm-values/velero.yaml
+      # Bucket/region/endpoint are env-driven, so they are injected here (this inline
+      # block IS templated by helmfile, unlike the static .yaml values file above).
+      - configuration:
+          backupStorageLocation:
+            - name: default
+              provider: aws
+              bucket: '{{ .Values.veleroBucket }}'
+              default: true
+              config:
+                region: '{{ .Values.veleroRegion }}'
+                s3Url: '{{ .Values.veleroS3Url }}'
+                s3ForcePathStyle: "true"
+          volumeSnapshotLocation:
+            - name: default
+              provider: aws
+              config:
+                region: '{{ .Values.veleroRegion }}'
 
   # ---- Cluster bootstrap: Postgres + shared Gateway + DNS-01 issuer + wildcard TLS ----
   - name: vortex-bootstrap

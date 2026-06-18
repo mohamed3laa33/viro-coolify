@@ -9,10 +9,53 @@ import (
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/domain"
 )
 
-// MeterMetric is the usage metric under which metered hourly compute cost is
-// recorded. Quantities are in micro-cents (1 cent = 1000 micro-cents) to keep
-// sub-cent hourly precision; sum and divide by 1000 for cents.
-const MeterMetric = "compute_cost_microcents"
+// Metered cost dimensions. Each is an admin-priced cost-to-serve dimension whose
+// per-hour cost is recorded as a separate usage record so an invoice can break the
+// charge down by line item while the period total is just their sum. Quantities
+// are in micro-cents (1 cent = 1000 micro-cents) to keep sub-cent hourly precision;
+// sum and divide by 1000 for cents.
+//
+//   - MeterMetric (compute): vCPU-hours + GB-hours of every running workload at the
+//     live "cpu"/"memory" prices. This is the historical metric and stays the canonical
+//     name for backwards compatibility.
+//   - MeterMetricStorage (storage): provisioned database GB-hours at the live
+//     "storage" price. Storage accrues whenever a database holds a persistent volume
+//     (it is billed while provisioned, not only while serving requests).
+//   - MeterMetricEgress (egress): network egress GB priced at the live "egress" price.
+//     Egress has no synthetic data source — it is recorded ONLY from real reported GB
+//     (RecordEgressGB), never fabricated (invariant #6), so absent a metrics pipeline
+//     it simply stays zero.
+const (
+	MeterMetric        = "compute_cost_microcents"
+	MeterMetricStorage = "storage_cost_microcents"
+	MeterMetricEgress  = "egress_cost_microcents"
+)
+
+// costMetrics is the set of metered cost dimensions, all in micro-cents, that sum
+// into an org's period usage cost. Adding a dimension here makes it flow into the
+// invoice/usage-so-far total automatically.
+var costMetrics = map[string]struct{}{
+	MeterMetric:        {},
+	MeterMetricStorage: {},
+	MeterMetricEgress:  {},
+}
+
+// isCostMetric reports whether a usage metric is one of the priced cost dimensions
+// (compute/storage/egress) that contribute to the period usage cost.
+func isCostMetric(metric string) bool {
+	_, ok := costMetrics[metric]
+	return ok
+}
+
+// Pricing-component keys (admin-managed in the store; never hardcoded prices). The
+// KEY identifies which component a price belongs to; the PRICE itself is read live
+// from the admin price list.
+const (
+	priceKeyCPU     = "cpu"
+	priceKeyMemory  = "memory"
+	priceKeyStorage = "storage"
+	priceKeyEgress  = "egress"
+)
 
 // hoursPerMonth is the average number of hours in a month (365*24/12), used to
 // convert an hourly rate into a monthly estimate.
@@ -74,7 +117,7 @@ func (s *Service) HourlyCost(ctx context.Context, cpu float64, memMB int) (float
 	if err != nil {
 		return 0, err
 	}
-	return cpu*p["cpu"] + (float64(memMB)/1024.0)*p["memory"], nil
+	return cpu*p[priceKeyCPU] + (float64(memMB)/1024.0)*p[priceKeyMemory], nil
 }
 
 // MonthlyCostCents returns the estimated monthly cost (rounded to whole cents) of
@@ -103,7 +146,7 @@ func (s *Service) orgHourlyCost(ctx context.Context, orgID string) (float64, err
 		return 0, err
 	}
 	hourly := func(cpu float64, memMB int) float64 {
-		return cpu*prices["cpu"] + (float64(memMB)/1024.0)*prices["memory"]
+		return cpu*prices[priceKeyCPU] + (float64(memMB)/1024.0)*prices[priceKeyMemory]
 	}
 	total := 0.0
 	apps, err := s.store.ListAppsByOrg(ctx, orgID)
@@ -136,6 +179,33 @@ func (s *Service) orgHourlyCost(ctx context.Context, orgID string) (float64, err
 	return total, nil
 }
 
+// orgStorageHourlyCost sums the hourly cost of an org's provisioned persistent
+// storage (database volumes) at the live "storage" price. Storage is billed while
+// a database is provisioned (deployed and not stopped) — it occupies a volume even
+// when idle — so it uses the same billable() gate as compute. A missing/zero
+// "storage" price yields zero cost (the platform never invents a price).
+func (s *Service) orgStorageHourlyCost(ctx context.Context, orgID string) (float64, error) {
+	prices, err := s.priceMap(ctx)
+	if err != nil {
+		return 0, err
+	}
+	rate := prices[priceKeyStorage] // price per GB-hour; 0 when unpriced
+	if rate <= 0 {
+		return 0, nil
+	}
+	dbs, err := s.store.ListDatabasesByOrg(ctx, orgID)
+	if err != nil {
+		return 0, err
+	}
+	total := 0.0
+	for _, d := range dbs {
+		if d.StorageGB > 0 && billable(d.Release, d.Status) {
+			total += float64(d.StorageGB) * rate
+		}
+	}
+	return total, nil
+}
+
 // OrgMonthlyEstimateCents returns the estimated monthly cost (whole cents) of all
 // of an org's currently-running workloads at the live price list.
 func (s *Service) OrgMonthlyEstimateCents(ctx context.Context, orgID string) (int64, error) {
@@ -152,12 +222,22 @@ func (s *Service) OrgMonthlyEstimateCents(ctx context.Context, orgID string) (in
 const maxCatchupHours = 48
 
 // meterBucketID returns the deterministic usage-record id for one (org, hour)
-// bucket, so an atomic insert-if-absent (AddUsageIfAbsent) records each org's
-// compute cost at most once per hour. A restart, a second replica or a concurrent
-// tick that re-runs the same hour produces the SAME id and is skipped — no
-// check-then-act race.
+// COMPUTE bucket, so an atomic insert-if-absent (AddUsageIfAbsent) records each
+// org's compute cost at most once per hour. A restart, a second replica or a
+// concurrent tick that re-runs the same hour produces the SAME id and is skipped —
+// no check-then-act race. The compute id keeps its original (suffix-less) shape for
+// backwards compatibility with already-written rows; other dimensions get a
+// dimension-suffixed id via dimBucketID.
 func meterBucketID(orgID string, hour time.Time) string {
 	return "meter-" + orgID + "-" + hour.UTC().Format("20060102T15")
+}
+
+// dimBucketID returns the deterministic per-(org, hour, dimension) usage-record id
+// for a non-compute cost dimension (storage, …). It is namespaced by metric so the
+// storage bucket never collides with the compute bucket for the same (org, hour),
+// while remaining idempotent per dimension under AddUsageIfAbsent.
+func dimBucketID(orgID, metric string, hour time.Time) string {
+	return "meter-" + metric + "-" + orgID + "-" + hour.UTC().Format("20060102T15")
 }
 
 // MeterUsage meters compute cost for every org with running workloads, one record
@@ -230,23 +310,54 @@ func (s *Service) MeterUsage(ctx context.Context) (int, error) {
 	return written, s.persistAndReturn(ctx, lastDone, firstErr)
 }
 
-// meterOrgHour atomically records one org's compute cost for one whole hour at the
-// live price list, returning the number of records written (0 or 1). It is
-// idempotent per (org, hour) via AddUsageIfAbsent: a duplicate bucket is a no-op,
-// not an error, so retries are safe. Orgs with no billable cost are skipped.
+// meterOrgHour atomically records one org's cost-to-serve for one whole hour at the
+// live price list, across every metered dimension (compute + storage), returning
+// the number of records written (0..N). Each dimension is a separate, idempotent
+// per-(org, hour, dimension) record via AddUsageIfAbsent: a duplicate bucket is a
+// no-op, not an error, so retries are safe. Dimensions with no billable cost are
+// skipped. If ANY dimension write fails the error is returned (and the caller does
+// not advance the watermark past this hour); a partially-written hour is harmless
+// because each bucket is atomic-idempotent and re-tried next tick.
 func (s *Service) meterOrgHour(ctx context.Context, orgID string, hour time.Time) (int, error) {
-	hourly, err := s.orgHourlyCost(ctx, orgID)
+	written := 0
+
+	// Compute (vCPU-hours + GB-hours). Keeps the original (suffix-less) bucket id.
+	computeHourly, err := s.orgHourlyCost(ctx, orgID)
 	if err != nil {
-		return 0, err
+		return written, err
 	}
+	n, err := s.writeCostBucket(ctx, meterBucketID(orgID, hour), orgID, MeterMetric, computeHourly, hour)
+	written += n
+	if err != nil {
+		return written, err
+	}
+
+	// Storage (provisioned database GB-hours at the live "storage" price).
+	storageHourly, err := s.orgStorageHourlyCost(ctx, orgID)
+	if err != nil {
+		return written, err
+	}
+	n, err = s.writeCostBucket(ctx, dimBucketID(orgID, MeterMetricStorage, hour), orgID, MeterMetricStorage, storageHourly, hour)
+	written += n
+	if err != nil {
+		return written, err
+	}
+
+	return written, nil
+}
+
+// writeCostBucket converts an hourly cost (in the price-list currency) to micro-cents
+// and atomically records it under id/metric for the given hour. A non-positive cost
+// is skipped (no zero rows). Returns 1 when a new record was inserted, else 0.
+func (s *Service) writeCostBucket(ctx context.Context, id, orgID, metric string, hourly float64, hour time.Time) (int, error) {
 	microCents := int64(math.Round(hourly * 100.0 * 1000.0)) // currency -> micro-cents
 	if microCents <= 0 {
 		return 0, nil
 	}
 	inserted, err := s.store.AddUsageIfAbsent(ctx, &domain.UsageRecord{
-		ID:       meterBucketID(orgID, hour),
+		ID:       id,
 		OrgID:    orgID,
-		Metric:   MeterMetric,
+		Metric:   metric,
 		Quantity: microCents,
 		At:       hour,
 	})
@@ -257,6 +368,39 @@ func (s *Service) meterOrgHour(ctx context.Context, orgID string, hour time.Time
 		return 1, nil
 	}
 	return 0, nil
+}
+
+// RecordEgressGB records the cost of network egress for an org: gb gigabytes priced
+// at the live admin "egress" price, stored as a micro-cents usage record under
+// MeterMetricEgress at the current time. It is the honest entry point for egress
+// metering — egress GB must come from a REAL measurement (e.g. a future metrics
+// pipeline or a provider report), never fabricated (invariant #6). A non-positive gb
+// or a missing/zero "egress" price is a no-op (the platform never invents traffic or
+// a price). Egress that has been recorded flows into the period usage cost and the
+// invoice's egress line item automatically.
+func (s *Service) RecordEgressGB(ctx context.Context, orgID string, gb float64) error {
+	if gb <= 0 {
+		return nil
+	}
+	prices, err := s.priceMap(ctx)
+	if err != nil {
+		return err
+	}
+	rate := prices[priceKeyEgress]
+	if rate <= 0 {
+		return nil
+	}
+	microCents := int64(math.Round(gb * rate * 100.0 * 1000.0))
+	if microCents <= 0 {
+		return nil
+	}
+	return s.store.AddUsage(ctx, &domain.UsageRecord{
+		ID:       s.idgen(),
+		OrgID:    orgID,
+		Metric:   MeterMetricEgress,
+		Quantity: microCents,
+		At:       s.now(),
+	})
 }
 
 // hoursToMeter returns the ordered list of whole UTC hours to meter on this tick:

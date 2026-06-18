@@ -1,0 +1,66 @@
+# keda-http-add-on — HTTP-driven scale-to-zero/wake for tenant workloads.
+#
+# WHY: the base `keda` release ships the CPU/memory scalers, so a ScaledObject's
+# CPU trigger scales an idle workload DOWN. But an `http` trigger (rendered by the
+# control plane's buildKeda when Scaling.HTTPTrigger is set — see
+# apps/api/internal/kube/kube.go) is INERT without this add-on: nothing routes the
+# inbound request through KEDA, so a workload that has scaled to zero can never be
+# WOKEN by traffic. This add-on supplies:
+#   - the **interceptor** proxy (holds inbound requests while the target scales
+#     0->1 and replays them once a replica is Ready), and
+#   - the **external scaler** KEDA consults for pending-request count.
+#
+# WIRING (no manual kubectl — invariant #5): the control plane renders, per app, an
+# `HTTPScaledObject` (CRD owned by this add-on) instead of routing the tenant
+# HTTPRoute straight at the app Service. The HTTPScaledObject points at the app
+# Deployment + Service and creates a KEDA ScaledObject under the hood with the
+# `http` external trigger. The tenant HTTPRoute's backendRef then targets the
+# interceptor proxy Service (keda-add-ons-http-interceptor-proxy in this ns) with a
+# Host header match, so traffic flows Gateway -> interceptor -> (wake) -> app.
+#
+# Chart: kedacore/keda-add-ons-http. Requires the `keda` release (operator + CRDs)
+# already present — the helmfile `needs:` enforces that ordering.
+
+# Run the operator/scaler in the shared `keda` namespace alongside the core
+# operator so RBAC and CRD discovery stay simple.
+operator:
+  replicas: 1
+  resources:
+    # Overcommit philosophy (invariant #3): small requests, room to burst to limits.
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+# The external scaler KEDA queries for pending HTTP request counts.
+scaler:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+# The interceptor sits on the request path (buffers requests during a 0->1 wake),
+# so give it a little more headroom and a floor of 2 for availability — a dead
+# interceptor would black-hole traffic to every scaled-to-zero tenant app. The
+# chart self-scales the interceptor between replicas.min and replicas.max (its own
+# controller, not a plain HPA), so the wake-storm headroom lives here.
+interceptor:
+  replicas:
+    min: 2
+    max: 5
+  # Hold each inbound request up to this long for a cold workload to become Ready
+  # before returning an error, so the first request after idle isn't dropped.
+  responseHeaderTimeout: 30s
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi

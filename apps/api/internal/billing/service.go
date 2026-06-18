@@ -57,6 +57,10 @@ type Summary struct {
 	ChargeCents     int64     `json:"chargeCents"`
 	PeriodStart     time.Time `json:"periodStart"`
 	Currency        string    `json:"currency"`
+	// Dunning is the org's collections standing (current vs past_due/unpaid/canceled
+	// and whether new deploys are blocked), derived from the subscription status and
+	// the admin grace policy.
+	Dunning Dunning `json:"dunning"`
 }
 
 // GetBilling returns the billing summary for an org. Usage totals and the charge
@@ -112,6 +116,13 @@ func (s *Service) GetBilling(ctx context.Context, orgID string) (*Summary, error
 		return nil, err
 	}
 	out.Currency = cur
+
+	// Collections standing (current vs dunning) from the subscription + grace policy.
+	dun, err := s.DunningStatus(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	out.Dunning = dun
 	return out, nil
 }
 

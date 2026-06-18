@@ -842,6 +842,7 @@ func (s *Server) routes() chi.Router {
 					})
 
 					r.With(s.orgAuthz(domain.RoleMember)).Get("/billing", s.handleGetBilling)
+					r.With(s.orgAuthz(domain.RoleMember)).Get("/billing/invoices", s.handleListInvoices)
 					r.With(s.orgAuthz(domain.RoleAdmin)).Post("/billing/subscribe", s.handleSubscribe)
 
 					// Org-scoped audit trail (org admin+).

@@ -1,0 +1,96 @@
+# loki — lightweight, single-binary log retention for tenant + control-plane logs.
+#
+# WHY single-binary: the distributed (read/write/backend) Loki topology is overkill
+# for one cluster. `deploymentMode: SingleBinary` runs one Loki process with a
+# filesystem store — cheap, and enough for the platform's log-retention need. Logs
+# are shipped in by a `promtail`/agent release (separate) or by Grafana Alloy; this
+# file only stands up the log store + query API that Grafana points a datasource at.
+#
+# We do NOT author Grafana datasources/dashboards here (observability agent owns
+# those) — Loki is reachable at http://loki.monitoring.svc:3100 for that wiring.
+#
+# Chart: grafana/loki.
+
+deploymentMode: SingleBinary
+
+loki:
+  # No multi-tenant auth header required on a single, internally-scoped cluster
+  # store; the Gateway/NetworkPolicies keep it off the public path.
+  auth_enabled: false
+  commonConfig:
+    replication_factor: 1
+  # Filesystem-backed TSDB store — no external object storage dependency.
+  storage:
+    type: filesystem
+  schemaConfig:
+    configs:
+      - from: "2024-04-01"
+        store: tsdb
+        object_store: filesystem
+        schema: v13
+        index:
+          prefix: loki_index_
+          period: 24h
+  limits_config:
+    # Bounded retention to keep this "lightweight": 14 days of logs, then compacted
+    # away. The observability agent can extend this.
+    retention_period: 336h
+  compactor:
+    retention_enabled: true
+    delete_request_store: filesystem
+
+# Single-binary topology: one replica, with persistence so a restart keeps recent
+# logs. Overcommit philosophy (invariant #3): modest requests, headroom in limits.
+singleBinary:
+  replicas: 1
+  persistence:
+    enabled: true
+    size: 10Gi
+  resources:
+    requests:
+      cpu: 50m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+# Disable the distributed-mode components (we run SingleBinary).
+read:
+  replicas: 0
+write:
+  replicas: 0
+backend:
+  replicas: 0
+
+# The chart bundles a tiny nginx gateway in front of Loki; keep it (single small
+# replica) so the datasource URL is stable, but trim its resources.
+gateway:
+  enabled: true
+  replicas: 1
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
+
+# We don't need the bundled monitoring/self-monitoring or the test pods for a
+# lightweight install; the kube-prometheus-stack already scrapes via ServiceMonitor.
+test:
+  enabled: false
+lokiCanary:
+  enabled: false
+monitoring:
+  selfMonitoring:
+    enabled: false
+    grafanaAgent:
+      installOperator: false
+  lokiCanary:
+    enabled: false
+
+# Cache layers are unnecessary at this scale — disable to shrink the footprint.
+chunksCache:
+  enabled: false
+resultsCache:
+  enabled: false

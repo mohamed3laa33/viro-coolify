@@ -26,18 +26,22 @@ func (a *App) newAppsDomainsCmd() *cobra.Command {
 
 func (a *App) newDomainsListCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "list <app-id>",
+		Use:   "list <app>",
 		Short: "List an app's custom domains",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.requireAuth(); err != nil {
 				return err
 			}
-			orgID, err := a.orgID()
+			orgID, err := a.resolveOrgID(cmd)
 			if err != nil {
 				return err
 			}
-			domains, err := a.client.ListDomains(ctx(cmd), orgID, args[0])
+			appID, err := a.resolveAppID(cmd, orgID, args[0])
+			if err != nil {
+				return err
+			}
+			domains, err := a.client.ListDomains(ctx(cmd), orgID, appID)
 			if err != nil {
 				return err
 			}
@@ -54,18 +58,22 @@ func (a *App) newDomainsListCmd() *cobra.Command {
 
 func (a *App) newDomainsAddCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "add <app-id> <domain>",
+		Use:   "add <app> <domain>",
 		Short: "Attach a custom domain and print the DNS records to publish",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.requireAuth(); err != nil {
 				return err
 			}
-			orgID, err := a.orgID()
+			orgID, err := a.resolveOrgID(cmd)
 			if err != nil {
 				return err
 			}
-			res, err := a.client.AddDomain(ctx(cmd), orgID, args[0], args[1])
+			appID, err := a.resolveAppID(cmd, orgID, args[0])
+			if err != nil {
+				return err
+			}
+			res, err := a.client.AddDomain(ctx(cmd), orgID, appID, args[1])
 			if err != nil {
 				return err
 			}
@@ -76,18 +84,22 @@ func (a *App) newDomainsAddCmd() *cobra.Command {
 
 func (a *App) newDomainsVerifyCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "verify <app-id> <domain-id>",
+		Use:   "verify <app> <domain-id>",
 		Short: "Verify domain ownership via the DNS TXT challenge",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.requireAuth(); err != nil {
 				return err
 			}
-			orgID, err := a.orgID()
+			orgID, err := a.resolveOrgID(cmd)
 			if err != nil {
 				return err
 			}
-			res, err := a.client.VerifyDomain(ctx(cmd), orgID, args[0], args[1])
+			appID, err := a.resolveAppID(cmd, orgID, args[0])
+			if err != nil {
+				return err
+			}
+			res, err := a.client.VerifyDomain(ctx(cmd), orgID, appID, args[1])
 			if err != nil {
 				return err
 			}
@@ -103,7 +115,7 @@ func (a *App) newDomainsVerifyCmd() *cobra.Command {
 
 func (a *App) newDomainsRemoveCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:     "remove <app-id> <domain-id>",
+		Use:     "remove <app> <domain-id>",
 		Aliases: []string{"rm", "delete"},
 		Short:   "Detach a custom domain from an app",
 		Args:    cobra.ExactArgs(2),
@@ -111,11 +123,15 @@ func (a *App) newDomainsRemoveCmd() *cobra.Command {
 			if err := a.requireAuth(); err != nil {
 				return err
 			}
-			orgID, err := a.orgID()
+			orgID, err := a.resolveOrgID(cmd)
 			if err != nil {
 				return err
 			}
-			if err := a.client.RemoveDomain(ctx(cmd), orgID, args[0], args[1]); err != nil {
+			appID, err := a.resolveAppID(cmd, orgID, args[0])
+			if err != nil {
+				return err
+			}
+			if err := a.client.RemoveDomain(ctx(cmd), orgID, appID, args[1]); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Removed domain %s from app %s\n", args[1], args[0])
