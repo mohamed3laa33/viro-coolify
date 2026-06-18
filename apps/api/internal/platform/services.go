@@ -55,6 +55,9 @@ type CreateServiceInput struct {
 // the workload as a Helm release. The resulting placement (namespace/release/
 // host) is persisted and the service is marked "deploying".
 func (s *Service) CreateService(ctx context.Context, orgID, projectID string, in CreateServiceInput) (*domain.Service, error) {
+	if err := s.ensureActive(ctx, orgID); err != nil {
+		return nil, err
+	}
 	tmpl, ok := s.templateByKey(ctx, in.TemplateKey)
 	if !ok {
 		return nil, ErrInvalidTemplate
@@ -213,6 +216,12 @@ func (s *Service) DeployService(ctx context.Context, orgID, serviceID string) (*
 	if err != nil {
 		return nil, err
 	}
+	if err := s.ensureActive(ctx, orgID); err != nil {
+		return nil, err
+	}
+	if err := s.checkWorkloadSize(ctx, orgID, svc.CPU, svc.MemoryMB); err != nil {
+		return nil, err
+	}
 	orgSlug := s.orgSlug(ctx, orgID)
 	projSlug := s.projectSlug(ctx, svc.ProjectID)
 
@@ -238,8 +247,19 @@ func (s *Service) StopService(ctx context.Context, orgID, serviceID string) (*do
 	return s.serviceAction(ctx, orgID, serviceID, "stopped", s.backend.Stop)
 }
 
-// RestartService triggers a rollout restart of a service on the backend.
+// RestartService triggers a rollout restart of a service on the backend, after
+// re-checking subscription/spend-cap and the service's size against the current plan.
 func (s *Service) RestartService(ctx context.Context, orgID, serviceID string) (*domain.Service, error) {
+	svc, err := s.ownedService(ctx, orgID, serviceID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.ensureActive(ctx, orgID); err != nil {
+		return nil, err
+	}
+	if err := s.checkWorkloadSize(ctx, orgID, svc.CPU, svc.MemoryMB); err != nil {
+		return nil, err
+	}
 	return s.serviceAction(ctx, orgID, serviceID, "restarting", s.backend.Restart)
 }
 

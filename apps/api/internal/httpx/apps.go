@@ -40,6 +40,8 @@ func (s *Server) writePlatformError(w http.ResponseWriter, action string, err er
 	switch {
 	case errors.Is(err, platform.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not found")
+	case errors.Is(err, platform.ErrPaymentRequired):
+		writeError(w, http.StatusPaymentRequired, err.Error())
 	case errors.Is(err, platform.ErrQuotaExceeded):
 		writeError(w, http.StatusPaymentRequired, err.Error())
 	case errors.Is(err, platform.ErrInvalidTemplate):

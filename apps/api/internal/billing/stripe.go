@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -74,23 +75,49 @@ func (s *StripeProvider) EnsureCustomer(ctx context.Context, orgID, email string
 }
 
 // CreateSubscription creates a Checkout Session for the plan and returns its URL.
-func (s *StripeProvider) CreateSubscription(ctx context.Context, customerID string, plan domain.Plan) (ProviderSubscription, error) {
+//
+// It attaches the org id as metadata on the SUBSCRIPTION the checkout will create
+// (subscription_data[metadata][org_id]) and as client_reference_id on the session,
+// so the checkout.session.completed and customer.subscription.* webhooks can map
+// the event back to the org. The returned ProviderSubscription has an EMPTY ID:
+// the real sub_ id does not exist until checkout completes and is captured by the
+// webhook — the checkout-session (cs_) id is deliberately not surfaced as the
+// subscription id.
+func (s *StripeProvider) CreateSubscription(ctx context.Context, orgID, customerID string, plan domain.Plan) (ProviderSubscription, error) {
 	if plan.StripePriceID == "" {
 		return ProviderSubscription{}, errors.New("stripe: plan has no StripePriceID configured")
 	}
 	form := url.Values{}
 	form.Set("mode", "subscription")
 	form.Set("customer", customerID)
+	form.Set("client_reference_id", orgID)
 	form.Set("line_items[0][price]", plan.StripePriceID)
 	form.Set("line_items[0][quantity]", "1")
+	// Stamp org_id onto the subscription Stripe creates on completion, so every
+	// customer.subscription.* event carries it in data.object.metadata.org_id.
+	form.Set("subscription_data[metadata][org_id]", orgID)
 	form.Set("success_url", s.successURL)
 	form.Set("cancel_url", s.cancelURL)
 	var out struct {
-		ID  string `json:"id"`
 		URL string `json:"url"`
 	}
 	if err := s.post(ctx, "/checkout/sessions", form, &out); err != nil {
 		return ProviderSubscription{}, err
 	}
-	return ProviderSubscription{ID: out.ID, Status: string(domain.SubIncomplete), CheckoutURL: out.URL}, nil
+	return ProviderSubscription{ID: "", Status: string(domain.SubIncomplete), CheckoutURL: out.URL}, nil
+}
+
+// ReportUsage records metered usage against the subscription's metered price item.
+// It posts a usage record to Stripe so the metered compute-hours roll into the
+// customer's invoice. quantity is the whole compute-hours to add. This satisfies
+// billing.UsageReporter; the MockProvider does not implement it (no-op).
+func (s *StripeProvider) ReportUsage(ctx context.Context, subscriptionItemID string, quantity int64, at time.Time) error {
+	if subscriptionItemID == "" || quantity <= 0 {
+		return nil
+	}
+	form := url.Values{}
+	form.Set("quantity", strconv.FormatInt(quantity, 10))
+	form.Set("timestamp", strconv.FormatInt(at.UTC().Unix(), 10))
+	form.Set("action", "increment")
+	return s.post(ctx, "/subscription_items/"+url.PathEscape(subscriptionItemID)+"/usage_records", form, nil)
 }

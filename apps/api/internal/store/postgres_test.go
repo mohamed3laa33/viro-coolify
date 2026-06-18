@@ -217,8 +217,8 @@ func TestGetSettings(t *testing.T) {
 
 	rows := pgxmock.NewRows([]string{
 		"default_cpu", "default_memory_mb", "default_plan_id", "cpu_overcommit_factor",
-		"memory_overcommit_factor", "default_region", "regions",
-	}).AddRow(0.25, 256, "hobby", 0.2, 0.35, "fra1", []string{"fra1", "nyc1"})
+		"memory_overcommit_factor", "default_region", "regions", "grace_past_due", "default_spend_cap_cents",
+	}).AddRow(0.25, 256, "hobby", 0.2, 0.35, "fra1", []string{"fra1", "nyc1"}, false, int64(0))
 
 	mock.ExpectQuery("SELECT default_cpu, default_memory_mb").WillReturnRows(rows)
 

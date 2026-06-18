@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/domain"
 )
@@ -32,6 +33,8 @@ type MemoryStore struct {
 	pricing        map[string]domain.PricingComponent  // by key
 	refreshTokens  map[string]domain.RefreshToken      // by jti
 	settings       domain.PlatformSettings             // singleton
+	processedEvts  map[string]struct{}                 // stripe event id dedupe
+	meterState     *domain.MeterState                  // metering progress (singleton)
 }
 
 // NewMemoryStore returns an in-memory store seeded with the default business
@@ -57,6 +60,7 @@ func NewMemoryStore() *MemoryStore {
 		templates:      make(map[string]domain.ServiceTemplate),
 		pricing:        make(map[string]domain.PricingComponent),
 		refreshTokens:  make(map[string]domain.RefreshToken),
+		processedEvts:  make(map[string]struct{}),
 	}
 	s.seed()
 	return s
@@ -246,6 +250,7 @@ func (s *MemoryStore) UpdateOrg(_ context.Context, o *domain.Organization) error
 	}
 	existing.Name = o.Name
 	existing.BillingEmail = o.BillingEmail
+	existing.SpendCapCents = o.SpendCapCents
 	s.organizations[o.ID] = existing
 	*o = existing
 	return nil
@@ -682,12 +687,105 @@ func (s *MemoryStore) AddUsage(_ context.Context, u *domain.UsageRecord) error {
 	return nil
 }
 
+// AddUsageIfAbsent inserts the record only if no record with the same id already
+// exists for the org, ATOMICALLY under the write lock. It returns inserted=false
+// (no error) on a duplicate id, mirroring postgres INSERT ... ON CONFLICT (id) DO
+// NOTHING — so a concurrent or repeated per-(org,hour) meter never double-counts.
+func (s *MemoryStore) AddUsageIfAbsent(_ context.Context, u *domain.UsageRecord) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, r := range s.usage[u.OrgID] {
+		if r.ID == u.ID {
+			return false, nil // already recorded -> idempotent skip
+		}
+	}
+	s.usage[u.OrgID] = append(s.usage[u.OrgID], *u)
+	return true, nil
+}
+
 func (s *MemoryStore) ListUsageByOrg(_ context.Context, orgID string) ([]domain.UsageRecord, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]domain.UsageRecord, len(s.usage[orgID]))
 	copy(out, s.usage[orgID])
 	return out, nil
+}
+
+func (s *MemoryStore) ListUsageByOrgSince(_ context.Context, orgID string, since time.Time) ([]domain.UsageRecord, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]domain.UsageRecord, 0, len(s.usage[orgID]))
+	for _, r := range s.usage[orgID] {
+		if !r.At.Before(since) {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) GetSubscriptionByStripeID(_ context.Context, stripeSubID string) (*domain.Subscription, error) {
+	if stripeSubID == "" {
+		return nil, ErrNotFound
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, sub := range s.subscriptions {
+		if sub.StripeSubscriptionID == stripeSubID {
+			cp := sub
+			return &cp, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+func (s *MemoryStore) GetSubscriptionByCustomerID(_ context.Context, customerID string) (*domain.Subscription, error) {
+	if customerID == "" {
+		return nil, ErrNotFound
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, sub := range s.subscriptions {
+		if sub.StripeCustomerID == customerID {
+			cp := sub
+			return &cp, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+func (s *MemoryStore) EventProcessed(_ context.Context, eventID string) (bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.processedEvts[eventID]
+	return ok, nil
+}
+
+func (s *MemoryStore) MarkEventProcessed(_ context.Context, eventID string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.processedEvts[eventID]; ok {
+		return false, nil
+	}
+	s.processedEvts[eventID] = struct{}{}
+	return true, nil
+}
+
+func (s *MemoryStore) GetMeterState(_ context.Context) (*domain.MeterState, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.meterState == nil {
+		return nil, ErrNotFound
+	}
+	cp := *s.meterState
+	return &cp, nil
+}
+
+func (s *MemoryStore) SetMeterState(_ context.Context, st *domain.MeterState) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := *st
+	s.meterState = &cp
+	return nil
 }
 
 func (s *MemoryStore) CreateService(_ context.Context, svc *domain.Service) error {

@@ -45,11 +45,18 @@ type User struct {
 
 // Organization is the tenancy boundary that owns apps, databases and billing.
 type Organization struct {
-	ID           string    `json:"id"`
-	Name         string    `json:"name"`
-	Slug         string    `json:"slug"`
-	BillingEmail string    `json:"billingEmail,omitempty"`
-	CreatedAt    time.Time `json:"createdAt"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Slug         string `json:"slug"`
+	BillingEmail string `json:"billingEmail,omitempty"`
+	// SpendCapCents is a per-org hard ceiling on the current-period charge
+	// (ChargeCents = base + size-aware overage). The size-aware metered usage is
+	// already folded into overage, so it is NOT added again (no double-count). 0
+	// means "no per-org cap" — the platform default cap
+	// (PlatformSettings.DefaultSpendCapCents) applies instead. Admin/DB-driven;
+	// never hardcoded.
+	SpendCapCents int64     `json:"spendCapCents"`
+	CreatedAt     time.Time `json:"createdAt"`
 }
 
 // Membership links a user to an organization with a role.
@@ -273,6 +280,14 @@ type PlatformSettings struct {
 	MemoryOvercommitFactor float64  `json:"memoryOvercommitFactor"`
 	DefaultRegion          string   `json:"defaultRegion"`
 	Regions                []string `json:"regions"`
+	// Billing gating policy (admin/DB-driven; never hardcoded).
+	//
+	// GracePastDue, when true, still allows an org whose subscription is past_due to
+	// provision/deploy (a soft grace window); canceled/unpaid are always blocked.
+	GracePastDue bool `json:"gracePastDue"`
+	// DefaultSpendCapCents is the platform-wide current-period spend ceiling applied
+	// to an org that has no per-org SpendCapCents set. 0 disables the default cap.
+	DefaultSpendCapCents int64 `json:"defaultSpendCapCents"`
 }
 
 // SubscriptionStatus mirrors the lifecycle of a subscription.
@@ -282,8 +297,32 @@ const (
 	SubActive     SubscriptionStatus = "active"
 	SubTrialing   SubscriptionStatus = "trialing"
 	SubIncomplete SubscriptionStatus = "incomplete"
+	SubPastDue    SubscriptionStatus = "past_due"
+	SubUnpaid     SubscriptionStatus = "unpaid"
 	SubCanceled   SubscriptionStatus = "canceled"
 )
+
+// SubscriptionStatusFromStripe maps a Stripe subscription `status` value to a
+// domain status, defaulting to SubIncomplete for unknown values so an unmapped
+// state never silently reads as active.
+func SubscriptionStatusFromStripe(s string) SubscriptionStatus {
+	switch s {
+	case "active":
+		return SubActive
+	case "trialing":
+		return SubTrialing
+	case "past_due":
+		return SubPastDue
+	case "unpaid":
+		return SubUnpaid
+	case "canceled":
+		return SubCanceled
+	case "incomplete", "incomplete_expired":
+		return SubIncomplete
+	default:
+		return SubIncomplete
+	}
+}
 
 // Subscription is an organization's billing subscription.
 type Subscription struct {
@@ -292,8 +331,13 @@ type Subscription struct {
 	Status               SubscriptionStatus `json:"status"`
 	StripeCustomerID     string             `json:"-"`
 	StripeSubscriptionID string             `json:"-"`
-	CreatedAt            time.Time          `json:"createdAt"`
-	CurrentPeriodEnd     time.Time          `json:"currentPeriodEnd"`
+	// StripeSubscriptionItemID is the metered subscription-ITEM id (si_…) captured
+	// from the subscription's items on a customer.subscription.* webhook. Stripe's
+	// usage_records endpoint is per-ITEM, so metered usage MUST be reported against
+	// this si_ id (a sub_ id 404s). Empty until a subscription event arrives.
+	StripeSubscriptionItemID string    `json:"-"`
+	CreatedAt                time.Time `json:"createdAt"`
+	CurrentPeriodEnd         time.Time `json:"currentPeriodEnd"`
 }
 
 // UsageRecord is a metered usage event for an organization.
@@ -303,6 +347,14 @@ type UsageRecord struct {
 	Metric   string    `json:"metric"` // e.g. "compute_hours", "builds", "egress_gb"
 	Quantity int64     `json:"quantity"`
 	At       time.Time `json:"at"`
+}
+
+// MeterState persists the metering loop's progress: the last whole UTC hour that
+// has already been metered. It is a singleton row. Catch-up meters every missed
+// hour strictly after LastMeteredHour up to (and including) the current hour, so
+// a restart or a downtime gap is filled exactly once and never double-counted.
+type MeterState struct {
+	LastMeteredHour time.Time `json:"lastMeteredHour"`
 }
 
 // RefreshToken is a persisted record of an issued refresh token, keyed by the

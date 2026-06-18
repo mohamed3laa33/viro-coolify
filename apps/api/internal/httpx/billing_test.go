@@ -2,9 +2,16 @@ package httpx
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/domain"
 )
@@ -76,6 +83,60 @@ func TestBillingSubscribeRequiresAdmin(t *testing.T) {
 
 	if rec := doJSON(t, s, http.MethodPost, "/v1/orgs/"+org+"/billing/subscribe", `{"planId":"launch"}`, member); rec.Code != http.StatusForbidden {
 		t.Fatalf("member subscribe = %d, want 403", rec.Code)
+	}
+}
+
+// postSignedWebhook posts a Stripe-signed webhook body to the server and returns
+// the response recorder.
+func postSignedWebhook(t *testing.T, s *Server, secret, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	ts := strconv.FormatInt(time.Now().Unix(), 10)
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(ts + "."))
+	mac.Write([]byte(body))
+	sig := "t=" + ts + ",v1=" + hex.EncodeToString(mac.Sum(nil))
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/billing/webhook", strings.NewReader(body))
+	req.Header.Set("Stripe-Signature", sig)
+	rec := httptest.NewRecorder()
+	s.Router().ServeHTTP(rec, req)
+	return rec
+}
+
+// TestStripeWebhookStatusMappingAndIdempotency drives the HTTP webhook end-to-end:
+// it maps the event's REAL status (past_due, not forced active) and dedupes a
+// redelivered event by id.
+func TestStripeWebhookStatusMappingAndIdempotency(t *testing.T) {
+	s := newTestServer(t, "http://unused")
+	s.cfg.StripeWebhookSecret = "whsec_test"
+	ctx := context.Background()
+	if err := s.store.UpsertSubscription(ctx, &domain.Subscription{
+		OrgID: "org-1", PlanID: "launch", Status: domain.SubActive,
+		StripeCustomerID: "cus_1", StripeSubscriptionID: "sub_1",
+		CurrentPeriodEnd: time.Now().AddDate(0, 1, 0),
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	body := `{"id":"evt_1","type":"customer.subscription.updated","data":{"object":{"id":"sub_1","customer":"cus_1","status":"past_due","metadata":{"org_id":"org-1"}}}}`
+	if rec := postSignedWebhook(t, s, "whsec_test", body); rec.Code != http.StatusOK {
+		t.Fatalf("webhook = %d %s", rec.Code, rec.Body.String())
+	}
+	got, _ := s.store.GetSubscription(ctx, "org-1")
+	if got.Status != domain.SubPastDue {
+		t.Fatalf("status = %q want past_due (not forced active)", got.Status)
+	}
+
+	// Now flip it to active locally and re-deliver the SAME event id: dedupe must
+	// prevent the past_due event from re-applying.
+	got.Status = domain.SubActive
+	_ = s.store.UpsertSubscription(ctx, got)
+	if rec := postSignedWebhook(t, s, "whsec_test", body); rec.Code != http.StatusOK {
+		t.Fatalf("redeliver = %d", rec.Code)
+	}
+	got, _ = s.store.GetSubscription(ctx, "org-1")
+	if got.Status != domain.SubActive {
+		t.Fatalf("redelivered event re-applied: status = %q want active (deduped)", got.Status)
 	}
 }
 

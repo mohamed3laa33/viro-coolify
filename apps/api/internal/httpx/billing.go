@@ -83,28 +83,62 @@ func (s *Server) handleStripeWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var evt struct {
+	var raw struct {
+		ID   string `json:"id"`
 		Type string `json:"type"`
 		Data struct {
 			Object struct {
-				Metadata struct {
+				ID               string `json:"id"`
+				Subscription     string `json:"subscription"`
+				Customer         string `json:"customer"`
+				ClientReference  string `json:"client_reference_id"`
+				Status           string `json:"status"`
+				CurrentPeriodEnd int64  `json:"current_period_end"`
+				Metadata         struct {
 					OrgID string `json:"org_id"`
 				} `json:"metadata"`
-				Status string `json:"status"`
+				// Subscription items: on customer.subscription.* the metered item id
+				// (si_) and (Stripe 2025-03+) the per-item current_period_end live here.
+				Items struct {
+					Data []struct {
+						ID               string `json:"id"`
+						CurrentPeriodEnd int64  `json:"current_period_end"`
+					} `json:"data"`
+				} `json:"items"`
 			} `json:"object"`
 		} `json:"data"`
 	}
-	if err := json.Unmarshal(payload, &evt); err != nil {
+	if err := json.Unmarshal(payload, &raw); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid event")
 		return
 	}
-	if orgID := evt.Data.Object.Metadata.OrgID; orgID != "" {
-		switch evt.Type {
-		case "customer.subscription.updated", "customer.subscription.created", "invoice.paid":
-			_ = s.billing.SetSubscriptionStatus(r.Context(), orgID, "active")
-		case "customer.subscription.deleted":
-			_ = s.billing.SetSubscriptionStatus(r.Context(), orgID, "canceled")
-		}
+
+	// First subscription item carries the metered si_ id and the per-item period end.
+	var itemID string
+	var itemPeriodEnd int64
+	if items := raw.Data.Object.Items.Data; len(items) > 0 {
+		itemID = items[0].ID
+		itemPeriodEnd = items[0].CurrentPeriodEnd
+	}
+
+	evt := billing.StripeEvent{
+		ID:                   raw.ID,
+		Type:                 raw.Type,
+		ID2:                  raw.Data.Object.ID,
+		Subscription:         raw.Data.Object.Subscription,
+		Customer:             raw.Data.Object.Customer,
+		ClientReference:      raw.Data.Object.ClientReference,
+		Status:               raw.Data.Object.Status,
+		CurrentPeriodEnd:     raw.Data.Object.CurrentPeriodEnd,
+		MetadataOrgID:        raw.Data.Object.Metadata.OrgID,
+		SubscriptionItemID:   itemID,
+		ItemCurrentPeriodEnd: itemPeriodEnd,
+	}
+	if _, err := s.billing.ProcessEvent(r.Context(), evt); err != nil {
+		// Genuine store failure: 5xx so Stripe retries (don't swallow).
+		s.logger.Error("stripe webhook", "type", evt.Type, "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to process event")
+		return
 	}
 	w.WriteHeader(http.StatusOK)
 }

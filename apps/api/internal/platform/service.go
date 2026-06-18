@@ -42,6 +42,18 @@ var ErrInvalidTemplate = errors.New("platform: unknown catalog template")
 // layer maps it to 409/422 rather than faking a successful deploy.
 var ErrNoImage = errors.New("platform: no image to deploy yet — build pending")
 
+// ErrPaymentRequired is returned when an org's subscription does not permit new
+// provisioning/deploys (canceled/unpaid/past_due without grace, or over the spend
+// cap). It wraps billing.ErrPaymentRequired so the HTTP layer maps it to 402.
+var ErrPaymentRequired = billing.ErrPaymentRequired
+
+// ensureActive gates revenue-affecting operations on the org's subscription state
+// and spend cap (admin/DB-driven). It returns ErrPaymentRequired when the org may
+// not provision/deploy.
+func (s *Service) ensureActive(ctx context.Context, orgID string) error {
+	return s.billing.EnsureActive(ctx, orgID)
+}
+
 // planLimits returns the resource limits for the org's plan, reading the plan
 // (and its Max* quotas) from the store via the billing service. An org with no
 // subscription falls back to the store's default plan.
@@ -81,6 +93,21 @@ func (s *Service) checkQuota(ctx context.Context, orgID string, cpu float64, mem
 	}
 	if currentCount >= lim.MaxApps {
 		return fmt.Errorf("%w: workload count %d reaches plan max %d", ErrQuotaExceeded, currentCount, lim.MaxApps)
+	}
+	return nil
+}
+
+// checkWorkloadSize re-validates an EXISTING workload's cpu/memory against the
+// org's current plan ceilings (used on Deploy/Restart, so a workload sized under
+// an old plan can't be redeployed/restarted beyond a downgraded plan). It does not
+// apply the MaxApps count check (the workload already exists).
+func (s *Service) checkWorkloadSize(ctx context.Context, orgID string, cpu float64, memMB int) error {
+	lim := s.planLimits(ctx, orgID)
+	if cpu > lim.MaxCPU {
+		return fmt.Errorf("%w: cpu %.2f exceeds plan max %.2f", ErrQuotaExceeded, cpu, lim.MaxCPU)
+	}
+	if memMB > lim.MaxMemoryMB {
+		return fmt.Errorf("%w: memory %dMB exceeds plan max %dMB", ErrQuotaExceeded, memMB, lim.MaxMemoryMB)
 	}
 	return nil
 }
@@ -351,6 +378,9 @@ func (s *Service) deployBuiltApp(ctx context.Context, app *domain.App, orgSlug, 
 // and is marked "deploying". Git-based apps without an image stay "queued" until
 // the image builder produces an image (no demo success path).
 func (s *Service) CreateApp(ctx context.Context, orgID string, in CreateAppInput) (*domain.App, error) {
+	if err := s.ensureActive(ctx, orgID); err != nil {
+		return nil, err
+	}
 	branch := in.GitBranch
 	if branch == "" {
 		branch = "main"
@@ -527,6 +557,14 @@ func (s *Service) runBuildAsync(appID, buildID, orgSlug, projSlug string, req bu
 // changed intent mid-build to "stopped", the freshly-built image is recorded but
 // the app is NOT resurrected/deployed — the build is marked done and the app stays
 // stopped.
+//
+// REVENUE GATING: CreateApp/Deploy gate at REQUEST time, but a git build runs
+// asynchronously and can finish minutes later — after the subscription was canceled
+// or the spend cap was hit, or while the workload is oversized for the org's current
+// plan. So before deploying the built image we re-run EnsureActive + the runtime
+// workload-size check. On ErrPaymentRequired / ErrQuotaExceeded we record the built
+// image (so a later Start/Deploy can ship it once resolved) but leave the app
+// UN-deployed with status "blocked" — we never Apply paid work the gate would deny.
 func (s *Service) finishBuildSuccess(ctx context.Context, appID, buildID, orgSlug, projSlug, image string) {
 	// Mark the Build succeeded with the produced image (build-owned record).
 	if b, err := s.store.GetBuild(ctx, buildID); err == nil {
@@ -553,6 +591,17 @@ func (s *Service) finishBuildSuccess(ctx context.Context, appID, buildID, orgSlu
 		return
 	}
 
+	// Re-gate at deploy time: the subscription/spend-cap or plan size may have changed
+	// since the build was requested. If the gate now denies the deploy, record the
+	// image (done above) but leave the app "blocked" and DO NOT Apply.
+	if gateErr := s.gateBuiltDeploy(ctx, app); gateErr != nil {
+		if app2, err := s.store.GetApp(ctx, appID); err == nil && app2.Status != "stopped" {
+			app2.Status = "blocked"
+			_ = s.store.UpdateApp(ctx, app2)
+		}
+		return
+	}
+
 	// Deploy the freshly-built image (ensuring the tenant pull secret first). A
 	// failure here marks the app "build_failed".
 	release, host, derr := s.deployBuiltApp(ctx, app, orgSlug, projSlug)
@@ -576,6 +625,18 @@ func (s *Service) finishBuildSuccess(ctx context.Context, appID, buildID, orgSlu
 	app.Host = host
 	app.Status = "deploying"
 	_ = s.store.UpdateApp(ctx, app)
+}
+
+// gateBuiltDeploy re-applies the request-time revenue/quota gates before an
+// async build's image is deployed: the subscription/spend-cap (EnsureActive) and
+// the workload size against the org's CURRENT plan. It returns the gating error
+// (ErrPaymentRequired / ErrQuotaExceeded) when the deploy must be blocked, or nil
+// when it may proceed.
+func (s *Service) gateBuiltDeploy(ctx context.Context, app *domain.App) error {
+	if err := s.ensureActive(ctx, app.OrgID); err != nil {
+		return err
+	}
+	return s.checkWorkloadSize(ctx, app.OrgID, app.CPU, app.MemoryMB)
 }
 
 // finishBuildFailure marks the app "build_failed" and the Build "failed" with the
@@ -719,6 +780,15 @@ func (s *Service) Deploy(ctx context.Context, orgID, appID string) (*domain.App,
 	if err != nil {
 		return nil, err
 	}
+	// Revenue protection + runtime quota: a (re)deploy is new paid work, so re-check
+	// the subscription/spend-cap and re-validate the workload size against the org's
+	// CURRENT plan (a downgraded oversized workload can't be redeployed).
+	if err := s.ensureActive(ctx, orgID); err != nil {
+		return nil, err
+	}
+	if err := s.checkWorkloadSize(ctx, orgID, app.CPU, app.MemoryMB); err != nil {
+		return nil, err
+	}
 	orgSlug := s.orgSlug(ctx, orgID)
 	projSlug := s.projectSlug(ctx, app.ProjectID)
 
@@ -755,8 +825,20 @@ func (s *Service) Stop(ctx context.Context, orgID, appID string) (*domain.App, e
 	return s.action(ctx, orgID, appID, "stopped", s.backend.Stop)
 }
 
-// Restart triggers a rollout restart of the app on the backend.
+// Restart triggers a rollout restart of the app on the backend. Like Deploy it
+// re-checks the subscription/spend-cap and re-validates the workload size against
+// the org's current plan, so a downgraded oversized workload can't be restarted.
 func (s *Service) Restart(ctx context.Context, orgID, appID string) (*domain.App, error) {
+	app, err := s.ownedApp(ctx, orgID, appID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.ensureActive(ctx, orgID); err != nil {
+		return nil, err
+	}
+	if err := s.checkWorkloadSize(ctx, orgID, app.CPU, app.MemoryMB); err != nil {
+		return nil, err
+	}
 	return s.action(ctx, orgID, appID, "restarting", s.backend.Restart)
 }
 
@@ -872,6 +954,9 @@ func (s *Service) dbWorkload(ctx context.Context, db *domain.Database, orgSlug, 
 // StatefulSet via the backend. The Kubernetes placement is persisted and the
 // database is marked "deploying".
 func (s *Service) CreateDatabase(ctx context.Context, orgID string, in CreateDatabaseInput) (*domain.Database, error) {
+	if err := s.ensureActive(ctx, orgID); err != nil {
+		return nil, err
+	}
 	engine := strings.ToLower(strings.TrimSpace(in.Engine))
 	if engine == "" {
 		engine = "postgresql"
@@ -1047,6 +1132,12 @@ func (s *Service) DeployDatabase(ctx context.Context, orgID, dbID string) (*doma
 	if err != nil {
 		return nil, err
 	}
+	if err := s.ensureActive(ctx, orgID); err != nil {
+		return nil, err
+	}
+	if err := s.checkWorkloadSize(ctx, orgID, db.CPU, db.MemoryMB); err != nil {
+		return nil, err
+	}
 	orgSlug := s.orgSlug(ctx, orgID)
 	projSlug := s.projectSlug(ctx, db.ProjectID)
 
@@ -1074,14 +1165,35 @@ func (s *Service) StopDatabase(ctx context.Context, orgID, dbID string) (*domain
 }
 
 // StartDatabase scales a stopped database back up on the backend, reattaching
-// its retained volume.
+// its retained volume. It re-checks subscription/spend-cap and plan size, so a
+// canceled or downgraded org can't bring paid workloads back online.
 func (s *Service) StartDatabase(ctx context.Context, orgID, dbID string) (*domain.Database, error) {
+	if err := s.ensureDatabaseRunnable(ctx, orgID, dbID); err != nil {
+		return nil, err
+	}
 	return s.databaseAction(ctx, orgID, dbID, "running", s.backend.Start)
 }
 
-// RestartDatabase triggers a rollout restart of the database on the backend.
+// RestartDatabase triggers a rollout restart of the database on the backend, after
+// re-checking subscription/spend-cap and plan size.
 func (s *Service) RestartDatabase(ctx context.Context, orgID, dbID string) (*domain.Database, error) {
+	if err := s.ensureDatabaseRunnable(ctx, orgID, dbID); err != nil {
+		return nil, err
+	}
 	return s.databaseAction(ctx, orgID, dbID, "restarting", s.backend.Restart)
+}
+
+// ensureDatabaseRunnable re-checks the org's subscription/spend-cap and the
+// database's size against the org's current plan before reviving/restarting it.
+func (s *Service) ensureDatabaseRunnable(ctx context.Context, orgID, dbID string) error {
+	db, err := s.ownedDatabase(ctx, orgID, dbID)
+	if err != nil {
+		return err
+	}
+	if err := s.ensureActive(ctx, orgID); err != nil {
+		return err
+	}
+	return s.checkWorkloadSize(ctx, orgID, db.CPU, db.MemoryMB)
 }
 
 // databaseAction applies a status transition, invoking the backend lifecycle

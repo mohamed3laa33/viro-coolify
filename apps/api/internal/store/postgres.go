@@ -274,8 +274,8 @@ func (s *PostgresStore) UpdateUser(ctx context.Context, u *domain.User) error {
 
 func (s *PostgresStore) CreateOrganization(ctx context.Context, o *domain.Organization) error {
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO organizations (id, name, slug, billing_email, created_at) VALUES ($1, $2, $3, $4, $5)`,
-		o.ID, o.Name, o.Slug, o.BillingEmail, o.CreatedAt,
+		`INSERT INTO organizations (id, name, slug, billing_email, spend_cap_cents, created_at) VALUES ($1, $2, $3, $4, $5, $6)`,
+		o.ID, o.Name, o.Slug, o.BillingEmail, o.SpendCapCents, o.CreatedAt,
 	)
 	return mapErr(err)
 }
@@ -283,8 +283,8 @@ func (s *PostgresStore) CreateOrganization(ctx context.Context, o *domain.Organi
 func (s *PostgresStore) GetOrganization(ctx context.Context, id string) (*domain.Organization, error) {
 	var o domain.Organization
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, name, slug, billing_email, created_at FROM organizations WHERE id = $1`, id,
-	).Scan(&o.ID, &o.Name, &o.Slug, &o.BillingEmail, &o.CreatedAt)
+		`SELECT id, name, slug, billing_email, spend_cap_cents, created_at FROM organizations WHERE id = $1`, id,
+	).Scan(&o.ID, &o.Name, &o.Slug, &o.BillingEmail, &o.SpendCapCents, &o.CreatedAt)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -293,7 +293,7 @@ func (s *PostgresStore) GetOrganization(ctx context.Context, id string) (*domain
 
 func (s *PostgresStore) ListOrganizationsForUser(ctx context.Context, userID string) ([]domain.Organization, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT o.id, o.name, o.slug, o.billing_email, o.created_at
+		`SELECT o.id, o.name, o.slug, o.billing_email, o.spend_cap_cents, o.created_at
 		 FROM organizations o
 		 JOIN memberships m ON m.org_id = o.id
 		 WHERE m.user_id = $1`, userID,
@@ -305,7 +305,7 @@ func (s *PostgresStore) ListOrganizationsForUser(ctx context.Context, userID str
 	var out []domain.Organization
 	for rows.Next() {
 		var o domain.Organization
-		if err := rows.Scan(&o.ID, &o.Name, &o.Slug, &o.BillingEmail, &o.CreatedAt); err != nil {
+		if err := rows.Scan(&o.ID, &o.Name, &o.Slug, &o.BillingEmail, &o.SpendCapCents, &o.CreatedAt); err != nil {
 			return nil, mapErr(err)
 		}
 		out = append(out, o)
@@ -313,12 +313,12 @@ func (s *PostgresStore) ListOrganizationsForUser(ctx context.Context, userID str
 	return out, mapErr(rows.Err())
 }
 
-// UpdateOrg persists the mutable org fields (name, billing email). The org ID is
-// the stable lookup key and is not changed here.
+// UpdateOrg persists the mutable org fields (name, billing email, spend cap). The
+// org ID is the stable lookup key and is not changed here.
 func (s *PostgresStore) UpdateOrg(ctx context.Context, o *domain.Organization) error {
 	tag, err := s.pool.Exec(ctx,
-		`UPDATE organizations SET name = $2, billing_email = $3 WHERE id = $1`,
-		o.ID, o.Name, o.BillingEmail,
+		`UPDATE organizations SET name = $2, billing_email = $3, spend_cap_cents = $4 WHERE id = $1`,
+		o.ID, o.Name, o.BillingEmail, o.SpendCapCents,
 	)
 	if err != nil {
 		return mapErr(err)
@@ -982,16 +982,17 @@ func (s *PostgresStore) RevokeAllUserRefreshTokens(ctx context.Context, userID s
 
 func (s *PostgresStore) UpsertSubscription(ctx context.Context, sub *domain.Subscription) error {
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO subscriptions (org_id, plan_id, status, stripe_customer_id, stripe_subscription_id, created_at, current_period_end)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)
+		`INSERT INTO subscriptions (org_id, plan_id, status, stripe_customer_id, stripe_subscription_id, stripe_subscription_item_id, created_at, current_period_end)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		 ON CONFLICT (org_id) DO UPDATE SET
 		   plan_id = EXCLUDED.plan_id,
 		   status = EXCLUDED.status,
 		   stripe_customer_id = EXCLUDED.stripe_customer_id,
 		   stripe_subscription_id = EXCLUDED.stripe_subscription_id,
+		   stripe_subscription_item_id = EXCLUDED.stripe_subscription_item_id,
 		   created_at = EXCLUDED.created_at,
 		   current_period_end = EXCLUDED.current_period_end`,
-		sub.OrgID, sub.PlanID, string(sub.Status), sub.StripeCustomerID, sub.StripeSubscriptionID, sub.CreatedAt, sub.CurrentPeriodEnd,
+		sub.OrgID, sub.PlanID, string(sub.Status), sub.StripeCustomerID, sub.StripeSubscriptionID, sub.StripeSubscriptionItemID, sub.CreatedAt, sub.CurrentPeriodEnd,
 	)
 	return mapErr(err)
 }
@@ -1000,9 +1001,9 @@ func (s *PostgresStore) GetSubscription(ctx context.Context, orgID string) (*dom
 	var sub domain.Subscription
 	var status string
 	err := s.pool.QueryRow(ctx,
-		`SELECT org_id, plan_id, status, stripe_customer_id, stripe_subscription_id, created_at, current_period_end
+		`SELECT org_id, plan_id, status, stripe_customer_id, stripe_subscription_id, stripe_subscription_item_id, created_at, current_period_end
 		 FROM subscriptions WHERE org_id = $1`, orgID,
-	).Scan(&sub.OrgID, &sub.PlanID, &status, &sub.StripeCustomerID, &sub.StripeSubscriptionID, &sub.CreatedAt, &sub.CurrentPeriodEnd)
+	).Scan(&sub.OrgID, &sub.PlanID, &status, &sub.StripeCustomerID, &sub.StripeSubscriptionID, &sub.StripeSubscriptionItemID, &sub.CreatedAt, &sub.CurrentPeriodEnd)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -1016,6 +1017,22 @@ func (s *PostgresStore) AddUsage(ctx context.Context, u *domain.UsageRecord) err
 		u.ID, u.OrgID, u.Metric, u.Quantity, u.At,
 	)
 	return mapErr(err)
+}
+
+// AddUsageIfAbsent inserts the record keyed by its deterministic id, ATOMICALLY:
+// ON CONFLICT (id) DO NOTHING makes the per-(org,hour) write race-free across
+// restarts, replicas and concurrent ticks. RowsAffected reports inserted=true on
+// the first write and false on a duplicate id (no error).
+func (s *PostgresStore) AddUsageIfAbsent(ctx context.Context, u *domain.UsageRecord) (bool, error) {
+	tag, err := s.pool.Exec(ctx,
+		`INSERT INTO usage_records (id, org_id, metric, quantity, at) VALUES ($1, $2, $3, $4, $5)
+		 ON CONFLICT (id) DO NOTHING`,
+		u.ID, u.OrgID, u.Metric, u.Quantity, u.At,
+	)
+	if err != nil {
+		return false, mapErr(err)
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 func (s *PostgresStore) ListUsageByOrg(ctx context.Context, orgID string) ([]domain.UsageRecord, error) {
@@ -1034,6 +1051,102 @@ func (s *PostgresStore) ListUsageByOrg(ctx context.Context, orgID string) ([]dom
 		out = append(out, u)
 	}
 	return out, mapErr(rows.Err())
+}
+
+func (s *PostgresStore) ListUsageByOrgSince(ctx context.Context, orgID string, since time.Time) ([]domain.UsageRecord, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, org_id, metric, quantity, at FROM usage_records WHERE org_id = $1 AND at >= $2`, orgID, since)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+	out := make([]domain.UsageRecord, 0)
+	for rows.Next() {
+		var u domain.UsageRecord
+		if err := rows.Scan(&u.ID, &u.OrgID, &u.Metric, &u.Quantity, &u.At); err != nil {
+			return nil, mapErr(err)
+		}
+		out = append(out, u)
+	}
+	return out, mapErr(rows.Err())
+}
+
+func (s *PostgresStore) GetSubscriptionByStripeID(ctx context.Context, stripeSubID string) (*domain.Subscription, error) {
+	if stripeSubID == "" {
+		return nil, ErrNotFound
+	}
+	var sub domain.Subscription
+	var status string
+	err := s.pool.QueryRow(ctx,
+		`SELECT org_id, plan_id, status, stripe_customer_id, stripe_subscription_id, stripe_subscription_item_id, created_at, current_period_end
+		 FROM subscriptions WHERE stripe_subscription_id = $1`, stripeSubID,
+	).Scan(&sub.OrgID, &sub.PlanID, &status, &sub.StripeCustomerID, &sub.StripeSubscriptionID, &sub.StripeSubscriptionItemID, &sub.CreatedAt, &sub.CurrentPeriodEnd)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	sub.Status = domain.SubscriptionStatus(status)
+	return &sub, nil
+}
+
+func (s *PostgresStore) GetSubscriptionByCustomerID(ctx context.Context, customerID string) (*domain.Subscription, error) {
+	if customerID == "" {
+		return nil, ErrNotFound
+	}
+	var sub domain.Subscription
+	var status string
+	err := s.pool.QueryRow(ctx,
+		`SELECT org_id, plan_id, status, stripe_customer_id, stripe_subscription_id, stripe_subscription_item_id, created_at, current_period_end
+		 FROM subscriptions WHERE stripe_customer_id = $1`, customerID,
+	).Scan(&sub.OrgID, &sub.PlanID, &status, &sub.StripeCustomerID, &sub.StripeSubscriptionID, &sub.StripeSubscriptionItemID, &sub.CreatedAt, &sub.CurrentPeriodEnd)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	sub.Status = domain.SubscriptionStatus(status)
+	return &sub, nil
+}
+
+// EventProcessed reports whether a Stripe event id has already been recorded. It
+// is a read-only peek used by the webhook fast path; the authoritative record
+// happens via MarkEventProcessed only after a successful apply.
+func (s *PostgresStore) EventProcessed(ctx context.Context, eventID string) (bool, error) {
+	var exists bool
+	err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM processed_stripe_events WHERE event_id = $1)`, eventID,
+	).Scan(&exists)
+	if err != nil {
+		return false, mapErr(err)
+	}
+	return exists, nil
+}
+
+// MarkEventProcessed inserts a Stripe event id, reporting whether it was newly
+// inserted. ON CONFLICT DO NOTHING + RowsAffected gives an atomic, race-free
+// dedupe even across concurrent webhook replicas.
+func (s *PostgresStore) MarkEventProcessed(ctx context.Context, eventID string) (bool, error) {
+	tag, err := s.pool.Exec(ctx,
+		`INSERT INTO processed_stripe_events (event_id) VALUES ($1) ON CONFLICT (event_id) DO NOTHING`, eventID)
+	if err != nil {
+		return false, mapErr(err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+func (s *PostgresStore) GetMeterState(ctx context.Context) (*domain.MeterState, error) {
+	var st domain.MeterState
+	err := s.pool.QueryRow(ctx,
+		`SELECT last_metered_hour FROM meter_state WHERE id = true`).Scan(&st.LastMeteredHour)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return &st, nil
+}
+
+func (s *PostgresStore) SetMeterState(ctx context.Context, st *domain.MeterState) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO meter_state (id, last_metered_hour) VALUES (true, $1)
+		 ON CONFLICT (id) DO UPDATE SET last_metered_hour = EXCLUDED.last_metered_hour`,
+		st.LastMeteredHour)
+	return mapErr(err)
 }
 
 // ---- Plans ----
@@ -1245,9 +1358,10 @@ func (s *PostgresStore) GetSettings(ctx context.Context) (*domain.PlatformSettin
 	var ps domain.PlatformSettings
 	err := s.pool.QueryRow(ctx,
 		`SELECT default_cpu, default_memory_mb, default_plan_id, cpu_overcommit_factor,
-		 memory_overcommit_factor, default_region, regions FROM platform_settings WHERE id = true`,
+		 memory_overcommit_factor, default_region, regions, grace_past_due, default_spend_cap_cents
+		 FROM platform_settings WHERE id = true`,
 	).Scan(&ps.DefaultCPU, &ps.DefaultMemoryMB, &ps.DefaultPlanID, &ps.CPUOvercommitFactor,
-		&ps.MemoryOvercommitFactor, &ps.DefaultRegion, &ps.Regions)
+		&ps.MemoryOvercommitFactor, &ps.DefaultRegion, &ps.Regions, &ps.GracePastDue, &ps.DefaultSpendCapCents)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -1261,8 +1375,9 @@ func (s *PostgresStore) UpdateSettings(ctx context.Context, in *domain.PlatformS
 	}
 	_, err := s.pool.Exec(ctx,
 		`INSERT INTO platform_settings (id, default_cpu, default_memory_mb, default_plan_id,
-		 cpu_overcommit_factor, memory_overcommit_factor, default_region, regions)
-		 VALUES (true, $1, $2, $3, $4, $5, $6, $7)
+		 cpu_overcommit_factor, memory_overcommit_factor, default_region, regions,
+		 grace_past_due, default_spend_cap_cents)
+		 VALUES (true, $1, $2, $3, $4, $5, $6, $7, $8, $9)
 		 ON CONFLICT (id) DO UPDATE SET
 		   default_cpu = EXCLUDED.default_cpu,
 		   default_memory_mb = EXCLUDED.default_memory_mb,
@@ -1270,9 +1385,11 @@ func (s *PostgresStore) UpdateSettings(ctx context.Context, in *domain.PlatformS
 		   cpu_overcommit_factor = EXCLUDED.cpu_overcommit_factor,
 		   memory_overcommit_factor = EXCLUDED.memory_overcommit_factor,
 		   default_region = EXCLUDED.default_region,
-		   regions = EXCLUDED.regions`,
+		   regions = EXCLUDED.regions,
+		   grace_past_due = EXCLUDED.grace_past_due,
+		   default_spend_cap_cents = EXCLUDED.default_spend_cap_cents`,
 		in.DefaultCPU, in.DefaultMemoryMB, in.DefaultPlanID, in.CPUOvercommitFactor,
-		in.MemoryOvercommitFactor, in.DefaultRegion, regions,
+		in.MemoryOvercommitFactor, in.DefaultRegion, regions, in.GracePastDue, in.DefaultSpendCapCents,
 	)
 	return mapErr(err)
 }
@@ -1280,7 +1397,7 @@ func (s *PostgresStore) UpdateSettings(ctx context.Context, in *domain.PlatformS
 // ---- Admin overview helpers ----
 
 func (s *PostgresStore) ListAllOrgs(ctx context.Context) ([]domain.Organization, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id, name, slug, billing_email, created_at FROM organizations`)
+	rows, err := s.pool.Query(ctx, `SELECT id, name, slug, billing_email, spend_cap_cents, created_at FROM organizations`)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -1288,7 +1405,7 @@ func (s *PostgresStore) ListAllOrgs(ctx context.Context) ([]domain.Organization,
 	out := make([]domain.Organization, 0)
 	for rows.Next() {
 		var o domain.Organization
-		if err := rows.Scan(&o.ID, &o.Name, &o.Slug, &o.BillingEmail, &o.CreatedAt); err != nil {
+		if err := rows.Scan(&o.ID, &o.Name, &o.Slug, &o.BillingEmail, &o.SpendCapCents, &o.CreatedAt); err != nil {
 			return nil, mapErr(err)
 		}
 		out = append(out, o)
@@ -1306,7 +1423,7 @@ func (s *PostgresStore) CountUsers(ctx context.Context) (int, error) {
 
 func (s *PostgresStore) ListAllSubscriptions(ctx context.Context) ([]domain.Subscription, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT org_id, plan_id, status, stripe_customer_id, stripe_subscription_id, created_at, current_period_end
+		`SELECT org_id, plan_id, status, stripe_customer_id, stripe_subscription_id, stripe_subscription_item_id, created_at, current_period_end
 		 FROM subscriptions`)
 	if err != nil {
 		return nil, mapErr(err)
@@ -1316,7 +1433,7 @@ func (s *PostgresStore) ListAllSubscriptions(ctx context.Context) ([]domain.Subs
 	for rows.Next() {
 		var sub domain.Subscription
 		var status string
-		if err := rows.Scan(&sub.OrgID, &sub.PlanID, &status, &sub.StripeCustomerID, &sub.StripeSubscriptionID, &sub.CreatedAt, &sub.CurrentPeriodEnd); err != nil {
+		if err := rows.Scan(&sub.OrgID, &sub.PlanID, &status, &sub.StripeCustomerID, &sub.StripeSubscriptionID, &sub.StripeSubscriptionItemID, &sub.CreatedAt, &sub.CurrentPeriodEnd); err != nil {
 			return nil, mapErr(err)
 		}
 		sub.Status = domain.SubscriptionStatus(status)

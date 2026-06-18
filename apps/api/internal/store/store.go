@@ -5,6 +5,7 @@ package store
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/domain"
 )
@@ -108,8 +109,38 @@ type Store interface {
 	// Billing.
 	UpsertSubscription(ctx context.Context, s *domain.Subscription) error
 	GetSubscription(ctx context.Context, orgID string) (*domain.Subscription, error)
+	// GetSubscriptionByStripeID resolves an org's subscription by its stored Stripe
+	// subscription id (sub_…) so a webhook can map an event back to an org without
+	// metadata. Returns ErrNotFound when no subscription carries that id.
+	GetSubscriptionByStripeID(ctx context.Context, stripeSubID string) (*domain.Subscription, error)
+	// GetSubscriptionByCustomerID resolves an org's subscription by its stored
+	// Stripe customer id (cus_…). Returns ErrNotFound when none matches.
+	GetSubscriptionByCustomerID(ctx context.Context, customerID string) (*domain.Subscription, error)
 	AddUsage(ctx context.Context, u *domain.UsageRecord) error
+	// AddUsageIfAbsent inserts a usage record keyed by its deterministic id, ATOMICALLY:
+	// it reports inserted=true on the first write and inserted=false when a record with
+	// that id already exists (no error, no duplicate). This is the race-free primitive
+	// the metering loop uses for per-(org,hour) idempotency — postgres does INSERT ...
+	// ON CONFLICT (id) DO NOTHING + RowsAffected; memory dedupes by id under its lock.
+	AddUsageIfAbsent(ctx context.Context, u *domain.UsageRecord) (inserted bool, err error)
 	ListUsageByOrg(ctx context.Context, orgID string) ([]domain.UsageRecord, error)
+	// ListUsageByOrgSince returns an org's usage records with At >= since, so the
+	// billing summary and invoice math can scope to the current billing period.
+	ListUsageByOrgSince(ctx context.Context, orgID string, since time.Time) ([]domain.UsageRecord, error)
+
+	// Stripe webhook idempotency. EventProcessed is a read-only peek reporting
+	// whether the event id has already been recorded, so the webhook can fast-path a
+	// redelivery WITHOUT marking it (the mark must happen only after a successful
+	// apply). MarkEventProcessed records a Stripe event id and reports whether it was
+	// newly inserted (true) or already present (false). Both are safe to call
+	// concurrently; the postgres mark uses ON CONFLICT DO NOTHING + RowsAffected.
+	EventProcessed(ctx context.Context, eventID string) (seen bool, err error)
+	MarkEventProcessed(ctx context.Context, eventID string) (firstTime bool, err error)
+
+	// Metering progress (singleton). GetMeterState returns ErrNotFound before the
+	// first run so the caller can seed the catch-up window.
+	GetMeterState(ctx context.Context) (*domain.MeterState, error)
+	SetMeterState(ctx context.Context, st *domain.MeterState) error
 
 	// Plans (billing catalog, super-admin managed).
 	ListPlans(ctx context.Context) ([]domain.Plan, error)
