@@ -8,7 +8,10 @@
 // double that still implements the full Backend contract).
 package kube
 
-import "context"
+import (
+	"context"
+	"io"
+)
 
 // Quota is the per-tenant resource ceiling, derived from the org's billing plan.
 // It is translated into a Kubernetes ResourceQuota + LimitRange on the namespace.
@@ -82,6 +85,42 @@ type Status struct {
 	ReadyReplicas int
 }
 
+// PodMetric is a single workload pod's live resource usage as read from the
+// Kubernetes metrics-server (metrics.k8s.io/v1beta1 PodMetrics). CPU is in
+// millicores, memory in bytes — summed across the pod's containers.
+type PodMetric struct {
+	Pod           string `json:"pod"`
+	CPUMillicores int64  `json:"cpuMillicores"`
+	MemoryBytes   int64  `json:"memoryBytes"`
+}
+
+// WorkloadMetrics is a live, point-in-time snapshot of a workload's pod resource
+// usage from the metrics-server. Available is false (with an Unavailable reason)
+// when the metrics-server is not installed/reachable — the caller then surfaces an
+// HONEST "metrics unavailable" rather than any fabricated number. When Available
+// is true, Pods carries the per-pod usage and CPUMillicores/MemoryBytes the
+// aggregate across all pods.
+type WorkloadMetrics struct {
+	Available     bool        `json:"available"`
+	Unavailable   string      `json:"unavailable,omitempty"` // reason when Available is false
+	Pods          []PodMetric `json:"pods"`
+	CPUMillicores int64       `json:"cpuMillicores"` // aggregate
+	MemoryBytes   int64       `json:"memoryBytes"`   // aggregate
+}
+
+// LogStreamOptions controls a live log stream.
+type LogStreamOptions struct {
+	// Follow keeps the stream open and forwards new lines as they are written.
+	Follow bool
+	// TailLines, when >0, seeds the stream with the last N lines before following.
+	TailLines int
+	// Previous streams the logs of the previous (crashed) container instance.
+	Previous bool
+	// AllPods, when true, multiplexes every workload pod's logs (each line is
+	// prefixed with its pod name); otherwise only the newest pod is streamed.
+	AllPods bool
+}
+
 // Backend is the deploy surface the platform layer talks to. Implementations:
 // KubeBackend (real) and FakeBackend (test double).
 type Backend interface {
@@ -120,6 +159,15 @@ type Backend interface {
 
 	// Logs returns the most recent pod logs for the release (tailLines lines).
 	Logs(ctx context.Context, namespace, release string, tailLines int) (string, error)
+	// LogStream streams the release's pod logs to w. With opts.Follow it blocks,
+	// forwarding new lines until ctx is cancelled (client disconnect) or the
+	// stream ends; without Follow it writes a one-shot snapshot and returns. The
+	// caller is responsible for flushing w per line (e.g. an SSE writer).
+	LogStream(ctx context.Context, namespace, release string, opts LogStreamOptions, w io.Writer) error
 	// Status reports replica counts for the release's Deployment/StatefulSet.
 	Status(ctx context.Context, namespace, release string) (Status, error)
+	// Metrics reads the live per-pod CPU/memory usage for the release from the
+	// metrics-server. When the metrics-server is unavailable it returns
+	// WorkloadMetrics{Available:false} (never fabricated numbers), not an error.
+	Metrics(ctx context.Context, namespace, release string) (WorkloadMetrics, error)
 }

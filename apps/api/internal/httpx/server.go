@@ -3,8 +3,10 @@ package httpx
 
 import (
 	"context"
+	"crypto/subtle"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,6 +23,7 @@ import (
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/platform"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/secrets"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/store"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/version"
 )
 
 // Server holds the API dependencies and the composed router.
@@ -36,6 +39,12 @@ type Server struct {
 	billing  *billing.Service
 	cipher   secrets.Cipher
 	router   chi.Router
+
+	// metrics is the hand-rolled Prometheus registry for control-plane RED +
+	// dependency/background metrics. It is internal-only (see metrics.go exposure
+	// note) and served at GET /metrics gated by VORTEX_METRICS_TOKEN / a separate
+	// listen addr.
+	metrics *registry
 
 	// buildWG tracks in-flight async git builds so a graceful shutdown can wait
 	// for them to drain (see WaitBuilds). It is passed to the platform service.
@@ -87,13 +96,16 @@ func NewServer(cfg *config.Config, logger *slog.Logger, st store.Store, opts ...
 		time.Duration(cfg.JWTAccessTTL)*time.Minute,
 		time.Duration(cfg.JWTRefreshTTL)*time.Hour,
 	)
+	// Control-plane metrics registry, created up front so the deploy backend can
+	// record helm exec counters into it.
+	reg := newRegistry()
 	// Kubernetes deploy backend. Build the real KubeBackend from in-cluster
 	// config / kubeconfig; on failure (e.g. local dev with no cluster) fall back
 	// to the in-memory FakeBackend so the API still boots. The fake is a real
 	// test double — NOT a demo success path that pretends deploys happened.
 	backend := so.backend
 	if backend == nil {
-		backend = newKubeBackend(cfg, logger)
+		backend = newKubeBackend(cfg, logger, reg)
 	}
 
 	// Git-source image builder: build the real KanikoBuilder from cluster config;
@@ -152,6 +164,18 @@ func NewServer(cfg *config.Config, logger *slog.Logger, st store.Store, opts ...
 			identity.WithPasswordResetTTL(time.Duration(cfg.PasswordResetTTLMin)*time.Minute),
 		),
 		billing: bill,
+		metrics: reg,
+	}
+	// Seed build metadata and the dependency-health probe into the registry. db_up
+	// reuses the store's readiness Ping (when the store implements Pinger); an
+	// in-memory store has no Ping and is always reported up.
+	s.metrics.buildVersion = version.Version
+	s.metrics.buildCommit = version.Commit
+	s.metrics.dbUpFn = func() bool {
+		if p, ok := st.(Pinger); ok {
+			return p.Ping(context.Background()) == nil
+		}
+		return true
 	}
 	// Build the platform service with the git image builder wired in, threading
 	// the server's build WaitGroup so in-flight builds drain on shutdown. The
@@ -225,7 +249,7 @@ func newBuilder(cfg *config.Config, logger *slog.Logger) build.Builder {
 // newKubeBackend builds the Kubernetes deploy backend from config. When the
 // cluster is unreachable (no in-cluster config and no usable kubeconfig), it
 // logs a warning and returns an in-memory FakeBackend so local/dev still boots.
-func newKubeBackend(cfg *config.Config, logger *slog.Logger) kube.Backend {
+func newKubeBackend(cfg *config.Config, logger *slog.Logger, reg *registry) kube.Backend {
 	// Overcommit factors are admin/DB-configurable platform settings; seed the
 	// backend with the seeded defaults here. Per-call sites pass the live quota
 	// derived from the org's plan.
@@ -241,7 +265,15 @@ func newKubeBackend(cfg *config.Config, logger *slog.Logger) kube.Backend {
 		RegistryPullSecret:          cfg.RegistryPullSecretSource,
 		RegistryPullSecretNamespace: cfg.RegistryPullSecretNamespace,
 	}
-	be, err := kube.New(kc, cfg.Kubeconfig, nil)
+	// Count helm execs/failures into the metrics registry without coupling the
+	// kube package to the metrics layer (an observing decorator over the real runner).
+	helm := kube.NewObservedHelmRunner(nil, func(failed bool) {
+		reg.helmExecs.inc()
+		if failed {
+			reg.helmFails.inc()
+		}
+	})
+	be, err := kube.New(kc, cfg.Kubeconfig, helm)
 	if err != nil {
 		logger.Warn("kube backend unavailable; falling back to in-memory FakeBackend",
 			"err", err)
@@ -254,6 +286,30 @@ func newKubeBackend(cfg *config.Config, logger *slog.Logger) kube.Backend {
 
 // Router returns the composed HTTP handler.
 func (s *Server) Router() http.Handler { return s.router }
+
+// MetricsHandler returns a handler serving ONLY GET /metrics for binding to a
+// SEPARATE internal listener (VORTEX_METRICS_ADDR), isolated from the public
+// tenant API. This private surface serves without the public fail-closed gate
+// (the listener is expected to be network-restricted); it still honors
+// VORTEX_METRICS_TOKEN as an optional extra Bearer check when one is configured.
+func (s *Server) MetricsHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		if tok := s.cfg.MetricsToken; tok != "" {
+			got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+			if subtle.ConstantTimeCompare([]byte(got), []byte(tok)) != 1 {
+				writeError(w, http.StatusUnauthorized, "unauthorized")
+				return
+			}
+		}
+		s.writeMetrics(w)
+	})
+	return mux
+}
+
+// MetricsAddr reports the configured separate metrics listen address (empty when
+// metrics are served on the main router only).
+func (s *Server) MetricsAddr() string { return s.cfg.MetricsAddr }
 
 // StartMetering launches a background ticker that records one interval of compute
 // cost for every org at the live admin price list (hourly pricing). It returns
@@ -288,14 +344,17 @@ func (s *Server) StartMetering(ctx context.Context, interval time.Duration, wg *
 // meterOnce runs a single metering pass, recovering from panics so a single bad
 // tick can never crash the process or kill the metering goroutine.
 func (s *Server) meterOnce(ctx context.Context) {
+	s.metrics.tickRun("metering")
 	defer func() {
 		if r := recover(); r != nil {
+			s.metrics.tickError("metering")
 			s.logger.Error("metering panic recovered", "panic", r)
 		}
 	}()
 	n, err := s.billing.MeterUsage(ctx)
 	if err != nil {
 		// MeterUsage is continue-on-error; err is the first per-org failure.
+		s.metrics.tickError("metering")
 		s.logger.Error("metering tick", "err", err)
 	}
 	s.logger.Info("metered usage", "orgs", n)
@@ -333,13 +392,16 @@ func (s *Server) StartTokenCleanup(ctx context.Context, interval time.Duration, 
 // cleanupTokensOnce runs a single refresh-token GC pass, recovering from panics so
 // a single bad tick can never crash the process or kill the cleanup goroutine.
 func (s *Server) cleanupTokensOnce(ctx context.Context) {
+	s.metrics.tickRun("token_cleanup")
 	defer func() {
 		if r := recover(); r != nil {
+			s.metrics.tickError("token_cleanup")
 			s.logger.Error("token cleanup panic recovered", "panic", r)
 		}
 	}()
 	n, err := s.identity.CleanupExpiredRefreshTokens(ctx)
 	if err != nil {
+		s.metrics.tickError("token_cleanup")
 		s.logger.Error("token cleanup tick", "err", err)
 		return
 	}
@@ -384,14 +446,17 @@ func (s *Server) StartReconciler(ctx context.Context, interval time.Duration, wg
 // pass itself is panic-guarded; each individual workload is additionally isolated
 // (see reconcileWorkload) so one bad workload never aborts the rest of the tick.
 func (s *Server) reconcileOnce(ctx context.Context) {
+	s.metrics.tickRun("reconciler")
 	defer func() {
 		if r := recover(); r != nil {
+			s.metrics.tickError("reconciler")
 			s.logger.Error("reconciler panic recovered", "panic", r)
 		}
 	}()
 
 	orgs, err := s.store.ListAllOrgs(ctx)
 	if err != nil {
+		s.metrics.tickError("reconciler")
 		s.logger.Error("reconcile: list orgs", "err", err)
 		return
 	}
@@ -563,6 +628,8 @@ func (s *Server) routes() chi.Router {
 	// the spoofing concern in SA1019 does not apply here.
 	r.Use(middleware.RealIP) //nolint:staticcheck // SA1019: safe behind trusted ingress (see comment)
 	r.Use(requestLogger(s.logger))
+	// Record control-plane RED metrics (route-pattern labelled) for every request.
+	r.Use(metricsMiddleware(s.metrics))
 	r.Use(middleware.Recoverer)
 	r.Use(corsMiddleware(s.cfg.CORSAllowedOrigins))
 	// CSRF defense-in-depth: reject state-changing browser requests whose
@@ -572,6 +639,14 @@ func (s *Server) routes() chi.Router {
 
 	r.Get("/healthz", s.handleHealth)
 	r.Get("/readyz", s.handleReady)
+
+	// Internal Prometheus scrape endpoint. On the PUBLIC router handleMetrics FAILS
+	// CLOSED: it serves only when VORTEX_METRICS_TOKEN is set and a matching Bearer
+	// is presented — an unconfigured token yields 404 (never unauthenticated public
+	// exposure). The separate private listener (MetricsHandler, bound to
+	// VORTEX_METRICS_ADDR) serves without a token. Exposes ONLY aggregate
+	// control-plane metrics (no tenant data, route patterns not raw paths).
+	r.Get("/metrics", s.handleMetrics)
 
 	// Per-IP rate limiter shared across the public auth + webhook endpoints,
 	// which are the most abuse-prone (credential stuffing, webhook floods).

@@ -39,3 +39,30 @@ func (r *execHelmRunner) Run(ctx context.Context, args ...string) (string, error
 	}
 	return stdout.String(), nil
 }
+
+// observedHelmRunner decorates a HelmRunner, invoking an onRun callback after each
+// execution with whether it failed. It lets an external observer (the control
+// plane's metrics registry) count helm execs/failures WITHOUT the kube package
+// depending on the metrics layer.
+type observedHelmRunner struct {
+	inner HelmRunner
+	onRun func(failed bool)
+}
+
+// NewObservedHelmRunner wraps inner so onRun(failed) is called after every Run.
+// A nil onRun or nil inner is tolerated (the wrapper is then a pass-through / uses
+// the real helm binary), so callers never need to nil-check.
+func NewObservedHelmRunner(inner HelmRunner, onRun func(failed bool)) HelmRunner {
+	if inner == nil {
+		inner = NewExecHelmRunner("")
+	}
+	return &observedHelmRunner{inner: inner, onRun: onRun}
+}
+
+func (r *observedHelmRunner) Run(ctx context.Context, args ...string) (string, error) {
+	out, err := r.inner.Run(ctx, args...)
+	if r.onRun != nil {
+		r.onRun(err != nil)
+	}
+	return out, err
+}

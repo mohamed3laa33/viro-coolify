@@ -3,6 +3,8 @@ package kube
 import (
 	"context"
 	"fmt"
+	"io"
+	"strings"
 	"sync"
 )
 
@@ -31,8 +33,17 @@ type FakeBackend struct {
 	// AppSecrets records the latest EnsureAppSecret data keyed by "<namespace>/<name>".
 	// A nil/empty data map records the deletion (entry removed).
 	AppSecrets map[string]map[string]string
-	// LogLines is the canned log output returned by Logs.
+	// LogLines is the canned log output returned by Logs (and, split per line, by
+	// LogStream).
 	LogLines string
+
+	// MetricsAvailable controls whether Metrics reports live data. When false the
+	// fake mimics a cluster without a metrics-server (honest "unavailable").
+	MetricsAvailable bool
+	// CPUMillicores / MemoryBytes are the deterministic per-pod usage the fake
+	// reports when MetricsAvailable is true.
+	CPUMillicores int64
+	MemoryBytes   int64
 }
 
 var _ Backend = (*FakeBackend)(nil)
@@ -48,6 +59,11 @@ func NewFakeBackend() *FakeBackend {
 		PullSecrets: map[string]bool{},
 		AppSecrets:  map[string]map[string]string{},
 		LogLines:    "fake log line\n",
+		// Deterministic test values: a deployed workload reports a fixed live usage
+		// so platform/handler tests can assert REAL (non-synthetic) numbers.
+		MetricsAvailable: true,
+		CPUMillicores:    125,
+		MemoryBytes:      64 * 1024 * 1024,
 	}
 }
 
@@ -149,6 +165,52 @@ func (f *FakeBackend) Logs(_ context.Context, namespace, release string, _ int) 
 		return "", fmt.Errorf("kube(fake): no release %q in %q", release, namespace)
 	}
 	return f.LogLines, nil
+}
+
+// LogStream writes the canned LogLines to w (one write per line, prefixed for
+// the all-pods case so multi-pod behavior is observable). For a non-follow stream
+// it returns after the snapshot; for a follow stream it returns when the snapshot
+// is written or ctx is cancelled (whichever first) — deterministic for tests.
+func (f *FakeBackend) LogStream(ctx context.Context, namespace, release string, opts LogStreamOptions, w io.Writer) error {
+	f.mu.Lock()
+	_, ok := f.Applied[key(namespace, release)]
+	lines := f.LogLines
+	f.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("kube(fake): no release %q in %q", release, namespace)
+	}
+	prefix := ""
+	if opts.AllPods {
+		prefix = "[" + release + "-0] "
+	}
+	for _, line := range strings.Split(strings.TrimRight(lines, "\n"), "\n") {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if _, err := io.WriteString(w, prefix+line+"\n"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Metrics returns the fake's deterministic live usage for a deployed release, or
+// an honest "unavailable" snapshot when MetricsAvailable is false (no fabrication).
+func (f *FakeBackend) Metrics(_ context.Context, namespace, release string) (WorkloadMetrics, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.Applied[key(namespace, release)]; !ok {
+		return WorkloadMetrics{}, fmt.Errorf("kube(fake): no release %q in %q", release, namespace)
+	}
+	if !f.MetricsAvailable {
+		return WorkloadMetrics{Available: false, Unavailable: "metrics-server unavailable"}, nil
+	}
+	return WorkloadMetrics{
+		Available:     true,
+		Pods:          []PodMetric{{Pod: release + "-0", CPUMillicores: f.CPUMillicores, MemoryBytes: f.MemoryBytes}},
+		CPUMillicores: f.CPUMillicores,
+		MemoryBytes:   f.MemoryBytes,
+	}, nil
 }
 
 func (f *FakeBackend) Status(_ context.Context, namespace, release string) (Status, error) {

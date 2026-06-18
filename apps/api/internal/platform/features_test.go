@@ -295,7 +295,9 @@ func TestDomainsAddListDelete(t *testing.T) {
 	}
 }
 
-func TestMetricsShape(t *testing.T) {
+// TestMetricsUnavailableBeforeDeploy asserts an app with no Release returns an
+// HONEST "unavailable" snapshot (no fabricated numbers), never synthetic data.
+func TestMetricsUnavailableBeforeDeploy(t *testing.T) {
 	svc := newSvc()
 	ctx := context.Background()
 	app, _ := svc.CreateApp(ctx, "org-1", CreateAppInput{Name: "web"})
@@ -304,14 +306,55 @@ func TestMetricsShape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("metrics: %v", err)
 	}
-	if len(m.CPU) != metricsPoints || len(m.Memory) != metricsPoints || len(m.Requests) != metricsPoints {
-		t.Fatalf("expected %d points each, got cpu=%d mem=%d req=%d", metricsPoints, len(m.CPU), len(m.Memory), len(m.Requests))
+	if m.Available {
+		t.Fatalf("expected metrics unavailable for an undeployed app, got %+v", m)
 	}
-	// Deterministic: a second call yields identical series.
-	m2, _ := svc.AppMetrics(ctx, "org-1", app.ID)
-	for i := range m.CPU {
-		if m.CPU[i].V != m2.CPU[i].V {
-			t.Fatalf("metrics not deterministic at %d: %v vs %v", i, m.CPU[i].V, m2.CPU[i].V)
-		}
+	if m.CPUMillicores != 0 || m.MemoryBytes != 0 || len(m.Pods) != 0 {
+		t.Fatalf("expected zeroed usage for an undeployed app, got %+v", m)
+	}
+}
+
+// TestMetricsLiveFromBackend asserts a deployed app returns REAL per-pod usage
+// from the (fake) backend metrics-server, not synthetic waves.
+func TestMetricsLiveFromBackend(t *testing.T) {
+	svc, fb := newSvcWithFake()
+	ctx := context.Background()
+	fb.CPUMillicores = 250
+	fb.MemoryBytes = 128 * 1024 * 1024
+
+	app, _ := svc.CreateApp(ctx, "org-1", CreateAppInput{
+		Name: "web", ProjectID: "proj-1", Image: "nginx:latest",
+	})
+	m, err := svc.AppMetrics(ctx, "org-1", app.ID)
+	if err != nil {
+		t.Fatalf("metrics: %v", err)
+	}
+	if !m.Available {
+		t.Fatalf("expected metrics available for a deployed app, got %+v", m)
+	}
+	if m.CPUMillicores != 250 || m.MemoryBytes != 128*1024*1024 {
+		t.Fatalf("aggregate usage = %dm / %dB, want 250m / 128MiB", m.CPUMillicores, m.MemoryBytes)
+	}
+	if len(m.Pods) != 1 || m.Pods[0].CPUMillicores != 250 {
+		t.Fatalf("per-pod usage = %+v, want one pod at 250m", m.Pods)
+	}
+}
+
+// TestMetricsHonestWhenServerMissing asserts a deployed app whose cluster has no
+// metrics-server returns Available=false (honest), never fabricated numbers.
+func TestMetricsHonestWhenServerMissing(t *testing.T) {
+	svc, fb := newSvcWithFake()
+	ctx := context.Background()
+	fb.MetricsAvailable = false
+
+	app, _ := svc.CreateApp(ctx, "org-1", CreateAppInput{
+		Name: "web", ProjectID: "proj-1", Image: "nginx:latest",
+	})
+	m, err := svc.AppMetrics(ctx, "org-1", app.ID)
+	if err != nil {
+		t.Fatalf("metrics: %v", err)
+	}
+	if m.Available || m.Unavailable == "" {
+		t.Fatalf("expected honest unavailable snapshot, got %+v", m)
 	}
 }

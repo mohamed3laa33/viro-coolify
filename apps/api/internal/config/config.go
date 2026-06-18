@@ -101,6 +101,16 @@ type Config struct {
 	SMTPFrom     string // envelope/From address, e.g. "Vortex <no-reply@…>"
 	SMTPStartTLS bool   // upgrade the connection with STARTTLS before auth
 
+	// MetricsToken, when set, is the Bearer token required to scrape GET /metrics
+	// (the internal Prometheus endpoint). Empty leaves the endpoint ungated, so it
+	// MUST then be bound to a private listen addr / restricted by network policy.
+	MetricsToken string
+	// MetricsAddr, when set (e.g. "127.0.0.1:9090"), runs the /metrics endpoint on
+	// a SEPARATE internal listener instead of the public API addr, so the scrape
+	// surface is never exposed alongside the tenant API. Empty serves /metrics on
+	// the main router (still token-gated when MetricsToken is set).
+	MetricsAddr string
+
 	// InvitationTTLHours bounds how long an invitation can be accepted after it is
 	// created (default 7 days). Admin/DB-tunable via VORTEX_INVITATION_TTL_HOURS.
 	InvitationTTLHours int
@@ -155,6 +165,9 @@ func Load() (*Config, error) {
 		SMTPPassword: getenv("SMTP_PASSWORD", ""),
 		SMTPFrom:     getenv("SMTP_FROM", ""),
 		SMTPStartTLS: getenvBool("SMTP_STARTTLS", true),
+
+		MetricsToken: getenv("METRICS_TOKEN", ""),
+		MetricsAddr:  getenv("METRICS_ADDR", ""),
 
 		InvitationTTLHours:  getenvInt("INVITATION_TTL_HOURS", 24*7),
 		PasswordResetTTLMin: getenvInt("PASSWORD_RESET_TTL_MIN", 60),

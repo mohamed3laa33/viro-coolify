@@ -2,11 +2,14 @@ package httpx
 
 import (
 	"errors"
+	"io"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/domain"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/identity"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/kube"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/platform"
 )
 
@@ -177,12 +180,110 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAppLogs(w http.ResponseWriter, r *http.Request) {
-	logs, err := s.platform.AppLogs(r.Context(), chi.URLParam(r, "orgID"), chi.URLParam(r, "appID"))
+	orgID, appID := chi.URLParam(r, "orgID"), chi.URLParam(r, "appID")
+	// ?follow=true upgrades to a live Server-Sent Events stream; otherwise the
+	// existing one-shot snapshot is returned unchanged.
+	if isTrue(r.URL.Query().Get("follow")) {
+		s.streamAppLogs(w, r, orgID, appID)
+		return
+	}
+	logs, err := s.platform.AppLogs(r.Context(), orgID, appID)
 	if err != nil {
 		s.writePlatformError(w, "app logs", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"logs": logs})
+}
+
+// streamAppLogs streams an app's pod logs as Server-Sent Events. Each log line is
+// emitted as one `data:` event and flushed immediately. The stream is bound to
+// the request context, so a client disconnect cancels the backend stream (no
+// goroutine leak). The endpoint is already tenant-scoped by the app-project authz
+// middleware on the route, and AppLogStream re-checks org ownership.
+func (s *Server) streamAppLogs(w http.ResponseWriter, r *http.Request, orgID, appID string) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming unsupported")
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no") // disable proxy buffering so events flush
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	opts := kube.LogStreamOptions{
+		Follow:    true,
+		TailLines: 200,
+		AllPods:   isTrue(r.URL.Query().Get("all")),
+	}
+	sw := &sseLineWriter{w: w, flusher: flusher}
+	if err := s.platform.AppLogStream(r.Context(), orgID, appID, opts, sw); err != nil {
+		// A cancelled context (client disconnect) is the normal stop condition.
+		if r.Context().Err() != nil {
+			return
+		}
+		// The headers/200 are already written, so signal failure as an SSE error
+		// event. The detail is LOGGED (not echoed) so backend error text never
+		// reaches the client response body.
+		s.logger.Error("app log stream", "org", orgID, "app", appID, "err", err)
+		_, _ = io.WriteString(w, "event: error\ndata: log stream ended\n\n")
+		flusher.Flush()
+	}
+}
+
+// isTrue parses a truthy query flag (true/1/yes/on).
+func isTrue(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// sseLineWriter adapts the per-line io.Writer the backend log stream expects into
+// Server-Sent Events: every newline-terminated line written by the backend is
+// emitted as one `data:` event and flushed so the client sees it immediately.
+type sseLineWriter struct {
+	w       http.ResponseWriter
+	flusher http.Flusher
+	buf     []byte
+}
+
+func (s *sseLineWriter) Write(p []byte) (int, error) {
+	s.buf = append(s.buf, p...)
+	for {
+		i := indexByte(s.buf, '\n')
+		if i < 0 {
+			break
+		}
+		line := s.buf[:i]
+		s.buf = s.buf[i+1:]
+		if _, err := io.WriteString(s.w, "data: "+sseEscape(string(line))+"\n\n"); err != nil {
+			return 0, err
+		}
+		s.flusher.Flush()
+	}
+	return len(p), nil
+}
+
+// sseEscape replaces characters that would corrupt an SSE frame. Newlines are the
+// only structural concern (each becomes a separate data line); we collapse them so
+// a single backend line stays a single event payload.
+func sseEscape(s string) string {
+	s = strings.ReplaceAll(s, "\r", "")
+	return strings.ReplaceAll(s, "\n", " ")
+}
+
+func indexByte(b []byte, c byte) int {
+	for i, x := range b {
+		if x == c {
+			return i
+		}
+	}
+	return -1
 }
 
 func (s *Server) handleListBuilds(w http.ResponseWriter, r *http.Request) {

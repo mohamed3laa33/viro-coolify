@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
 
@@ -161,6 +162,42 @@ func requestOrigin(r *http.Request) string {
 		return ""
 	}
 	return u.Scheme + "://" + u.Host
+}
+
+// metricsMiddleware records RED metrics for every request into the registry:
+// http_requests_total{method,route,status}, the per-route duration histogram, and
+// the in-flight gauge. The route label is the chi route PATTERN (e.g.
+// "/v1/orgs/{orgID}/apps/{appID}"), NOT the concrete path, so tenant ids never
+// land in a label and cardinality stays bounded.
+func metricsMiddleware(reg *registry) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+			reg.inFlight.inc()
+			start := time.Now()
+			defer func() {
+				reg.inFlight.dec()
+				status := ww.Status()
+				if status == 0 {
+					status = http.StatusOK
+				}
+				reg.observeRequest(r.Method, routePattern(r), status, time.Since(start).Seconds())
+			}()
+			next.ServeHTTP(ww, r)
+		})
+	}
+}
+
+// routePattern returns the matched chi route pattern for a request (resolved
+// after routing). An unmatched request (404) has no pattern; the registry maps
+// that to "unmatched" so a flood of unknown paths cannot explode label cardinality.
+func routePattern(r *http.Request) string {
+	if rc := chi.RouteContext(r.Context()); rc != nil {
+		if p := rc.RoutePattern(); p != "" {
+			return p
+		}
+	}
+	return ""
 }
 
 // requestLogger logs one structured line per request.

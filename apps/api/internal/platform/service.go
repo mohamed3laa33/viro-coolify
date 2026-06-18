@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/url"
 	"regexp"
@@ -837,6 +838,22 @@ func (s *Service) AppLogs(ctx context.Context, orgID, appID string) (string, err
 		return "", nil
 	}
 	return s.backend.Logs(ctx, app.Namespace, app.Release, 200)
+}
+
+// AppLogStream streams an org's app logs to w via the backend (tenant-scoped: the
+// app must belong to the org). With follow it blocks until ctx is cancelled
+// (client disconnect) or the stream ends. An app with no Release yet is a no-op
+// (returns nil) so the caller can close the stream cleanly. The caller is
+// responsible for flushing w per line (e.g. SSE).
+func (s *Service) AppLogStream(ctx context.Context, orgID, appID string, opts kube.LogStreamOptions, w io.Writer) error {
+	app, err := s.ownedApp(ctx, orgID, appID)
+	if err != nil {
+		return err
+	}
+	if app.Release == "" {
+		return nil
+	}
+	return s.backend.LogStream(ctx, app.Namespace, app.Release, opts, w)
 }
 
 // ListApps returns the apps belonging to the org.

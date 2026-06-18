@@ -43,6 +43,26 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
+	// Optional SEPARATE internal metrics listener. When VORTEX_METRICS_ADDR is set,
+	// GET /metrics is served on that private addr (token-gated per config) instead
+	// of the public API surface, isolating the scrape endpoint.
+	var metricsServer *http.Server
+	if addr := srv.MetricsAddr(); addr != "" {
+		metricsServer = &http.Server{
+			Addr:              addr,
+			Handler:           srv.MetricsHandler(),
+			ReadTimeout:       5 * time.Second,
+			ReadHeaderTimeout: 5 * time.Second,
+			WriteTimeout:      10 * time.Second,
+		}
+		go func() {
+			logger.Info("vortex-metrics listening", "addr", addr)
+			if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Error("metrics server error", "err", err)
+			}
+		}()
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -75,6 +95,11 @@ func main() {
 	defer cancel()
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		logger.Error("graceful shutdown failed", "err", err)
+	}
+	if metricsServer != nil {
+		if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+			logger.Error("metrics server shutdown failed", "err", err)
+		}
 	}
 	// Stop the background loops (ctx was cancelled by signal) and WAIT for them to
 	// exit before releasing store resources, so no metering/reconcile pass is still

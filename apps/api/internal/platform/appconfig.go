@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/domain"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/kube"
 )
 
 // EnvVar is a single app environment variable / secret as returned by the API.
@@ -127,62 +127,58 @@ func (s *Service) DeleteDomain(ctx context.Context, orgID, appID, domainID strin
 	return s.store.DeleteDomain(ctx, domainID)
 }
 
-// MetricPoint is a single time-series sample.
-type MetricPoint struct {
-	T int64   `json:"t"` // unix seconds
-	V float64 `json:"v"`
+// PodMetric is one workload pod's live resource usage (CPU millicores, memory
+// bytes) as read from the cluster metrics-server.
+type PodMetric struct {
+	Pod           string `json:"pod"`
+	CPUMillicores int64  `json:"cpuMillicores"`
+	MemoryBytes   int64  `json:"memoryBytes"`
 }
 
-// Metrics is a small bundle of derived time-series for an app.
+// Metrics is a LIVE, point-in-time snapshot of an app's pod resource usage read
+// from the cluster metrics-server (metrics.k8s.io). It is never synthesized: when
+// the metrics-server is unavailable (or the app is not deployed) Available is
+// false and Unavailable explains why, with zeroed usage — the API surfaces an
+// honest "no data" rather than fabricated numbers.
 type Metrics struct {
-	CPU      []MetricPoint `json:"cpu"`
-	Memory   []MetricPoint `json:"memory"`
-	Requests []MetricPoint `json:"requests"`
+	Available     bool        `json:"available"`
+	Unavailable   string      `json:"unavailable,omitempty"`
+	Pods          []PodMetric `json:"pods"`
+	CPUMillicores int64       `json:"cpuMillicores"` // aggregate across pods
+	MemoryBytes   int64       `json:"memoryBytes"`   // aggregate across pods
 }
 
-const metricsPoints = 24
-
-// AppMetrics returns deterministic, synthetic metrics derived from the app id
-// and status (no randomness so output is stable/testable offline).
+// AppMetrics returns the app's LIVE pod CPU/memory usage from the metrics-server.
+// There is NO synthetic data: an app that is not deployed (no Release) or whose
+// cluster has no metrics-server returns Available=false with an honest reason,
+// never fabricated load.
 func (s *Service) AppMetrics(ctx context.Context, orgID, appID string) (*Metrics, error) {
 	app, err := s.ownedApp(ctx, orgID, appID)
 	if err != nil {
 		return nil, err
 	}
-
-	// Stable seed from the app id.
-	var seed uint32 = 2166136261
-	for _, b := range []byte(app.ID) {
-		seed = (seed ^ uint32(b)) * 16777619
+	if app.Release == "" {
+		return &Metrics{Available: false, Unavailable: "app not deployed", Pods: []PodMetric{}}, nil
 	}
-	// Scale by status: a running/deploying app shows load; stopped apps are flat.
-	active := 1.0
-	if app.Status == "stopped" {
-		active = 0
+	wm, err := s.backend.Metrics(ctx, app.Namespace, app.Release)
+	if err != nil {
+		return nil, err
 	}
-
-	now := s.now().Unix()
-	m := &Metrics{
-		CPU:      make([]MetricPoint, metricsPoints),
-		Memory:   make([]MetricPoint, metricsPoints),
-		Requests: make([]MetricPoint, metricsPoints),
-	}
-	for i := 0; i < metricsPoints; i++ {
-		// Deterministic pseudo-wave per index seeded by the app id.
-		t := now - int64((metricsPoints-1-i))*int64(time.Hour/time.Second)
-		x := float64((seed>>uint(i%16))&0xff) / 255.0
-		y := float64((seed>>uint((i+5)%16))&0xff) / 255.0
-		z := float64((seed>>uint((i+11)%16))&0xff) / 255.0
-		cpuPct := active * (10 + x*float64(max(1, int(app.CPU*100)))/100*60)
-		memPct := active * (20 + y*50)
-		reqs := active * (z * 500)
-		m.CPU[i] = MetricPoint{T: t, V: round2(cpuPct)}
-		m.Memory[i] = MetricPoint{T: t, V: round2(memPct)}
-		m.Requests[i] = MetricPoint{T: t, V: round2(reqs)}
-	}
-	return m, nil
+	return metricsFromBackend(wm), nil
 }
 
-func round2(f float64) float64 {
-	return float64(int64(f*100+0.5)) / 100
+// metricsFromBackend maps the kube backend's WorkloadMetrics to the platform
+// Metrics DTO (pure translation; the numbers come straight from metrics-server).
+func metricsFromBackend(wm kube.WorkloadMetrics) *Metrics {
+	pods := make([]PodMetric, 0, len(wm.Pods))
+	for _, p := range wm.Pods {
+		pods = append(pods, PodMetric{Pod: p.Pod, CPUMillicores: p.CPUMillicores, MemoryBytes: p.MemoryBytes})
+	}
+	return &Metrics{
+		Available:     wm.Available,
+		Unavailable:   wm.Unavailable,
+		Pods:          pods,
+		CPUMillicores: wm.CPUMillicores,
+		MemoryBytes:   wm.MemoryBytes,
+	}
 }

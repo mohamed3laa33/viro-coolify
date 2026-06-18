@@ -196,12 +196,20 @@ func TestAppMetricsEndpoint(t *testing.T) {
 		t.Fatalf("metrics = %d %s", rec.Code, rec.Body.String())
 	}
 	var m struct {
-		CPU      []map[string]float64 `json:"cpu"`
-		Memory   []map[string]float64 `json:"memory"`
-		Requests []map[string]float64 `json:"requests"`
+		Available     bool  `json:"available"`
+		CPUMillicores int64 `json:"cpuMillicores"`
+		MemoryBytes   int64 `json:"memoryBytes"`
+		Pods          []struct {
+			Pod string `json:"pod"`
+		} `json:"pods"`
 	}
 	_ = json.NewDecoder(rec.Body).Decode(&m)
-	if len(m.CPU) != 24 || len(m.Memory) != 24 || len(m.Requests) != 24 {
-		t.Fatalf("metrics shape: cpu=%d mem=%d req=%d", len(m.CPU), len(m.Memory), len(m.Requests))
+	// The app was created without an image, so it has no Release yet: metrics are
+	// honestly UNAVAILABLE (no synthetic fabrication).
+	if m.Available {
+		t.Fatalf("expected metrics unavailable for an undeployed app, got %+v", m)
+	}
+	if m.CPUMillicores != 0 || m.MemoryBytes != 0 {
+		t.Fatalf("expected zeroed usage for an undeployed app, got %+v", m)
 	}
 }
