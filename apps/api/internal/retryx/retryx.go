@@ -13,6 +13,9 @@ package retryx
 import (
 	"context"
 	"errors"
+	// math/rand here is used only for retry timing jitter (anti-thundering-herd),
+	// not as a security primitive; crypto/rand would be cargo-cult and slower.
+	// nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used
 	"math/rand"
 	"time"
 )
