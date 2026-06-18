@@ -551,22 +551,22 @@ func (s *PostgresStore) RemoveMembership(ctx context.Context, orgID, userID stri
 
 func (s *PostgresStore) CreateApp(ctx context.Context, a *domain.App) error {
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO apps (id, org_id, project_id, name, git_repository, git_branch, build_pack, cpu, memory_mb, min_replicas, max_replicas, status, namespace, "release", host, image, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
-		a.ID, a.OrgID, a.ProjectID, a.Name, a.GitRepository, a.GitBranch, a.BuildPack, a.CPU, a.MemoryMB, a.MinReplicas, a.MaxReplicas, a.Status, a.Namespace, a.Release, a.Host, a.Image, a.CreatedAt,
+		`INSERT INTO apps (id, org_id, project_id, name, git_repository, git_branch, build_pack, cpu, memory_mb, min_replicas, max_replicas, status, namespace, "release", host, image, region, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
+		a.ID, a.OrgID, a.ProjectID, a.Name, a.GitRepository, a.GitBranch, a.BuildPack, a.CPU, a.MemoryMB, a.MinReplicas, a.MaxReplicas, a.Status, a.Namespace, a.Release, a.Host, a.Image, a.Region, a.CreatedAt,
 	)
 	return mapErr(err)
 }
 
 func (s *PostgresStore) GetApp(ctx context.Context, id string) (*domain.App, error) {
 	return s.scanApp(s.pool.QueryRow(ctx,
-		`SELECT id, org_id, project_id, name, git_repository, git_branch, build_pack, cpu, memory_mb, min_replicas, max_replicas, status, namespace, "release", host, image, created_at
+		`SELECT id, org_id, project_id, name, git_repository, git_branch, build_pack, cpu, memory_mb, min_replicas, max_replicas, status, namespace, "release", host, image, region, created_at
 		 FROM apps WHERE id = $1`, id))
 }
 
 func (s *PostgresStore) scanApp(row pgx.Row) (*domain.App, error) {
 	var a domain.App
-	if err := row.Scan(&a.ID, &a.OrgID, &a.ProjectID, &a.Name, &a.GitRepository, &a.GitBranch, &a.BuildPack, &a.CPU, &a.MemoryMB, &a.MinReplicas, &a.MaxReplicas, &a.Status, &a.Namespace, &a.Release, &a.Host, &a.Image, &a.CreatedAt); err != nil {
+	if err := row.Scan(&a.ID, &a.OrgID, &a.ProjectID, &a.Name, &a.GitRepository, &a.GitBranch, &a.BuildPack, &a.CPU, &a.MemoryMB, &a.MinReplicas, &a.MaxReplicas, &a.Status, &a.Namespace, &a.Release, &a.Host, &a.Image, &a.Region, &a.CreatedAt); err != nil {
 		return nil, mapErr(err)
 	}
 	return &a, nil
@@ -574,7 +574,7 @@ func (s *PostgresStore) scanApp(row pgx.Row) (*domain.App, error) {
 
 func (s *PostgresStore) ListAppsByOrg(ctx context.Context, orgID string) ([]domain.App, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, org_id, project_id, name, git_repository, git_branch, build_pack, cpu, memory_mb, min_replicas, max_replicas, status, namespace, "release", host, image, created_at
+		`SELECT id, org_id, project_id, name, git_repository, git_branch, build_pack, cpu, memory_mb, min_replicas, max_replicas, status, namespace, "release", host, image, region, created_at
 		 FROM apps WHERE org_id = $1`, orgID)
 	if err != nil {
 		return nil, mapErr(err)
@@ -583,7 +583,7 @@ func (s *PostgresStore) ListAppsByOrg(ctx context.Context, orgID string) ([]doma
 	out := make([]domain.App, 0)
 	for rows.Next() {
 		var a domain.App
-		if err := rows.Scan(&a.ID, &a.OrgID, &a.ProjectID, &a.Name, &a.GitRepository, &a.GitBranch, &a.BuildPack, &a.CPU, &a.MemoryMB, &a.MinReplicas, &a.MaxReplicas, &a.Status, &a.Namespace, &a.Release, &a.Host, &a.Image, &a.CreatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.OrgID, &a.ProjectID, &a.Name, &a.GitRepository, &a.GitBranch, &a.BuildPack, &a.CPU, &a.MemoryMB, &a.MinReplicas, &a.MaxReplicas, &a.Status, &a.Namespace, &a.Release, &a.Host, &a.Image, &a.Region, &a.CreatedAt); err != nil {
 			return nil, mapErr(err)
 		}
 		out = append(out, a)
@@ -595,9 +595,9 @@ func (s *PostgresStore) UpdateApp(ctx context.Context, a *domain.App) error {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE apps SET org_id = $2, project_id = $3, name = $4, git_repository = $5,
 		 git_branch = $6, build_pack = $7, cpu = $8, memory_mb = $9, min_replicas = $10, max_replicas = $11,
-		 status = $12, namespace = $13, "release" = $14, host = $15, image = $16, created_at = $17
+		 status = $12, namespace = $13, "release" = $14, host = $15, image = $16, region = $17, created_at = $18
 		 WHERE id = $1`,
-		a.ID, a.OrgID, a.ProjectID, a.Name, a.GitRepository, a.GitBranch, a.BuildPack, a.CPU, a.MemoryMB, a.MinReplicas, a.MaxReplicas, a.Status, a.Namespace, a.Release, a.Host, a.Image, a.CreatedAt,
+		a.ID, a.OrgID, a.ProjectID, a.Name, a.GitRepository, a.GitBranch, a.BuildPack, a.CPU, a.MemoryMB, a.MinReplicas, a.MaxReplicas, a.Status, a.Namespace, a.Release, a.Host, a.Image, a.Region, a.CreatedAt,
 	)
 	if err != nil {
 		return mapErr(err)
@@ -759,16 +759,16 @@ func (s *PostgresStore) UpdateRelease(ctx context.Context, rel *domain.Release) 
 
 func (s *PostgresStore) CreateDatabase(ctx context.Context, d *domain.Database) error {
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO databases (id, org_id, project_id, name, engine, cpu, memory_mb, storage_gb, db_user, db_password, db_name, status, namespace, "release", host, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
-		d.ID, d.OrgID, d.ProjectID, d.Name, d.Engine, d.CPU, d.MemoryMB, d.StorageGB, d.Username, d.Password, d.DatabaseName, d.Status, d.Namespace, d.Release, d.Host, d.CreatedAt,
+		`INSERT INTO databases (id, org_id, project_id, name, engine, cpu, memory_mb, storage_gb, db_user, db_password, db_name, status, namespace, "release", host, region, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
+		d.ID, d.OrgID, d.ProjectID, d.Name, d.Engine, d.CPU, d.MemoryMB, d.StorageGB, d.Username, d.Password, d.DatabaseName, d.Status, d.Namespace, d.Release, d.Host, d.Region, d.CreatedAt,
 	)
 	return mapErr(err)
 }
 
 func (s *PostgresStore) scanDatabase(row pgx.Row) (*domain.Database, error) {
 	var d domain.Database
-	if err := row.Scan(&d.ID, &d.OrgID, &d.ProjectID, &d.Name, &d.Engine, &d.CPU, &d.MemoryMB, &d.StorageGB, &d.Username, &d.Password, &d.DatabaseName, &d.Status, &d.Namespace, &d.Release, &d.Host, &d.CreatedAt); err != nil {
+	if err := row.Scan(&d.ID, &d.OrgID, &d.ProjectID, &d.Name, &d.Engine, &d.CPU, &d.MemoryMB, &d.StorageGB, &d.Username, &d.Password, &d.DatabaseName, &d.Status, &d.Namespace, &d.Release, &d.Host, &d.Region, &d.CreatedAt); err != nil {
 		return nil, mapErr(err)
 	}
 	return &d, nil
@@ -776,13 +776,13 @@ func (s *PostgresStore) scanDatabase(row pgx.Row) (*domain.Database, error) {
 
 func (s *PostgresStore) GetDatabase(ctx context.Context, id string) (*domain.Database, error) {
 	return s.scanDatabase(s.pool.QueryRow(ctx,
-		`SELECT id, org_id, project_id, name, engine, cpu, memory_mb, storage_gb, db_user, db_password, db_name, status, namespace, "release", host, created_at
+		`SELECT id, org_id, project_id, name, engine, cpu, memory_mb, storage_gb, db_user, db_password, db_name, status, namespace, "release", host, region, created_at
 		 FROM databases WHERE id = $1`, id))
 }
 
 func (s *PostgresStore) ListDatabasesByOrg(ctx context.Context, orgID string) ([]domain.Database, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, org_id, project_id, name, engine, cpu, memory_mb, storage_gb, db_user, db_password, db_name, status, namespace, "release", host, created_at
+		`SELECT id, org_id, project_id, name, engine, cpu, memory_mb, storage_gb, db_user, db_password, db_name, status, namespace, "release", host, region, created_at
 		 FROM databases WHERE org_id = $1`, orgID)
 	if err != nil {
 		return nil, mapErr(err)
@@ -803,8 +803,8 @@ func (s *PostgresStore) UpdateDatabase(ctx context.Context, d *domain.Database) 
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE databases SET org_id = $2, project_id = $3, name = $4, engine = $5,
 		 cpu = $6, memory_mb = $7, storage_gb = $8, db_user = $9, db_password = $10, db_name = $11,
-		 status = $12, namespace = $13, "release" = $14, host = $15, created_at = $16 WHERE id = $1`,
-		d.ID, d.OrgID, d.ProjectID, d.Name, d.Engine, d.CPU, d.MemoryMB, d.StorageGB, d.Username, d.Password, d.DatabaseName, d.Status, d.Namespace, d.Release, d.Host, d.CreatedAt,
+		 status = $12, namespace = $13, "release" = $14, host = $15, region = $16, created_at = $17 WHERE id = $1`,
+		d.ID, d.OrgID, d.ProjectID, d.Name, d.Engine, d.CPU, d.MemoryMB, d.StorageGB, d.Username, d.Password, d.DatabaseName, d.Status, d.Namespace, d.Release, d.Host, d.Region, d.CreatedAt,
 	)
 	if err != nil {
 		return mapErr(err)
@@ -830,9 +830,9 @@ func (s *PostgresStore) DeleteDatabase(ctx context.Context, id string) error {
 
 func (s *PostgresStore) CreateService(ctx context.Context, svc *domain.Service) error {
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO services (id, org_id, project_id, template, name, cpu, memory_mb, status, namespace, "release", host, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
-		svc.ID, svc.OrgID, svc.ProjectID, svc.Template, svc.Name, svc.CPU, svc.MemoryMB, svc.Status, svc.Namespace, svc.Release, svc.Host, svc.CreatedAt,
+		`INSERT INTO services (id, org_id, project_id, template, name, cpu, memory_mb, status, namespace, "release", host, region, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+		svc.ID, svc.OrgID, svc.ProjectID, svc.Template, svc.Name, svc.CPU, svc.MemoryMB, svc.Status, svc.Namespace, svc.Release, svc.Host, svc.Region, svc.CreatedAt,
 	)
 	return mapErr(err)
 }
@@ -840,9 +840,9 @@ func (s *PostgresStore) CreateService(ctx context.Context, svc *domain.Service) 
 func (s *PostgresStore) GetService(ctx context.Context, id string) (*domain.Service, error) {
 	var svc domain.Service
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, org_id, project_id, template, name, cpu, memory_mb, status, namespace, "release", host, created_at
+		`SELECT id, org_id, project_id, template, name, cpu, memory_mb, status, namespace, "release", host, region, created_at
 		 FROM services WHERE id = $1`, id,
-	).Scan(&svc.ID, &svc.OrgID, &svc.ProjectID, &svc.Template, &svc.Name, &svc.CPU, &svc.MemoryMB, &svc.Status, &svc.Namespace, &svc.Release, &svc.Host, &svc.CreatedAt)
+	).Scan(&svc.ID, &svc.OrgID, &svc.ProjectID, &svc.Template, &svc.Name, &svc.CPU, &svc.MemoryMB, &svc.Status, &svc.Namespace, &svc.Release, &svc.Host, &svc.Region, &svc.CreatedAt)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -851,7 +851,7 @@ func (s *PostgresStore) GetService(ctx context.Context, id string) (*domain.Serv
 
 func (s *PostgresStore) ListServicesByOrg(ctx context.Context, orgID string) ([]domain.Service, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, org_id, project_id, template, name, cpu, memory_mb, status, namespace, "release", host, created_at
+		`SELECT id, org_id, project_id, template, name, cpu, memory_mb, status, namespace, "release", host, region, created_at
 		 FROM services WHERE org_id = $1`, orgID)
 	if err != nil {
 		return nil, mapErr(err)
@@ -860,7 +860,7 @@ func (s *PostgresStore) ListServicesByOrg(ctx context.Context, orgID string) ([]
 	out := make([]domain.Service, 0)
 	for rows.Next() {
 		var svc domain.Service
-		if err := rows.Scan(&svc.ID, &svc.OrgID, &svc.ProjectID, &svc.Template, &svc.Name, &svc.CPU, &svc.MemoryMB, &svc.Status, &svc.Namespace, &svc.Release, &svc.Host, &svc.CreatedAt); err != nil {
+		if err := rows.Scan(&svc.ID, &svc.OrgID, &svc.ProjectID, &svc.Template, &svc.Name, &svc.CPU, &svc.MemoryMB, &svc.Status, &svc.Namespace, &svc.Release, &svc.Host, &svc.Region, &svc.CreatedAt); err != nil {
 			return nil, mapErr(err)
 		}
 		out = append(out, svc)
@@ -871,8 +871,8 @@ func (s *PostgresStore) ListServicesByOrg(ctx context.Context, orgID string) ([]
 func (s *PostgresStore) UpdateService(ctx context.Context, svc *domain.Service) error {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE services SET org_id = $2, project_id = $3, template = $4, name = $5,
-		 cpu = $6, memory_mb = $7, status = $8, namespace = $9, "release" = $10, host = $11, created_at = $12 WHERE id = $1`,
-		svc.ID, svc.OrgID, svc.ProjectID, svc.Template, svc.Name, svc.CPU, svc.MemoryMB, svc.Status, svc.Namespace, svc.Release, svc.Host, svc.CreatedAt,
+		 cpu = $6, memory_mb = $7, status = $8, namespace = $9, "release" = $10, host = $11, region = $12, created_at = $13 WHERE id = $1`,
+		svc.ID, svc.OrgID, svc.ProjectID, svc.Template, svc.Name, svc.CPU, svc.MemoryMB, svc.Status, svc.Namespace, svc.Release, svc.Host, svc.Region, svc.CreatedAt,
 	)
 	if err != nil {
 		return mapErr(err)

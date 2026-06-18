@@ -41,6 +41,10 @@ var ErrQuotaExceeded = errors.New("platform: plan quota exceeded")
 // ErrInvalidTemplate is returned when a catalog template key is unknown.
 var ErrInvalidTemplate = errors.New("platform: unknown catalog template")
 
+// ErrInvalidRegion is returned when a requested placement region is not in the
+// admin-managed PlatformSettings.Regions list. The HTTP layer maps it to 400.
+var ErrInvalidRegion = errors.New("platform: unknown region")
+
 // ErrNoImage is returned when a deploy is requested for an app that has no image
 // yet (e.g. a git-based app whose build has not produced an image). The HTTP
 // layer maps it to 409/422 rather than faking a successful deploy.
@@ -355,6 +359,44 @@ type CreateAppInput struct {
 	BuildPack     string
 	CPU           float64 // requested vCPU (defaulted when 0)
 	MemoryMB      int     // requested memory in MB (defaulted when 0)
+	// Region is the requested placement region (multi-region seam). Empty defaults
+	// to PlatformSettings.DefaultRegion; the resolved value is validated against
+	// PlatformSettings.Regions and persisted. A single cluster ignores it today.
+	Region string
+}
+
+// resolveRegion resolves and VALIDATES the placement region for a new workload
+// (the multi-region seam). An empty requested region defaults to the platform
+// default region (PlatformSettings.DefaultRegion). The resolved region must be a
+// member of the admin-managed PlatformSettings.Regions list, else ErrInvalidRegion.
+//
+// When platform settings carry NO regions at all (e.g. an un-seeded test store),
+// validation is skipped and the requested region passes through unchanged — region
+// is an opt-in seam and must not break a deploy on a store that never configured it.
+func (s *Service) resolveRegion(ctx context.Context, requested string) (string, error) {
+	requested = strings.TrimSpace(requested)
+	set, err := s.store.GetSettings(ctx)
+	if err != nil {
+		return "", err
+	}
+	if requested == "" && set != nil {
+		requested = strings.TrimSpace(set.DefaultRegion)
+	}
+	// No admin-configured region list => seam is dormant; accept as-is.
+	if set == nil || len(set.Regions) == 0 {
+		return requested, nil
+	}
+	// An empty region (no request, no default) is allowed: the single cluster
+	// ignores region today, so a workload may carry no region.
+	if requested == "" {
+		return "", nil
+	}
+	for _, r := range set.Regions {
+		if strings.EqualFold(strings.TrimSpace(r), requested) {
+			return requested, nil
+		}
+	}
+	return "", fmt.Errorf("%w: %q", ErrInvalidRegion, requested)
 }
 
 // overcommitFactors returns the live CPU/memory overcommit factors from platform
@@ -477,6 +519,7 @@ func (s *Service) appWorkload(ctx context.Context, app *domain.App, orgSlug, pro
 		MemoryMB:               app.MemoryMB,
 		Env:                    plain,
 		Domains:                s.appDomains(ctx, app.ID),
+		Region:                 app.Region,
 		ImagePullSecret:        pullSecret,
 		EnvSecretName:          envSecretName,
 		CPUOvercommitFactor:    cpuF,
@@ -567,6 +610,13 @@ func (s *Service) CreateApp(ctx context.Context, orgID string, in CreateAppInput
 	}
 	cpu, memMB := s.normalizeResources(ctx, in.CPU, in.MemoryMB)
 
+	// Resolve + validate the placement region up front (multi-region seam) so an
+	// invalid region is rejected before any tenant/namespace side effects.
+	region, err := s.resolveRegion(ctx, in.Region)
+	if err != nil {
+		return nil, err
+	}
+
 	count, err := s.workloadCount(ctx, orgID)
 	if err != nil {
 		return nil, err
@@ -596,6 +646,7 @@ func (s *Service) CreateApp(ctx context.Context, orgID string, in CreateAppInput
 		BuildPack:     in.BuildPack,
 		CPU:           cpu,
 		MemoryMB:      memMB,
+		Region:        region,
 		Status:        "queued",
 		Namespace:     namespace,
 		CreatedAt:     s.now(),
@@ -1122,6 +1173,9 @@ type CreateDatabaseInput struct {
 	CPU       float64
 	MemoryMB  int
 	StorageGB int // persistent-volume size; <=0 falls back to the platform default
+	// Region is the requested placement region (multi-region seam). Empty defaults
+	// to PlatformSettings.DefaultRegion and is validated against PlatformSettings.Regions.
+	Region string
 }
 
 // dbStorage resolves the persistent-volume size (GiB) for a managed database,
@@ -1169,6 +1223,7 @@ func (s *Service) dbWorkload(ctx context.Context, db *domain.Database, orgSlug, 
 		StorageClass:           s.dbStorageClass,
 		Env:                    kube.DatabaseEnv(tmpl.Key, db.DatabaseName, db.Username, db.Password),
 		ServiceTemplateKey:     tmpl.Key,
+		Region:                 db.Region,
 		CPUOvercommitFactor:    cpuF,
 		MemoryOvercommitFactor: memF,
 	}, nil
@@ -1196,6 +1251,13 @@ func (s *Service) CreateDatabase(ctx context.Context, orgID string, in CreateDat
 	}
 
 	cpu, memMB := s.normalizeResources(ctx, in.CPU, in.MemoryMB)
+
+	// Resolve + validate the placement region up front (multi-region seam).
+	region, err := s.resolveRegion(ctx, in.Region)
+	if err != nil {
+		return nil, err
+	}
+
 	count, err := s.workloadCount(ctx, orgID)
 	if err != nil {
 		return nil, err
@@ -1233,6 +1295,7 @@ func (s *Service) CreateDatabase(ctx context.Context, orgID string, in CreateDat
 		Username:     user,
 		Password:     password,
 		DatabaseName: dbName,
+		Region:       region,
 		Status:       "deploying",
 		Namespace:    namespace,
 		CreatedAt:    s.now(),

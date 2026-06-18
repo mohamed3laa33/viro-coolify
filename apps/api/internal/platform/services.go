@@ -51,6 +51,9 @@ type CreateServiceInput struct {
 	Image       string // overrides the template image (e.g. for the docker-image app template)
 	CPU         float64
 	MemoryMB    int
+	// Region is the requested placement region (multi-region seam). Empty defaults
+	// to PlatformSettings.DefaultRegion and is validated against PlatformSettings.Regions.
+	Region string
 }
 
 // CreateService provisions a one-click catalog instance for the org, validating
@@ -70,6 +73,12 @@ func (s *Service) CreateService(ctx context.Context, orgID, projectID string, in
 		return nil, ErrInvalidTemplate
 	}
 	cpu, memMB := s.normalizeResources(ctx, in.CPU, in.MemoryMB)
+
+	// Resolve + validate the placement region up front (multi-region seam).
+	region, err := s.resolveRegion(ctx, in.Region)
+	if err != nil {
+		return nil, err
+	}
 
 	count, err := s.workloadCount(ctx, orgID)
 	if err != nil {
@@ -116,6 +125,7 @@ func (s *Service) CreateService(ctx context.Context, orgID, projectID string, in
 		CPU:                    cpu,
 		MemoryMB:               memMB,
 		ServiceTemplateKey:     tmpl.Key,
+		Region:                 region,
 		CPUOvercommitFactor:    cpuF,
 		MemoryOvercommitFactor: memF,
 	})
@@ -131,6 +141,7 @@ func (s *Service) CreateService(ctx context.Context, orgID, projectID string, in
 		Name:      name,
 		CPU:       cpu,
 		MemoryMB:  memMB,
+		Region:    region,
 		Status:    "deploying",
 		Namespace: namespace,
 		Release:   release,

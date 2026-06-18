@@ -53,14 +53,21 @@ vi.mock("@/lib/use-resource", async (importOriginal) => {
 
 const getApp = vi.fn();
 const deleteApp = vi.fn();
+const updateApp = vi.fn();
+const scaleApp = vi.fn();
 const listEnv = vi.fn();
 const setEnv = vi.fn();
 const deleteEnv = vi.fn();
 const listDomains = vi.fn();
 const addDomain = vi.fn();
+const verifyDomain = vi.fn();
 const deleteDomain = vi.fn();
 const getLogs = vi.fn();
 const getMetrics = vi.fn();
+const listReleases = vi.fn();
+const rollbackApp = vi.fn();
+const listBuilds = vi.fn();
+const getBuild = vi.fn();
 
 // Keep ApiError + the type exports real so errorMessage()'s `instanceof
 // ApiError` check works and the page renders against the real shapes.
@@ -71,14 +78,21 @@ vi.mock("@/lib/api", async (importOriginal) => {
     api: {
       getApp: (...a: unknown[]) => getApp(...a),
       deleteApp: (...a: unknown[]) => deleteApp(...a),
+      updateApp: (...a: unknown[]) => updateApp(...a),
+      scaleApp: (...a: unknown[]) => scaleApp(...a),
       listEnv: (...a: unknown[]) => listEnv(...a),
       setEnv: (...a: unknown[]) => setEnv(...a),
       deleteEnv: (...a: unknown[]) => deleteEnv(...a),
       listDomains: (...a: unknown[]) => listDomains(...a),
       addDomain: (...a: unknown[]) => addDomain(...a),
+      verifyDomain: (...a: unknown[]) => verifyDomain(...a),
       deleteDomain: (...a: unknown[]) => deleteDomain(...a),
       getLogs: (...a: unknown[]) => getLogs(...a),
       getMetrics: (...a: unknown[]) => getMetrics(...a),
+      listReleases: (...a: unknown[]) => listReleases(...a),
+      rollbackApp: (...a: unknown[]) => rollbackApp(...a),
+      listBuilds: (...a: unknown[]) => listBuilds(...a),
+      getBuild: (...a: unknown[]) => getBuild(...a),
     },
   };
 });
@@ -133,9 +147,66 @@ beforeEach(() => {
   addDomain.mockReset().mockResolvedValue(DOMAIN);
   deleteDomain.mockReset().mockResolvedValue(undefined);
   getLogs.mockReset().mockResolvedValue("");
-  getMetrics
+  getMetrics.mockReset().mockResolvedValue({
+    available: false,
+    pods: [],
+    cpuMillicores: 0,
+    memoryBytes: 0,
+  });
+  updateApp.mockReset().mockResolvedValue(APP);
+  scaleApp.mockReset().mockResolvedValue(APP);
+  verifyDomain
     .mockReset()
-    .mockResolvedValue({ cpu: [], memory: [], requests: [] });
+    .mockResolvedValue({ ...DOMAIN, verified: true, status: "verified" });
+  listReleases.mockReset().mockResolvedValue({
+    data: [
+      {
+        id: "rel_2",
+        appId: "app_1",
+        orgId: "org_1",
+        revision: 2,
+        image: "registry/app:v2",
+        cpu: 1,
+        memoryMb: 512,
+        status: "active",
+        createdAt: "2026-06-02T00:00:00Z",
+      },
+      {
+        id: "rel_1",
+        appId: "app_1",
+        orgId: "org_1",
+        revision: 1,
+        image: "registry/app:v1",
+        cpu: 1,
+        memoryMb: 512,
+        status: "superseded",
+        createdAt: "2026-06-01T00:00:00Z",
+      },
+    ],
+    page: { limit: 25, offset: 0, hasMore: false },
+  });
+  rollbackApp.mockReset().mockResolvedValue(APP);
+  listBuilds.mockReset().mockResolvedValue({
+    data: [
+      {
+        id: "bld_1",
+        appId: "app_1",
+        orgId: "org_1",
+        status: "succeeded",
+        commitRef: "abc123",
+        createdAt: "2026-06-01T00:00:00Z",
+      },
+    ],
+    page: { limit: 25, offset: 0, hasMore: false },
+  });
+  getBuild.mockReset().mockResolvedValue({
+    id: "bld_1",
+    appId: "app_1",
+    orgId: "org_1",
+    status: "succeeded",
+    logs: "build log output",
+    createdAt: "2026-06-01T00:00:00Z",
+  });
 });
 
 afterEach(() => cleanup());
@@ -224,7 +295,11 @@ describe("AppDetailPage — environment variables", () => {
     const [orgId, appId, input] = setEnv.mock.calls[0];
     expect(orgId).toBe("org_1");
     expect(appId).toBe("app_1");
-    expect(input).toEqual({ key: "API_KEY", value: "secret-value" });
+    expect(input).toEqual({
+      key: "API_KEY",
+      value: "secret-value",
+      secret: false,
+    });
     // A successful write refetches the list (listEnv called again).
     await waitFor(() => expect(listEnv.mock.calls.length).toBeGreaterThan(1));
   });
@@ -337,6 +412,122 @@ describe("AppDetailPage — domains", () => {
       expect(screen.getByText(/Could not load domains/)).toBeInTheDocument(),
     );
     expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+  });
+});
+
+describe("AppDetailPage — releases & rollback", () => {
+  it("rolls back to a prior revision after confirming", async () => {
+    renderPage();
+    await gotoTab("Releases");
+
+    await screen.findByText("Revision 1");
+    // The active release (rev 2) shows "Current"; the superseded one offers a
+    // Rollback button.
+    fireEvent.click(screen.getByRole("button", { name: "Rollback" }));
+
+    const dialog = await screen.findByRole("alertdialog");
+    expect(rollbackApp).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Roll back" }));
+
+    await waitFor(() => expect(rollbackApp).toHaveBeenCalled());
+    const [orgId, appId, revision] = rollbackApp.mock.calls[0];
+    expect(orgId).toBe("org_1");
+    expect(appId).toBe("app_1");
+    expect(revision).toBe(1);
+  });
+});
+
+describe("AppDetailPage — builds", () => {
+  it("lists builds and loads build logs on demand", async () => {
+    renderPage();
+    await gotoTab("Builds");
+
+    await screen.findByText("abc123");
+    fireEvent.click(screen.getByRole("button", { name: "View logs" }));
+
+    await waitFor(() => expect(getBuild).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(screen.getByText("build log output")).toBeInTheDocument(),
+    );
+    const [orgId, appId, buildId] = getBuild.mock.calls[0];
+    expect(orgId).toBe("org_1");
+    expect(appId).toBe("app_1");
+    expect(buildId).toBe("bld_1");
+  });
+});
+
+describe("AppDetailPage — settings update & scale", () => {
+  it("PATCHes only the changed fields", async () => {
+    renderPage();
+    await gotoTab("Settings");
+
+    fireEvent.change(await screen.findByLabelText("Image"), {
+      target: { value: "registry/app:v9" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save configuration" }));
+
+    await waitFor(() => expect(updateApp).toHaveBeenCalled());
+    const [orgId, appId, input] = updateApp.mock.calls[0];
+    expect(orgId).toBe("org_1");
+    expect(appId).toBe("app_1");
+    expect(input).toEqual({ image: "registry/app:v9" });
+  });
+
+  it("scales the app with the replica bounds", async () => {
+    renderPage();
+    await gotoTab("Settings");
+
+    fireEvent.change(await screen.findByLabelText("Min replicas"), {
+      target: { value: "2" },
+    });
+    fireEvent.change(screen.getByLabelText("Max replicas"), {
+      target: { value: "5" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+    await waitFor(() => expect(scaleApp).toHaveBeenCalled());
+    const [, , input] = scaleApp.mock.calls[0];
+    expect(input).toEqual({ minReplicas: 2, maxReplicas: 5 });
+  });
+});
+
+describe("AppDetailPage — domain verify", () => {
+  it("verifies a pending domain", async () => {
+    listDomains.mockResolvedValue({
+      data: [{ id: "dom_2", domain: "pending.acme.com", verified: false }],
+    });
+    renderPage();
+    await gotoTab("Domains");
+
+    await screen.findByText("pending.acme.com");
+    fireEvent.click(screen.getByRole("button", { name: "Verify" }));
+
+    await waitFor(() => expect(verifyDomain).toHaveBeenCalled());
+    const [orgId, appId, domainId] = verifyDomain.mock.calls[0];
+    expect(orgId).toBe("org_1");
+    expect(appId).toBe("app_1");
+    expect(domainId).toBe("dom_2");
+  });
+});
+
+describe("AppDetailPage — metrics honest empty state", () => {
+  it("shows 'Metrics unavailable' when the API reports available:false", async () => {
+    getMetrics.mockResolvedValue({
+      available: false,
+      unavailable: "metrics-server not installed",
+      pods: [],
+      cpuMillicores: 0,
+      memoryBytes: 0,
+    });
+    renderPage();
+    await gotoTab("Metrics");
+
+    await waitFor(() =>
+      expect(screen.getByText(/Metrics unavailable/)).toBeInTheDocument(),
+    );
+    expect(
+      screen.getByText(/metrics-server not installed/),
+    ).toBeInTheDocument();
   });
 });
 

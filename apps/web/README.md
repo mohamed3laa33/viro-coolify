@@ -59,11 +59,21 @@ src/
 - `/login`, `/signup` — auth cards (store tokens, redirect to `/dashboard`)
 - `/dashboard` — overview (stat cards + recent apps)
 - `/dashboard/apps` — apps grid
-- `/dashboard/apps/[uuid]` — app detail (Overview / Logs / Metrics / Environment / Settings)
-- `/dashboard/databases` — managed databases
+- `/dashboard/apps/[uuid]` — app detail (Overview / Logs / Metrics / Releases /
+  Builds / Environment / Domains / Settings). Logs support a live follow/tail SSE
+  stream; Metrics render live pod CPU/mem (honest "metrics unavailable" when the
+  metrics-server reports nothing); Releases list deploy history + rollback; Builds
+  list git-source builds + logs; Domains add/verify/remove with DNS instructions;
+  Environment supports a SECRET flag (secret values are never returned); Settings
+  exposes update (image/cpu/memory/git) + scale (min/max replicas).
+- `/dashboard/databases` — managed databases, with lifecycle
+  start/stop/restart/delete and per-row connection info (host/port/db/user/password
+  with copy + masked reveal)
 - `/dashboard/domains` — custom domains
 - `/dashboard/metrics` — resource metrics
-- `/dashboard/settings` — General / Team / Billing
+- `/dashboard/settings` — General / Team / Billing / API Tokens / Audit
+  (Billing shows the current-period charge breakdown; API Tokens create/list/revoke
+  PATs with a one-time `vrt_` secret display; Audit is a paginated org/platform log)
 
 ## API contract
 
@@ -71,18 +81,31 @@ Typed in `src/lib/api.ts`. Base URL from `NEXT_PUBLIC_VORTEX_API_URL`. All
 authenticated calls attach `Authorization: Bearer <token>`. Resource endpoints
 are org-scoped under `/v1/orgs/{orgId}/...`; admin endpoints under `/v1/admin/*`.
 
-| Method | Path                                                    | Notes                     |
-| ------ | ------------------------------------------------------- | ------------------------- |
-| POST   | `/v1/auth/signup`                                       | `{email,name,password}`   |
-| POST   | `/v1/auth/login`                                        | `{email,password}`        |
-| POST   | `/v1/auth/refresh`                                      | `{refreshToken}`          |
-| GET    | `/v1/me`                                                | `{id,email,name,isAdmin}` |
-| GET    | `/v1/orgs` · POST `/v1/orgs`                            | bearer                    |
-| GET    | `/v1/orgs/{orgId}/apps` · `/{appId}`                    | bearer                    |
-| POST   | `/v1/orgs/{orgId}/apps/{appId}/{deploy\|stop\|restart}` | bearer, returns the App   |
-| GET    | `/v1/orgs/{orgId}/databases`                            | bearer                    |
-| GET    | `/v1/services/catalog`                                  | public catalog            |
-| GET    | `/v1/billing/plans`                                     | public plan catalog       |
+| Method | Path                                                       | Notes                       |
+| ------ | ---------------------------------------------------------- | --------------------------- |
+| POST   | `/v1/auth/signup`                                          | `{email,name,password}`     |
+| POST   | `/v1/auth/login`                                           | `{email,password}`          |
+| POST   | `/v1/auth/refresh`                                         | `{refreshToken}`            |
+| GET    | `/v1/me`                                                   | `{id,email,name,isAdmin}`   |
+| GET    | `/v1/orgs` · POST `/v1/orgs`                               | bearer                      |
+| GET    | `/v1/orgs/{orgId}/apps` · `/{appId}`                       | bearer                      |
+| POST   | `/v1/orgs/{orgId}/apps/{appId}/{deploy\|stop\|restart}`    | bearer, returns the App     |
+| PATCH  | `/v1/orgs/{orgId}/apps/{appId}`                            | update image/cpu/mem/git    |
+| POST   | `/v1/orgs/{orgId}/apps/{appId}/scale`                      | `{minReplicas,maxReplicas}` |
+| GET    | `/v1/orgs/{orgId}/apps/{appId}/releases`                   | paginated deploy history    |
+| POST   | `/v1/orgs/{orgId}/apps/{appId}/rollback`                   | `{revision}` (optional)     |
+| GET    | `/v1/orgs/{orgId}/apps/{appId}/metrics`                    | live pod CPU/mem snapshot   |
+| GET    | `/v1/orgs/{orgId}/apps/{appId}/logs?follow=true`           | SSE live log stream         |
+| GET    | `/v1/orgs/{orgId}/apps/{appId}/builds` · `/{buildId}`      | build history + logs        |
+| PUT    | `/v1/orgs/{orgId}/apps/{appId}/env`                        | `{key,value,secret?}`       |
+| POST   | `/v1/orgs/{orgId}/apps/{appId}/domains` · `/{id}/verify`   | add/verify custom domain    |
+| GET    | `/v1/orgs/{orgId}/databases/{id}`                          | + connection info           |
+| POST   | `/v1/orgs/{orgId}/databases/{id}/{deploy\|stop\|restart}`  | lifecycle                   |
+| GET    | `/v1/orgs/{orgId}/billing`                                 | charge breakdown            |
+| GET    | `/v1/orgs/{orgId}/audit` · `/v1/admin/audit`               | paginated audit log         |
+| POST   | `/v1/tokens` · GET `/v1/tokens` · DELETE `/v1/tokens/{id}` | personal access tokens      |
+| GET    | `/v1/services/catalog`                                     | public catalog              |
+| GET    | `/v1/billing/plans`                                        | public plan catalog         |
 
 ## Notes
 

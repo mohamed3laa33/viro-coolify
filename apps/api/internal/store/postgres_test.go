@@ -249,7 +249,7 @@ func TestCreateAppAndListByOrg(t *testing.T) {
 	now := time.Now()
 	a := &domain.App{ID: "a1", OrgID: "o1", ProjectID: "p1", Name: "web", CPU: 0.5, MemoryMB: 256, Status: "running", CreatedAt: now}
 	mock.ExpectExec("INSERT INTO apps").
-		WithArgs("a1", "o1", "p1", "web", "", "", "", 0.5, 256, 0, 0, "running", "", "", "", "", now).
+		WithArgs("a1", "o1", "p1", "web", "", "", "", 0.5, 256, 0, 0, "running", "", "", "", "", "", now).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 	if err := s.CreateApp(context.Background(), a); err != nil {
@@ -258,8 +258,8 @@ func TestCreateAppAndListByOrg(t *testing.T) {
 
 	rows := pgxmock.NewRows([]string{
 		"id", "org_id", "project_id", "name", "git_repository", "git_branch",
-		"build_pack", "cpu", "memory_mb", "min_replicas", "max_replicas", "status", "namespace", "release", "host", "image", "created_at",
-	}).AddRow("a1", "o1", "p1", "web", "", "", "", 0.5, 256, 0, 0, "running", "", "", "", "", now)
+		"build_pack", "cpu", "memory_mb", "min_replicas", "max_replicas", "status", "namespace", "release", "host", "image", "region", "created_at",
+	}).AddRow("a1", "o1", "p1", "web", "", "", "", 0.5, 256, 0, 0, "running", "", "", "", "", "", now)
 
 	mock.ExpectQuery("SELECT id, org_id, project_id, name, git_repository").
 		WithArgs("o1").

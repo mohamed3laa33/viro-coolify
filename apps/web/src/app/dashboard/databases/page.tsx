@@ -1,9 +1,27 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
-import { Plus, Trash2, Database as DatabaseIcon } from "lucide-react";
+import { Fragment, useState, type FormEvent } from "react";
+import {
+  Plus,
+  Trash2,
+  Database as DatabaseIcon,
+  Play,
+  Square,
+  RotateCw,
+  Plug,
+  Copy,
+  Check,
+  Eye,
+  EyeOff,
+  Loader2,
+} from "lucide-react";
 import { useAuth } from "@/lib/auth";
-import { api, type Database, type Template } from "@/lib/api";
+import {
+  api,
+  type Database,
+  type DatabaseDetail,
+  type Template,
+} from "@/lib/api";
 import { isDemoMode } from "@/lib/demo";
 import { useDemoData } from "@/lib/demo-data";
 import { useResource } from "@/lib/use-resource";
@@ -86,10 +104,70 @@ export default function DatabasesPage() {
   const [pending, setPending] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
-  // Per-row delete state.
-  const [busy, setBusy] = useState<Record<string, "delete">>({});
+  // Per-row action state (delete + lifecycle).
+  type RowAction = "delete" | "deploy" | "stop" | "restart";
+  const [busy, setBusy] = useState<Record<string, RowAction>>({});
   const [rowNotice, setRowNotice] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<Database | null>(null);
+
+  // The database whose connection info is open (lazily fetched), plus its detail.
+  const [connOpen, setConnOpen] = useState<string | null>(null);
+  const [connDetail, setConnDetail] = useState<Record<string, DatabaseDetail>>(
+    {},
+  );
+  const [connLoading, setConnLoading] = useState<string | null>(null);
+  const [connError, setConnError] = useState<string | null>(null);
+
+  async function toggleConn(db: Database) {
+    if (connOpen === db.id) {
+      setConnOpen(null);
+      return;
+    }
+    setConnOpen(db.id);
+    setConnError(null);
+    if (connDetail[db.id] || !activeOrgId) return;
+    setConnLoading(db.id);
+    try {
+      const detail = await authedCall((token, on) =>
+        api.getDatabase(activeOrgId, db.id, token, on),
+      );
+      setConnDetail((d) => ({ ...d, [db.id]: detail }));
+    } catch (err) {
+      setConnError(errorMessage(err, `Could not load connection info.`));
+    } finally {
+      setConnLoading(null);
+    }
+  }
+
+  async function runLifecycle(
+    db: Database,
+    action: "deploy" | "stop" | "restart",
+  ) {
+    if (!activeOrgId) {
+      setRowNotice("Action unavailable — no active organization.");
+      return;
+    }
+    setBusy((b) => ({ ...b, [db.id]: action }));
+    setRowNotice(null);
+    try {
+      await authedCall((token, on) =>
+        action === "deploy"
+          ? api.deployDatabase(activeOrgId, db.id, token, on)
+          : action === "stop"
+            ? api.stopDatabase(activeOrgId, db.id, token, on)
+            : api.restartDatabase(activeOrgId, db.id, token, on),
+      );
+      refetch();
+    } catch (err) {
+      setRowNotice(errorMessage(err, `Could not ${action} ${db.name}.`));
+    } finally {
+      setBusy((b) => {
+        const next = { ...b };
+        delete next[db.id];
+        return next;
+      });
+    }
+  }
 
   function startCreate(presetEngine?: string) {
     // Fall back to the first catalog engine, never a hardcoded one — when the
@@ -306,38 +384,105 @@ export default function DatabasesPage() {
                 </thead>
                 <tbody className="divide-y divide-border">
                   {databases.map((db) => {
-                    const deleting = busy[db.id] === "delete";
+                    const action = busy[db.id];
+                    const anyBusy = action !== undefined;
                     return (
-                      <tr key={db.id} className="hover:bg-muted/40">
-                        <td className="px-6 py-4 font-medium">{db.name}</td>
-                        <td className="px-6 py-4">
-                          <Badge variant="outline">
-                            {engineLabel(db.engine)}
-                          </Badge>
-                        </td>
-                        <td className="px-6 py-4">
-                          <StatusDot status={db.status} showLabel />
-                        </td>
-                        <td className="px-6 py-4 font-mono text-xs text-muted-foreground">
-                          {db.id}
-                        </td>
-                        <td className="px-6 py-4">
-                          <div className="flex items-center justify-end gap-1.5">
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              loading={deleting}
-                              disabled={deleting}
-                              onClick={() => setConfirmDelete(db)}
-                              aria-label={`Delete ${db.name}`}
-                              title="Delete"
-                              className="text-destructive hover:text-destructive"
+                      <Fragment key={db.id}>
+                        <tr className="hover:bg-muted/40">
+                          <td className="px-6 py-4 font-medium">{db.name}</td>
+                          <td className="px-6 py-4">
+                            <Badge variant="outline">
+                              {engineLabel(db.engine)}
+                            </Badge>
+                          </td>
+                          <td className="px-6 py-4">
+                            <StatusDot status={db.status} showLabel />
+                          </td>
+                          <td className="px-6 py-4 font-mono text-xs text-muted-foreground">
+                            {db.id}
+                          </td>
+                          <td className="px-6 py-4">
+                            <div className="flex items-center justify-end gap-1.5">
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => toggleConn(db)}
+                                aria-label={`Connection info for ${db.name}`}
+                                title="Connection info"
+                              >
+                                <Plug className="h-4 w-4" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                loading={action === "deploy"}
+                                disabled={anyBusy}
+                                onClick={() => runLifecycle(db, "deploy")}
+                                aria-label={`Start ${db.name}`}
+                                title="Start"
+                              >
+                                {action !== "deploy" && (
+                                  <Play className="h-4 w-4" />
+                                )}
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                loading={action === "restart"}
+                                disabled={anyBusy}
+                                onClick={() => runLifecycle(db, "restart")}
+                                aria-label={`Restart ${db.name}`}
+                                title="Restart"
+                              >
+                                {action !== "restart" && (
+                                  <RotateCw className="h-4 w-4" />
+                                )}
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                loading={action === "stop"}
+                                disabled={anyBusy}
+                                onClick={() => runLifecycle(db, "stop")}
+                                aria-label={`Stop ${db.name}`}
+                                title="Stop"
+                              >
+                                {action !== "stop" && (
+                                  <Square className="h-4 w-4" />
+                                )}
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                loading={action === "delete"}
+                                disabled={anyBusy}
+                                onClick={() => setConfirmDelete(db)}
+                                aria-label={`Delete ${db.name}`}
+                                title="Delete"
+                                className="text-destructive hover:text-destructive"
+                              >
+                                {action !== "delete" && (
+                                  <Trash2 className="h-4 w-4" />
+                                )}
+                              </Button>
+                            </div>
+                          </td>
+                        </tr>
+                        {connOpen === db.id && (
+                          <tr>
+                            <td
+                              colSpan={5}
+                              className="bg-surface-2/40 px-6 py-4"
                             >
-                              {!deleting && <Trash2 className="h-4 w-4" />}
-                            </Button>
-                          </div>
-                        </td>
-                      </tr>
+                              <ConnectionInfo
+                                detail={connDetail[db.id]}
+                                loading={connLoading === db.id}
+                                error={connLoading === db.id ? null : connError}
+                              />
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
                     );
                   })}
                 </tbody>
@@ -360,5 +505,156 @@ export default function DatabasesPage() {
         onCancel={() => setConfirmDelete(null)}
       />
     </div>
+  );
+}
+
+// Renders a database's in-cluster connection info: host/port/database/username,
+// a masked password with reveal, and the full connection string. Every value has
+// a copy-to-clipboard button. Databases are internal-only (ClusterIP), so the
+// host is the cluster service DNS — reachable from the org's own workloads only.
+function ConnectionInfo({
+  detail,
+  loading,
+  error,
+}: {
+  detail: DatabaseDetail | undefined;
+  loading: boolean;
+  error: string | null;
+}) {
+  const [showPassword, setShowPassword] = useState(false);
+
+  if (loading) {
+    return (
+      <p className="flex items-center gap-2 text-sm text-muted-foreground">
+        <Loader2 className="h-4 w-4 animate-spin" />
+        Loading connection info…
+      </p>
+    );
+  }
+  if (error) {
+    return <Notice variant="error">{error}</Notice>;
+  }
+  if (!detail) return null;
+
+  const c = detail.connection;
+  const rows: { label: string; value: string; mono?: boolean }[] = [
+    { label: "Host", value: c.host, mono: true },
+    { label: "Port", value: String(c.port) },
+    { label: "Database", value: c.database, mono: true },
+    { label: "Username", value: c.username, mono: true },
+  ];
+
+  return (
+    <div className="space-y-3">
+      <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        Connection info
+      </p>
+      <p className="text-xs text-muted-foreground">
+        Internal only (ClusterIP). Reachable from this org&apos;s workloads, not
+        the public internet.
+      </p>
+      <div className="grid gap-2 sm:grid-cols-2">
+        {rows.map((r) => (
+          <ConnField
+            key={r.label}
+            label={r.label}
+            value={r.value}
+            mono={r.mono}
+          />
+        ))}
+      </div>
+
+      {/* Masked password with reveal + copy. */}
+      <div className="space-y-1">
+        <p className="text-xs text-muted-foreground">Password</p>
+        <div className="flex items-center gap-2">
+          <code className="min-w-0 flex-1 truncate rounded bg-surface-2 px-2 py-1 font-mono text-xs">
+            {showPassword ? c.password : "•".repeat(16)}
+          </code>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => setShowPassword((s) => !s)}
+            aria-label={showPassword ? "Hide password" : "Reveal password"}
+          >
+            {showPassword ? (
+              <EyeOff className="h-4 w-4" />
+            ) : (
+              <Eye className="h-4 w-4" />
+            )}
+          </Button>
+          <CopyToClipboard value={c.password} label="Copy password" />
+        </div>
+      </div>
+
+      {/* Connection string (carries the password — masked source, copyable). */}
+      <div className="space-y-1">
+        <p className="text-xs text-muted-foreground">Connection string</p>
+        <div className="flex items-center gap-2">
+          <code className="min-w-0 flex-1 truncate rounded bg-surface-2 px-2 py-1 font-mono text-xs">
+            {showPassword
+              ? c.connectionString
+              : c.connectionString.replace(c.password, "••••••")}
+          </code>
+          <CopyToClipboard
+            value={c.connectionString}
+            label="Copy connection string"
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ConnField({
+  label,
+  value,
+  mono,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+}) {
+  return (
+    <div className="space-y-1">
+      <p className="text-xs text-muted-foreground">{label}</p>
+      <div className="flex items-center gap-2">
+        <code
+          className={
+            "min-w-0 flex-1 truncate rounded bg-surface-2 px-2 py-1 text-xs" +
+            (mono ? " font-mono" : "")
+          }
+        >
+          {value}
+        </code>
+        <CopyToClipboard value={value} label={`Copy ${label.toLowerCase()}`} />
+      </div>
+    </div>
+  );
+}
+
+function CopyToClipboard({ value, label }: { value: string; label: string }) {
+  const [copied, setCopied] = useState(false);
+  async function onCopy() {
+    try {
+      if (typeof navigator !== "undefined" && navigator.clipboard) {
+        await navigator.clipboard.writeText(value);
+      }
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      setCopied(false);
+    }
+  }
+  return (
+    <Button
+      variant="ghost"
+      size="icon"
+      onClick={onCopy}
+      aria-label={label}
+      title={label}
+    >
+      {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+    </Button>
   );
 }

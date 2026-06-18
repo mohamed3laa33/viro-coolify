@@ -133,6 +133,13 @@ type App struct {
 	// the scale endpoint and persisted so a redeploy keeps the same bounds.
 	MinReplicas int `json:"minReplicas,omitempty"`
 	MaxReplicas int `json:"maxReplicas,omitempty"`
+	// Region is the placement region for the app's workload. It is set on create
+	// from the request or the platform default region (PlatformSettings.DefaultRegion)
+	// and validated against the admin-managed PlatformSettings.Regions. Today a single
+	// cluster IGNORES it; it is plumbed onto the kube.Workload as a label/annotation so
+	// a future multi-cluster router can place by region. This is the multi-region SEAM:
+	// a real, validated, persisted field with no behavior change yet.
+	Region string `json:"region,omitempty"`
 	// Kubernetes placement returned by the deploy backend (kube.Backend).
 	Namespace string    `json:"namespace,omitempty"` // per-org-project namespace
 	Release   string    `json:"release,omitempty"`   // Helm release name
@@ -198,6 +205,8 @@ type Service struct {
 	CPU       float64 `json:"cpu"`
 	MemoryMB  int     `json:"memoryMb"`
 	Status    string  `json:"status"`
+	// Region is the placement region (multi-region seam; see App.Region).
+	Region string `json:"region,omitempty"`
 	// Kubernetes placement returned by the deploy backend (kube.Backend).
 	Namespace string    `json:"namespace,omitempty"` // per-org-project namespace
 	Release   string    `json:"release,omitempty"`   // Helm release name
@@ -295,6 +304,8 @@ type Database struct {
 	Username     string `json:"-"`
 	Password     string `json:"-"`
 	DatabaseName string `json:"-"`
+	// Region is the placement region (multi-region seam; see App.Region).
+	Region string `json:"region,omitempty"`
 	// Kubernetes placement returned by the deploy backend (kube.Backend).
 	Namespace string    `json:"namespace,omitempty"` // per-org-project namespace
 	Release   string    `json:"release,omitempty"`   // Helm release name

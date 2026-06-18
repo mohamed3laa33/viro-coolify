@@ -21,21 +21,31 @@ import {
   EyeOff,
   ShieldCheck,
   ShieldAlert,
+  Copy,
+  Check,
+  History,
+  Hammer,
+  Lock,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 import {
   api,
+  streamAppLogs,
   type App,
-  type AppMetrics,
+  type AppDetail,
+  type Build,
   type Domain,
+  type DomainResult,
   type EnvVar,
+  type PodMetrics,
+  type Release,
 } from "@/lib/api";
 import { errorMessage } from "@/lib/errors";
 import { isDemoMode } from "@/lib/demo";
 import { useDemoData } from "@/lib/demo-data";
 import { useResource, invalidate } from "@/lib/use-resource";
-import { cn, buildAppFqdn, slugify, BRAND_MAGENTA } from "@/lib/utils";
+import { cn, buildAppFqdn, slugify } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -45,12 +55,13 @@ import { Badge } from "@/components/ui/badge";
 import { Notice } from "@/components/ui/notice";
 import { Tabs } from "@/components/ui/tabs";
 import { StatusDot } from "@/components/ui/status-dot";
-import { Sparkline } from "@/components/sparkline";
 
 const TABS = [
   "Overview",
   "Logs",
   "Metrics",
+  "Releases",
+  "Builds",
   "Environment",
   "Domains",
   "Settings",
@@ -89,7 +100,7 @@ export default function AppDetailPage({
   // In demo mode show a mock app as the fallback; in production there is no
   // fabricated app, so a failed/absent fetch renders an explicit empty state.
   // The mock module loads lazily (demo mode only) so it never ships to prod.
-  const fallback = useDemoData<App | null>(
+  const fallback = useDemoData<AppDetail | null>(
     (m) => m.mockApps.find((a) => a.id === appId) ?? m.mockApps[0] ?? null,
     null,
   );
@@ -99,7 +110,7 @@ export default function AppDetailPage({
     loading,
     errorStatus,
     refetch,
-  } = useResource<App | null>(
+  } = useResource<AppDetail | null>(
     activeOrgId
       ? (signal) =>
           authedCall(
@@ -118,7 +129,7 @@ export default function AppDetailPage({
   const [optimisticStatus, setOptimisticStatus] = useState<
     App["status"] | null
   >(null);
-  const app = useMemo<App | null>(
+  const app = useMemo<AppDetail | null>(
     () =>
       fetched && optimisticStatus
         ? { ...fetched, status: optimisticStatus }
@@ -361,6 +372,22 @@ export default function AppDetailPage({
         </TabPanel>
       )}
 
+      {app && tab === "Releases" && (
+        <TabPanel tab="Releases">
+          <ReleasesTab
+            appId={appId}
+            currentRevision={fetched?.currentRelease?.revision ?? null}
+            onChanged={refetch}
+          />
+        </TabPanel>
+      )}
+
+      {app && tab === "Builds" && (
+        <TabPanel tab="Builds">
+          <BuildsTab appId={appId} />
+        </TabPanel>
+      )}
+
       {app && tab === "Environment" && (
         <TabPanel tab="Environment">
           <EnvironmentTab appId={appId} />
@@ -375,49 +402,53 @@ export default function AppDetailPage({
 
       {app && tab === "Settings" && (
         <TabPanel tab="Settings">
-          <Card>
-            <CardHeader>
-              <CardTitle>Danger zone</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="flex items-center justify-between rounded-lg border border-border p-4">
-                <div>
-                  <p className="text-sm font-medium">Transfer app</p>
-                  <p className="text-sm text-muted-foreground">
-                    Move this app to another organization.
-                  </p>
-                </div>
-                {/* TODO(backend): no app-transfer endpoint exists yet; disabled
+          <div className="space-y-6">
+            <UpdateAppCard app={app} onUpdated={refetch} />
+            <ScaleCard appId={appId} onScaled={refetch} />
+            <Card>
+              <CardHeader>
+                <CardTitle>Danger zone</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="flex items-center justify-between rounded-lg border border-border p-4">
+                  <div>
+                    <p className="text-sm font-medium">Transfer app</p>
+                    <p className="text-sm text-muted-foreground">
+                      Move this app to another organization.
+                    </p>
+                  </div>
+                  {/* TODO(backend): no app-transfer endpoint exists yet; disabled
                   until the API exposes one. */}
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  disabled
-                  title="App transfer is not available yet"
-                >
-                  Transfer
-                </Button>
-              </div>
-              <div className="flex items-center justify-between rounded-lg border border-destructive/40 p-4">
-                <div>
-                  <p className="text-sm font-medium text-destructive">
-                    Delete app
-                  </p>
-                  <p className="text-sm text-muted-foreground">
-                    Permanently remove this app and all of its machines.
-                  </p>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled
+                    title="App transfer is not available yet"
+                  >
+                    Transfer
+                  </Button>
                 </div>
-                <Button
-                  variant="destructive"
-                  size="sm"
-                  onClick={() => setConfirmOpen(true)}
-                  loading={deleting}
-                >
-                  Delete
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
+                <div className="flex items-center justify-between rounded-lg border border-destructive/40 p-4">
+                  <div>
+                    <p className="text-sm font-medium text-destructive">
+                      Delete app
+                    </p>
+                    <p className="text-sm text-muted-foreground">
+                      Permanently remove this app and all of its machines.
+                    </p>
+                  </div>
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    onClick={() => setConfirmOpen(true)}
+                    loading={deleting}
+                  >
+                    Delete
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
         </TabPanel>
       )}
 
@@ -444,8 +475,12 @@ function LogsTab({ appId, appName }: { appId: string; appName: string }) {
   const { activeOrgId, authedCall } = useAuth();
   const demo = isDemoMode();
 
+  // Follow mode streams live lines over the SSE endpoint; off shows the static
+  // snapshot tail (GET /logs). The toggle drives which source is active.
+  const [follow, setFollow] = useState(false);
+
   const { data, loading, error, refetch } = useResource<string>(
-    activeOrgId
+    activeOrgId && !follow
       ? (signal) =>
           authedCall(
             (token, on) =>
@@ -454,17 +489,43 @@ function LogsTab({ appId, appName }: { appId: string; appName: string }) {
           )
       : null,
     demo ? DEMO_LOGS.join("\n") : "",
-    [activeOrgId, appId],
+    [activeOrgId, appId, follow],
   );
+
+  // Streamed lines accumulate here while following; capped to MAX_LOG_LINES so a
+  // long-lived stream can't grow the DOM unbounded.
+  const [streamed, setStreamed] = useState<string[]>([]);
+  const [streamError, setStreamError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!follow || !activeOrgId) return;
+    setStreamed([]);
+    setStreamError(null);
+    // The SSE stream sends cookies via a fetch reader; the disposer aborts it on
+    // unmount or when follow is turned off (no EventSource/stream leak).
+    const close = streamAppLogs(
+      activeOrgId,
+      appId,
+      (line) =>
+        setStreamed((prev) => {
+          const next = [...prev, line];
+          return next.length > MAX_LOG_LINES
+            ? next.slice(-MAX_LOG_LINES)
+            : next;
+        }),
+      (msg) => setStreamError(msg),
+    );
+    return close;
+  }, [follow, activeOrgId, appId]);
 
   // Defensively cap the render to the most recent lines so a large tail can't
   // blow up the DOM; classify each line's level in the same pass.
   const lines = useMemo<{ text: string; level: string }[]>(() => {
-    if (!data) return [];
-    const all = data.split("\n");
-    const tail = all.length > MAX_LOG_LINES ? all.slice(-MAX_LOG_LINES) : all;
+    const source = follow ? streamed : data ? data.split("\n") : [];
+    const tail =
+      source.length > MAX_LOG_LINES ? source.slice(-MAX_LOG_LINES) : source;
     return tail.map((text) => ({ text, level: logLineClass(text) }));
-  }, [data]);
+  }, [follow, streamed, data]);
 
   return (
     <Card className="overflow-hidden">
@@ -473,22 +534,42 @@ function LogsTab({ appId, appName }: { appId: string; appName: string }) {
           log tail — {appName}
         </span>
         <div className="flex items-center gap-2">
-          {demo && data === DEMO_LOGS.join("\n") && (
+          {demo && !follow && data === DEMO_LOGS.join("\n") && (
             <Badge variant="outline">Demo</Badge>
           )}
           <Button
-            variant="ghost"
+            variant={follow ? "primary" : "secondary"}
             size="sm"
-            onClick={() => refetch()}
-            loading={loading}
-            aria-label="Refresh logs"
+            onClick={() => setFollow((f) => !f)}
+            aria-pressed={follow}
           >
-            {!loading && <RefreshCw className="h-3.5 w-3.5" />}
-            Refresh
+            {follow ? (
+              <>
+                <Square className="h-3.5 w-3.5" />
+                Stop following
+              </>
+            ) : (
+              <>
+                <Rocket className="h-3.5 w-3.5" />
+                Follow
+              </>
+            )}
           </Button>
+          {!follow && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => refetch()}
+              loading={loading}
+              aria-label="Refresh logs"
+            >
+              {!loading && <RefreshCw className="h-3.5 w-3.5" />}
+              Refresh
+            </Button>
+          )}
         </div>
       </div>
-      {error && !demo && (
+      {!follow && error && !demo && (
         <Notice variant="error" className="m-4">
           <div className="flex items-center justify-between gap-3">
             <span>Could not load logs — the API is unreachable.</span>
@@ -503,9 +584,18 @@ function LogsTab({ appId, appName }: { appId: string; appName: string }) {
           </div>
         </Notice>
       )}
+      {follow && streamError && (
+        <Notice variant="error" className="m-4">
+          {streamError}
+        </Notice>
+      )}
       {lines.length === 0 ? (
         <p className="px-4 py-8 text-center text-sm text-muted-foreground">
-          {loading ? "Loading logs…" : "No log output yet for this app."}
+          {follow
+            ? "Waiting for live log output…"
+            : loading
+              ? "Loading logs…"
+              : "No log output yet for this app."}
         </p>
       ) : (
         <div className="scrollbar-thin max-h-[420px] overflow-y-auto bg-background p-4 font-mono text-xs leading-relaxed">
@@ -524,16 +614,21 @@ function LogsTab({ appId, appName }: { appId: string; appName: string }) {
 // Metrics tab
 // ---------------------------------------------------------------------------
 
+// Live pod metrics from the cluster metrics-server. There is NO synthetic data:
+// when the backend reports `available: false` (no metrics-server, or the app
+// isn't deployed) we render an honest "metrics unavailable" empty state rather
+// than fabricate load — even in demo mode the empty default is honest.
+const EMPTY_POD_METRICS: PodMetrics = {
+  available: false,
+  pods: [],
+  cpuMillicores: 0,
+  memoryBytes: 0,
+};
+
 function MetricsTab({ appId }: { appId: string }) {
   const { activeOrgId, authedCall } = useAuth();
 
-  const demo = isDemoMode();
-  const empty: AppMetrics = { cpu: [], memory: [], requests: [] };
-
-  // Demo fallback loads lazily (demo mode only); never shipped to prod.
-  const demoMetrics = useDemoData((m) => m.mockMetrics, empty);
-
-  const { data, error, refetch } = useResource<AppMetrics>(
+  const { data, error, refetch } = useResource<PodMetrics>(
     activeOrgId
       ? (signal) =>
           authedCall(
@@ -542,62 +637,95 @@ function MetricsTab({ appId }: { appId: string }) {
             signal,
           )
       : null,
-    demoMetrics,
-    [activeOrgId, appId, demoMetrics],
+    EMPTY_POD_METRICS,
+    [activeOrgId, appId],
+    // Live snapshot: poll every 10s so the numbers stay current while viewing.
+    { refetchIntervalMs: 10_000 },
   );
 
-  // In demo mode, synthesize any empty series so the charts render; in
-  // production, empty series stay empty (no invented data).
-  const metrics: AppMetrics = demo
-    ? {
-        cpu: data.cpu.length ? data.cpu : demoMetrics.cpu,
-        memory: data.memory.length ? data.memory : demoMetrics.memory,
-        requests: data.requests.length ? data.requests : demoMetrics.requests,
-      }
-    : data;
-
-  const cpu = metrics.cpu.map((p) => p.v);
-  const mem = metrics.memory.map((p) => p.v);
-  const req = metrics.requests.map((p) => p.v);
-
-  if (cpu.length === 0 && mem.length === 0 && req.length === 0) {
+  if (!data.available) {
     return (
       <div className="space-y-4">
-        {error && !demo && (
+        {error && !isDemoMode() && (
           <FetchErrorNotice
             message="Could not load metrics — the API is unreachable."
             onRetry={refetch}
           />
         )}
-        <Card className="flex flex-col items-center justify-center py-16 text-center">
+        <Card className="flex flex-col items-center justify-center gap-2 py-16 text-center">
           <p className="text-sm text-muted-foreground">
-            No metrics recorded yet for this app.
+            Metrics unavailable
+            {data.unavailable ? ` — ${data.unavailable}.` : " for this app."}
           </p>
+          <p className="text-xs text-muted-foreground">
+            Live pod CPU/memory comes from the cluster metrics-server; nothing
+            is shown until it reports.
+          </p>
+          <Button variant="secondary" size="sm" onClick={refetch}>
+            <RefreshCw className="h-3.5 w-3.5" />
+            Refresh
+          </Button>
         </Card>
       </div>
     );
   }
 
   return (
-    <div className="grid gap-4 sm:grid-cols-2">
-      <MetricCard
-        title="CPU"
-        value={`${last(cpu)}%`}
-        data={cpu}
-        color="hsl(var(--primary))"
-      />
-      <MetricCard
-        title="Memory"
-        value={`${last(mem)}%`}
-        data={mem}
-        color={BRAND_MAGENTA}
-      />
-      <MetricCard
-        title="Requests"
-        value={`${last(req)}/s`}
-        data={req}
-        color="hsl(var(--success))"
-      />
+    <div className="space-y-4">
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Card className="p-5">
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-muted-foreground">CPU (aggregate)</p>
+            <p className="text-2xl font-semibold tracking-tight tabular-nums">
+              {formatMillicores(data.cpuMillicores)}
+            </p>
+          </div>
+        </Card>
+        <Card className="p-5">
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-muted-foreground">Memory (aggregate)</p>
+            <p className="text-2xl font-semibold tracking-tight tabular-nums">
+              {formatBytes(data.memoryBytes)}
+            </p>
+          </div>
+        </Card>
+      </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Pods ({data.pods.length})</CardTitle>
+        </CardHeader>
+        <CardContent className="p-0">
+          {data.pods.length === 0 ? (
+            <p className="px-6 py-4 text-sm text-muted-foreground">
+              No running pods.
+            </p>
+          ) : (
+            <ul className="divide-y divide-border">
+              {data.pods.map((p) => (
+                <li
+                  key={p.pod}
+                  className="flex items-center justify-between gap-4 px-6 py-3 text-sm"
+                >
+                  <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
+                    {p.pod}
+                  </span>
+                  <span className="flex shrink-0 items-center gap-4 tabular-nums">
+                    <span className="inline-flex items-center gap-1.5">
+                      <Cpu className="h-3.5 w-3.5 text-muted-foreground" />
+                      {formatMillicores(p.cpuMillicores)}
+                    </span>
+                    <span className="inline-flex items-center gap-1.5">
+                      <MemoryStick className="h-3.5 w-3.5 text-muted-foreground" />
+                      {formatBytes(p.memoryBytes)}
+                    </span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }
@@ -630,6 +758,7 @@ function EnvironmentTab({ appId }: { appId: string }) {
   const [revealed, setRevealed] = useState<Record<string, boolean>>({});
   const [key, setKey] = useState("");
   const [value, setValue] = useState("");
+  const [secret, setSecret] = useState(false);
   const [pending, setPending] = useState(false);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -646,10 +775,11 @@ function EnvironmentTab({ appId }: { appId: string }) {
     setNotice(null);
     try {
       await authedCall((token, on) =>
-        api.setEnv(activeOrgId, appId, { key: k, value }, token, on),
+        api.setEnv(activeOrgId, appId, { key: k, value, secret }, token, on),
       );
       setKey("");
       setValue("");
+      setSecret(false);
       refetch();
     } catch (err) {
       setNotice(
@@ -705,30 +835,46 @@ function EnvironmentTab({ appId }: { appId: string }) {
             <ul className="divide-y divide-border">
               {vars.map((v: EnvVar) => {
                 const show = revealed[v.key];
+                // The API never returns a secret's value (it comes back empty),
+                // so secret rows show a permanent masked placeholder and offer no
+                // reveal — there is nothing client-side to reveal.
+                const isSecret = v.secret === true;
                 return (
                   <li key={v.key} className="flex items-center gap-4 px-6 py-3">
-                    <span className="w-[200px] shrink-0 truncate font-mono text-sm text-foreground">
-                      {v.key}
+                    <span className="flex w-[200px] shrink-0 items-center gap-1.5 truncate font-mono text-sm text-foreground">
+                      {isSecret && (
+                        <Lock
+                          className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
+                          aria-label="Secret"
+                        />
+                      )}
+                      <span className="truncate">{v.key}</span>
                     </span>
                     <span className="min-w-0 flex-1 truncate font-mono text-sm text-muted-foreground">
-                      {show
-                        ? v.value
-                        : "•".repeat(Math.min(24, v.value.length || 8))}
+                      {isSecret
+                        ? "•••••••• (secret, hidden)"
+                        : show
+                          ? v.value
+                          : "•".repeat(Math.min(24, v.value.length || 8))}
                     </span>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      onClick={() =>
-                        setRevealed((r) => ({ ...r, [v.key]: !r[v.key] }))
-                      }
-                      aria-label={show ? "Hide value" : "Reveal value"}
-                    >
-                      {show ? (
-                        <EyeOff className="h-4 w-4" />
-                      ) : (
-                        <Eye className="h-4 w-4" />
-                      )}
-                    </Button>
+                    {!isSecret ? (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() =>
+                          setRevealed((r) => ({ ...r, [v.key]: !r[v.key] }))
+                        }
+                        aria-label={show ? "Hide value" : "Reveal value"}
+                      >
+                        {show ? (
+                          <EyeOff className="h-4 w-4" />
+                        ) : (
+                          <Eye className="h-4 w-4" />
+                        )}
+                      </Button>
+                    ) : (
+                      <span className="w-9" aria-hidden="true" />
+                    )}
                     <Button
                       variant="ghost"
                       size="icon"
@@ -755,39 +901,49 @@ function EnvironmentTab({ appId }: { appId: string }) {
           <CardTitle>Add variable</CardTitle>
         </CardHeader>
         <CardContent>
-          <form
-            onSubmit={onAdd}
-            className="grid gap-4 sm:grid-cols-[200px_1fr_auto] sm:items-end"
-          >
-            <div className="space-y-2">
-              <Label htmlFor="env-key">Key</Label>
-              <Input
-                id="env-key"
-                className="font-mono"
-                placeholder="API_KEY"
-                value={key}
-                onChange={(e) => setKey(e.target.value)}
-                required
-              />
+          <form onSubmit={onAdd} className="space-y-4">
+            <div className="grid gap-4 sm:grid-cols-[200px_1fr_auto] sm:items-end">
+              <div className="space-y-2">
+                <Label htmlFor="env-key">Key</Label>
+                <Input
+                  id="env-key"
+                  className="font-mono"
+                  placeholder="API_KEY"
+                  value={key}
+                  onChange={(e) => setKey(e.target.value)}
+                  required
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="env-value">Value</Label>
+                <Input
+                  id="env-value"
+                  className="font-mono"
+                  type={secret ? "password" : "text"}
+                  placeholder="value"
+                  value={value}
+                  onChange={(e) => setValue(e.target.value)}
+                />
+              </div>
+              <Button type="submit" disabled={pending}>
+                {pending ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Plus className="h-4 w-4" />
+                )}
+                Save
+              </Button>
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="env-value">Value</Label>
-              <Input
-                id="env-value"
-                className="font-mono"
-                placeholder="value"
-                value={value}
-                onChange={(e) => setValue(e.target.value)}
+            <label className="flex items-center gap-2 text-sm text-muted-foreground">
+              <input
+                type="checkbox"
+                checked={secret}
+                onChange={(e) => setSecret(e.target.checked)}
+                className="h-4 w-4 rounded border-border"
               />
-            </div>
-            <Button type="submit" disabled={pending}>
-              {pending ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Plus className="h-4 w-4" />
-              )}
-              Save
-            </Button>
+              <Lock className="h-3.5 w-3.5" />
+              Store as a secret (encrypted at rest; value never shown again)
+            </label>
           </form>
         </CardContent>
       </Card>
@@ -830,7 +986,11 @@ function DomainsTab({ appId, appName }: { appId: string; appName: string }) {
   const [domain, setDomain] = useState("");
   const [pending, setPending] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [verifyingId, setVerifyingId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // The DNS instructions for the most recently added/verified domain, surfaced
+  // so the user knows exactly which records to publish.
+  const [instructions, setInstructions] = useState<DomainResult | null>(null);
 
   async function onAdd(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -843,9 +1003,11 @@ function DomainsTab({ appId, appName }: { appId: string; appName: string }) {
     setPending(true);
     setNotice(null);
     try {
-      await authedCall((token, on) =>
+      const res = await authedCall((token, on) =>
         api.addDomain(activeOrgId, appId, d, token, on),
       );
+      // Only surface the DNS instructions card when the API actually returned them.
+      if (res.instructions) setInstructions(res);
       setDomain("");
       refetch();
     } catch (err) {
@@ -854,6 +1016,33 @@ function DomainsTab({ appId, appName }: { appId: string; appName: string }) {
       );
     } finally {
       setPending(false);
+    }
+  }
+
+  async function onVerify(id: string) {
+    if (!activeOrgId) {
+      setNotice("Verify unavailable — no active organization.");
+      return;
+    }
+    setVerifyingId(id);
+    setNotice(null);
+    try {
+      const res = await authedCall((token, on) =>
+        api.verifyDomain(activeOrgId, appId, id, token, on),
+      );
+      if (res.instructions) setInstructions(res);
+      if (res.status === "failed" || res.verified === false) {
+        setNotice(
+          `Verification failed for ${res.domain} — the TXT record was not found yet. DNS can take a few minutes to propagate.`,
+        );
+      }
+      refetch();
+    } catch (err) {
+      setNotice(
+        `Could not verify the domain — ${errorMessage(err, "the API is unreachable.")}`,
+      );
+    } finally {
+      setVerifyingId(null);
     }
   }
 
@@ -905,6 +1094,13 @@ function DomainsTab({ appId, appName }: { appId: string; appName: string }) {
         </CardContent>
       </Card>
 
+      {instructions && (
+        <DomainInstructionsCard
+          result={instructions}
+          onDismiss={() => setInstructions(null)}
+        />
+      )}
+
       <Card>
         <CardHeader>
           <CardTitle>Custom domains</CardTitle>
@@ -916,43 +1112,52 @@ function DomainsTab({ appId, appName }: { appId: string; appName: string }) {
             </p>
           ) : (
             <ul className="divide-y divide-border">
-              {domains.map((d: Domain) => (
-                <li
-                  key={d.id}
-                  className="flex items-center justify-between px-6 py-3"
-                >
-                  <span className="inline-flex items-center gap-2 font-mono text-sm">
-                    <Globe className="h-4 w-4 text-muted-foreground" />
-                    {d.domain}
-                  </span>
-                  <div className="flex items-center gap-3">
-                    {d.verified ? (
-                      <Badge variant="success">
-                        <ShieldCheck className="mr-1 h-3 w-3" />
-                        Verified
-                      </Badge>
-                    ) : (
-                      <Badge variant="warning">
-                        <ShieldAlert className="mr-1 h-3 w-3" />
-                        Pending
-                      </Badge>
-                    )}
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      onClick={() => onDelete(d.id)}
-                      disabled={busyId === d.id}
-                      aria-label="Delete domain"
-                    >
-                      {busyId === d.id ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                      ) : (
-                        <Trash2 className="h-4 w-4 text-destructive" />
+              {domains.map((d: Domain) => {
+                // status is the source of truth; verified is the legacy mirror.
+                const status =
+                  d.status ?? (d.verified ? "verified" : "pending");
+                return (
+                  <li
+                    key={d.id}
+                    className="flex items-center justify-between gap-3 px-6 py-3"
+                  >
+                    <span className="inline-flex min-w-0 items-center gap-2 font-mono text-sm">
+                      <Globe className="h-4 w-4 shrink-0 text-muted-foreground" />
+                      <span className="truncate">{d.domain}</span>
+                    </span>
+                    <div className="flex shrink-0 items-center gap-3">
+                      <DomainStatusBadge status={status} />
+                      {status !== "verified" && (
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          onClick={() => onVerify(d.id)}
+                          loading={verifyingId === d.id}
+                          disabled={verifyingId === d.id}
+                        >
+                          {verifyingId !== d.id && (
+                            <ShieldCheck className="h-3.5 w-3.5" />
+                          )}
+                          Verify
+                        </Button>
                       )}
-                    </Button>
-                  </div>
-                </li>
-              ))}
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => onDelete(d.id)}
+                        disabled={busyId === d.id}
+                        aria-label="Delete domain"
+                      >
+                        {busyId === d.id ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Trash2 className="h-4 w-4 text-destructive" />
+                        )}
+                      </Button>
+                    </div>
+                  </li>
+                );
+              })}
             </ul>
           )}
         </CardContent>
@@ -990,6 +1195,528 @@ function DomainsTab({ appId, appName }: { appId: string; appName: string }) {
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Releases tab — deploy history + rollback
+// ---------------------------------------------------------------------------
+
+const RELEASE_VARIANT: Record<
+  string,
+  "success" | "warning" | "outline" | "destructive" | "info"
+> = {
+  active: "success",
+  deploying: "warning",
+  failed: "destructive",
+  superseded: "outline",
+  rolled_back: "info",
+};
+
+function ReleasesTab({
+  appId,
+  currentRevision,
+  onChanged,
+}: {
+  appId: string;
+  currentRevision: number | null;
+  onChanged: () => void;
+}) {
+  const { activeOrgId, authedCall } = useAuth();
+
+  const { data, loading, error, refetch } = useResource(
+    activeOrgId
+      ? (signal) =>
+          authedCall(
+            (token, on) =>
+              api.listReleases(activeOrgId, appId, token, on, { signal }),
+            signal,
+          )
+      : null,
+    { data: [] as Release[], page: { limit: 0, offset: 0, hasMore: false } },
+    [activeOrgId, appId],
+  );
+
+  const releases = data.data;
+  const [rollingBack, setRollingBack] = useState<number | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [confirm, setConfirm] = useState<Release | null>(null);
+
+  async function onRollback(rev: number) {
+    if (!activeOrgId) {
+      setNotice("Rollback unavailable — no active organization.");
+      return;
+    }
+    setRollingBack(rev);
+    setNotice(null);
+    try {
+      await authedCall((token, on) =>
+        api.rollbackApp(activeOrgId, appId, rev, token, on),
+      );
+      setConfirm(null);
+      refetch();
+      onChanged();
+    } catch (err) {
+      setNotice(
+        `Rollback failed — ${errorMessage(err, "the API is unreachable.")}`,
+      );
+    } finally {
+      setRollingBack(null);
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      {notice && <Notice variant="error">{notice}</Notice>}
+      {error && !isDemoMode() && (
+        <FetchErrorNotice
+          message="Could not load releases — the API is unreachable."
+          onRetry={refetch}
+        />
+      )}
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Release history</CardTitle>
+        </CardHeader>
+        <CardContent className="p-0">
+          {releases.length === 0 ? (
+            <p className="px-6 py-4 text-sm text-muted-foreground">
+              {loading ? "Loading releases…" : "No releases yet."}
+            </p>
+          ) : (
+            <ul className="divide-y divide-border">
+              {releases.map((r) => {
+                const isCurrent =
+                  r.revision === currentRevision || r.status === "active";
+                return (
+                  <li
+                    key={r.id}
+                    className="flex items-center justify-between gap-4 px-6 py-3"
+                  >
+                    <div className="flex items-center gap-3">
+                      <History className="h-4 w-4 text-muted-foreground" />
+                      <div className="min-w-0">
+                        <p className="flex items-center gap-2 text-sm font-medium">
+                          Revision {r.revision}
+                          <Badge
+                            variant={RELEASE_VARIANT[r.status] ?? "muted"}
+                            className="capitalize"
+                          >
+                            {r.status.replace("_", " ")}
+                          </Badge>
+                        </p>
+                        <p className="truncate font-mono text-xs text-muted-foreground">
+                          {r.image || r.gitRef || "—"}
+                          {r.note ? ` · ${r.note}` : ""}
+                        </p>
+                      </div>
+                    </div>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      disabled={isCurrent || rollingBack !== null}
+                      loading={rollingBack === r.revision}
+                      onClick={() => setConfirm(r)}
+                      title={
+                        isCurrent
+                          ? "This is the active release"
+                          : `Roll back to revision ${r.revision}`
+                      }
+                    >
+                      {rollingBack !== r.revision && (
+                        <RotateCw className="h-3.5 w-3.5" />
+                      )}
+                      {isCurrent ? "Current" : "Rollback"}
+                    </Button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </CardContent>
+      </Card>
+
+      <ConfirmDialog
+        open={confirm !== null}
+        title="Roll back app?"
+        description={
+          confirm
+            ? `Redeploy revision ${confirm.revision} (${confirm.image || confirm.gitRef || "snapshot"}). A new release is recorded for the rollback.`
+            : undefined
+        }
+        confirmLabel="Roll back"
+        loading={confirm ? rollingBack === confirm.revision : false}
+        onConfirm={() => confirm && onRollback(confirm.revision)}
+        onCancel={() => {
+          if (rollingBack === null) setConfirm(null);
+        }}
+      />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Builds tab — git-source image builds + build logs
+// ---------------------------------------------------------------------------
+
+const BUILD_VARIANT: Record<
+  string,
+  "success" | "warning" | "outline" | "destructive"
+> = {
+  succeeded: "success",
+  building: "warning",
+  pending: "outline",
+  failed: "destructive",
+};
+
+function BuildsTab({ appId }: { appId: string }) {
+  const { activeOrgId, authedCall } = useAuth();
+
+  const { data, loading, error, refetch } = useResource(
+    activeOrgId
+      ? (signal) =>
+          authedCall(
+            (token, on) =>
+              api.listBuilds(activeOrgId, appId, token, on, { signal }),
+            signal,
+          )
+      : null,
+    { data: [] as Build[], page: { limit: 0, offset: 0, hasMore: false } },
+    [activeOrgId, appId],
+  );
+
+  const builds = data.data;
+  const [openId, setOpenId] = useState<string | null>(null);
+  const [logs, setLogs] = useState<Record<string, string>>({});
+  const [loadingLogs, setLoadingLogs] = useState<string | null>(null);
+
+  async function toggleLogs(b: Build) {
+    if (openId === b.id) {
+      setOpenId(null);
+      return;
+    }
+    setOpenId(b.id);
+    // Build logs ride on the build record; fetch the single build to get them
+    // when the list didn't include them.
+    if (logs[b.id] === undefined && activeOrgId) {
+      setLoadingLogs(b.id);
+      try {
+        const full = await authedCall((token, on) =>
+          api.getBuild(activeOrgId, appId, b.id, token, on),
+        );
+        setLogs((l) => ({ ...l, [b.id]: full.logs ?? "" }));
+      } catch (err) {
+        setLogs((l) => ({
+          ...l,
+          [b.id]: `Could not load build logs — ${errorMessage(err, "the API is unreachable.")}`,
+        }));
+      } finally {
+        setLoadingLogs(null);
+      }
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      {error && !isDemoMode() && (
+        <FetchErrorNotice
+          message="Could not load builds — the API is unreachable."
+          onRetry={refetch}
+        />
+      )}
+      <Card>
+        <CardHeader>
+          <CardTitle>Builds</CardTitle>
+        </CardHeader>
+        <CardContent className="p-0">
+          {builds.length === 0 ? (
+            <p className="px-6 py-4 text-sm text-muted-foreground">
+              {loading ? "Loading builds…" : "No builds yet."}
+            </p>
+          ) : (
+            <ul className="divide-y divide-border">
+              {builds.map((b) => (
+                <li key={b.id} className="px-6 py-3">
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="flex min-w-0 items-center gap-3">
+                      <Hammer className="h-4 w-4 shrink-0 text-muted-foreground" />
+                      <div className="min-w-0">
+                        <p className="flex items-center gap-2 text-sm font-medium">
+                          <Badge
+                            variant={BUILD_VARIANT[b.status] ?? "muted"}
+                            className="capitalize"
+                          >
+                            {b.status}
+                          </Badge>
+                          <span className="truncate font-mono text-xs text-muted-foreground">
+                            {b.commitRef || b.image || b.id}
+                          </span>
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          {new Date(b.createdAt).toLocaleString()}
+                        </p>
+                      </div>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => toggleLogs(b)}
+                    >
+                      {openId === b.id ? "Hide logs" : "View logs"}
+                    </Button>
+                  </div>
+                  {openId === b.id && (
+                    <pre className="scrollbar-thin mt-3 max-h-72 overflow-auto whitespace-pre-wrap rounded-lg bg-background p-3 font-mono text-xs leading-relaxed text-muted-foreground">
+                      {loadingLogs === b.id
+                        ? "Loading logs…"
+                        : logs[b.id] || "No logs captured for this build."}
+                    </pre>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Settings — update app + scale
+// ---------------------------------------------------------------------------
+
+function UpdateAppCard({
+  app,
+  onUpdated,
+}: {
+  app: App;
+  onUpdated: () => void;
+}) {
+  const { activeOrgId, authedCall } = useAuth();
+  const [image, setImage] = useState(app.image ?? "");
+  const [cpu, setCpu] = useState(String(app.cpu ?? ""));
+  const [memoryMb, setMemoryMb] = useState(String(app.memoryMb ?? ""));
+  const [gitRepository, setGitRepository] = useState(app.gitRepository ?? "");
+  const [gitBranch, setGitBranch] = useState(app.gitBranch ?? "");
+  const [saving, setSaving] = useState(false);
+  const [notice, setNotice] = useState<{
+    variant: "success" | "error";
+    msg: string;
+  } | null>(null);
+
+  async function onSave(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (!activeOrgId) {
+      setNotice({ variant: "error", msg: "No active organization." });
+      return;
+    }
+    // Only send fields that actually changed (PATCH applies what is present).
+    const input: Parameters<typeof api.updateApp>[2] = {};
+    if (image !== (app.image ?? "")) input.image = image;
+    if (gitRepository !== (app.gitRepository ?? ""))
+      input.gitRepository = gitRepository;
+    if (gitBranch !== (app.gitBranch ?? "")) input.gitBranch = gitBranch;
+    const cpuNum = Number(cpu);
+    if (cpu !== "" && Number.isFinite(cpuNum) && cpuNum !== app.cpu)
+      input.cpu = cpuNum;
+    const memNum = Number(memoryMb);
+    if (memoryMb !== "" && Number.isFinite(memNum) && memNum !== app.memoryMb)
+      input.memoryMb = memNum;
+
+    if (Object.keys(input).length === 0) {
+      setNotice({ variant: "error", msg: "No changes to save." });
+      return;
+    }
+    setSaving(true);
+    setNotice(null);
+    try {
+      await authedCall((token, on) =>
+        api.updateApp(activeOrgId, app.id, input, token, on),
+      );
+      setNotice({ variant: "success", msg: "App updated." });
+      onUpdated();
+    } catch (err) {
+      setNotice({
+        variant: "error",
+        msg: errorMessage(err, "Couldn't update the app."),
+      });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>App configuration</CardTitle>
+      </CardHeader>
+      <CardContent>
+        {notice && (
+          <Notice variant={notice.variant} className="mb-4">
+            {notice.msg}
+          </Notice>
+        )}
+        <form onSubmit={onSave} className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="upd-image">Image</Label>
+            <Input
+              id="upd-image"
+              className="font-mono"
+              placeholder="registry/app:tag"
+              value={image}
+              onChange={(e) => setImage(e.target.value)}
+            />
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="upd-cpu">CPU (vCPU)</Label>
+              <Input
+                id="upd-cpu"
+                type="number"
+                step="0.1"
+                min="0"
+                value={cpu}
+                onChange={(e) => setCpu(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="upd-mem">Memory (MB)</Label>
+              <Input
+                id="upd-mem"
+                type="number"
+                step="64"
+                min="0"
+                value={memoryMb}
+                onChange={(e) => setMemoryMb(e.target.value)}
+              />
+            </div>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="upd-repo">Git repository</Label>
+              <Input
+                id="upd-repo"
+                className="font-mono"
+                value={gitRepository}
+                onChange={(e) => setGitRepository(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="upd-branch">Git branch</Label>
+              <Input
+                id="upd-branch"
+                className="font-mono"
+                value={gitBranch}
+                onChange={(e) => setGitBranch(e.target.value)}
+              />
+            </div>
+          </div>
+          <div className="flex justify-end">
+            <Button type="submit" loading={saving} disabled={!activeOrgId}>
+              Save configuration
+            </Button>
+          </div>
+        </form>
+      </CardContent>
+    </Card>
+  );
+}
+
+function ScaleCard({
+  appId,
+  onScaled,
+}: {
+  appId: string;
+  onScaled: () => void;
+}) {
+  const { activeOrgId, authedCall } = useAuth();
+  const [minReplicas, setMin] = useState("");
+  const [maxReplicas, setMax] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [notice, setNotice] = useState<{
+    variant: "success" | "error";
+    msg: string;
+  } | null>(null);
+
+  async function onScale(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (!activeOrgId) {
+      setNotice({ variant: "error", msg: "No active organization." });
+      return;
+    }
+    const input: Parameters<typeof api.scaleApp>[2] = {};
+    if (minReplicas !== "") input.minReplicas = Number(minReplicas);
+    if (maxReplicas !== "") input.maxReplicas = Number(maxReplicas);
+    if (input.minReplicas === undefined && input.maxReplicas === undefined) {
+      setNotice({
+        variant: "error",
+        msg: "Set a min and/or max replica count.",
+      });
+      return;
+    }
+    setSaving(true);
+    setNotice(null);
+    try {
+      await authedCall((token, on) =>
+        api.scaleApp(activeOrgId, appId, input, token, on),
+      );
+      setNotice({ variant: "success", msg: "Scaling applied." });
+      onScaled();
+    } catch (err) {
+      setNotice({
+        variant: "error",
+        msg: errorMessage(err, "Couldn't scale the app."),
+      });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Scaling</CardTitle>
+      </CardHeader>
+      <CardContent>
+        {notice && (
+          <Notice variant={notice.variant} className="mb-4">
+            {notice.msg}
+          </Notice>
+        )}
+        <form
+          onSubmit={onScale}
+          className="grid gap-4 sm:grid-cols-[1fr_1fr_auto] sm:items-end"
+        >
+          <div className="space-y-2">
+            <Label htmlFor="scale-min">Min replicas</Label>
+            <Input
+              id="scale-min"
+              type="number"
+              min="0"
+              placeholder="1"
+              value={minReplicas}
+              onChange={(e) => setMin(e.target.value)}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="scale-max">Max replicas</Label>
+            <Input
+              id="scale-max"
+              type="number"
+              min="0"
+              placeholder="3"
+              value={maxReplicas}
+              onChange={(e) => setMax(e.target.value)}
+            />
+          </div>
+          <Button type="submit" loading={saving} disabled={!activeOrgId}>
+            Apply
+          </Button>
+        </form>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -1053,32 +1780,155 @@ function InfoCard({
   );
 }
 
-function MetricCard({
-  title,
+// Copy-to-clipboard button with a brief "copied" confirmation. Self-contained so
+// it can sit next to any value (DNS records, connection strings, tokens).
+function CopyButton({
   value,
-  data,
-  color,
+  label = "Copy",
+  className,
 }: {
-  title: string;
   value: string;
-  data: number[];
-  color: string;
+  label?: string;
+  className?: string;
 }) {
+  const [copied, setCopied] = useState(false);
+  async function onCopy() {
+    try {
+      if (typeof navigator !== "undefined" && navigator.clipboard) {
+        await navigator.clipboard.writeText(value);
+      }
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      setCopied(false);
+    }
+  }
   return (
-    <Card className="p-5">
-      <div className="flex items-center justify-between">
-        <p className="text-sm text-muted-foreground">{title}</p>
-        <p className="text-2xl font-semibold tracking-tight">{value}</p>
-      </div>
-      <div className="mt-4">
-        <Sparkline data={data} stroke={color} />
-      </div>
+    <Button
+      type="button"
+      variant="secondary"
+      size="sm"
+      onClick={onCopy}
+      className={className}
+      aria-label={label}
+    >
+      {copied ? (
+        <Check className="h-3.5 w-3.5" />
+      ) : (
+        <Copy className="h-3.5 w-3.5" />
+      )}
+      {copied ? "Copied" : label}
+    </Button>
+  );
+}
+
+function DomainStatusBadge({ status }: { status: string }) {
+  if (status === "verified") {
+    return (
+      <Badge variant="success">
+        <ShieldCheck className="mr-1 h-3 w-3" />
+        Verified
+      </Badge>
+    );
+  }
+  if (status === "failed") {
+    return (
+      <Badge variant="destructive">
+        <ShieldAlert className="mr-1 h-3 w-3" />
+        Failed
+      </Badge>
+    );
+  }
+  return (
+    <Badge variant="warning">
+      <ShieldAlert className="mr-1 h-3 w-3" />
+      Pending
+    </Badge>
+  );
+}
+
+// Shows the exact DNS records to publish for a custom domain: the TXT ownership
+// challenge and the A/CNAME target, each with copy buttons.
+function DomainInstructionsCard({
+  result,
+  onDismiss,
+}: {
+  result: DomainResult;
+  onDismiss: () => void;
+}) {
+  const ins = result.instructions;
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center justify-between">
+          <CardTitle>DNS records for {result.domain}</CardTitle>
+          <Button variant="ghost" size="sm" onClick={onDismiss}>
+            Dismiss
+          </Button>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4 text-sm">
+        <p className="text-muted-foreground">
+          Publish these records at your DNS provider, then click Verify. The
+          domain is not routed or issued TLS until ownership is proven.
+        </p>
+        <DnsRecordRow
+          label="TXT (ownership challenge)"
+          name={ins.txtName}
+          value={ins.txtValue}
+        />
+        <DnsRecordRow
+          label={`${ins.targetType || "CNAME"} (traffic target)`}
+          name={result.domain}
+          value={ins.targetValue}
+        />
+      </CardContent>
     </Card>
   );
 }
 
-function last(data: number[]): number {
-  return data.length ? data[data.length - 1] : 0;
+function DnsRecordRow({
+  label,
+  name,
+  value,
+}: {
+  label: string;
+  name: string;
+  value: string;
+}) {
+  return (
+    <div className="space-y-1.5 rounded-lg border border-border p-3">
+      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+        {label}
+      </p>
+      <div className="flex items-center gap-2">
+        <code className="min-w-0 flex-1 truncate rounded bg-surface-2 px-2 py-1 font-mono text-xs">
+          {name}
+        </code>
+        <span className="text-muted-foreground">→</span>
+        <code className="min-w-0 flex-1 truncate rounded bg-surface-2 px-2 py-1 font-mono text-xs">
+          {value}
+        </code>
+        <CopyButton value={value} />
+      </div>
+    </div>
+  );
+}
+
+// Format a millicores integer as cores (e.g. 1500m -> "1.5 cores", 250m -> "250m").
+function formatMillicores(m: number): string {
+  if (m >= 1000) return `${(m / 1000).toFixed(2).replace(/\.?0+$/, "")} cores`;
+  return `${m}m`;
+}
+
+// Format a byte count as a human-readable MiB/GiB string.
+function formatBytes(b: number): string {
+  if (b <= 0) return "0 B";
+  const gib = b / 1024 ** 3;
+  if (gib >= 1) return `${gib.toFixed(2).replace(/\.?0+$/, "")} GiB`;
+  const mib = b / 1024 ** 2;
+  if (mib >= 1) return `${mib.toFixed(1).replace(/\.0$/, "")} MiB`;
+  return `${(b / 1024).toFixed(0)} KiB`;
 }
 
 // Map a single log line to its level color class in one pass.

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/domain"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/retryx"
 )
 
 // StripeProvider talks to the Stripe REST API directly (no SDK dependency).
@@ -22,6 +23,11 @@ type StripeProvider struct {
 	successURL string
 	cancelURL  string
 	httpClient *http.Client
+	// baseURL is the Stripe API root; overridable in tests (default the live API).
+	baseURL string
+	// retry bounds the per-request retry-with-backoff for TRANSIENT failures
+	// (network errors and 5xx); a 4xx is terminal and never retried.
+	retry retryx.Policy
 }
 
 // NewStripeProvider builds a Stripe-backed payment provider.
@@ -31,31 +37,73 @@ func NewStripeProvider(secretKey, successURL, cancelURL string) *StripeProvider 
 		successURL: successURL,
 		cancelURL:  cancelURL,
 		httpClient: &http.Client{Timeout: 20 * time.Second},
+		baseURL:    "https://api.stripe.com/v1",
+		retry:      retryx.DefaultPolicy(),
 	}
 }
 
 func (s *StripeProvider) Name() string { return "stripe" }
 
+// apiBase returns the Stripe API root, defaulting to the live API when unset (so a
+// zero-value provider built outside the constructor still targets Stripe).
+func (s *StripeProvider) apiBase() string {
+	if s.baseURL == "" {
+		return "https://api.stripe.com/v1"
+	}
+	return s.baseURL
+}
+
+// post issues a Stripe API call with a bounded retry-with-backoff. A network
+// error or a 5xx response is TRANSIENT and retried (with exponential backoff +
+// jitter from s.retry, honoring ctx cancellation); a 4xx response is a TERMINAL
+// client error (bad request / auth / not-found) and is returned immediately
+// without further attempts. Stripe writes are idempotent-safe to retry on a
+// transient failure (a failed request either did not reach Stripe or did not
+// complete); for stricter guarantees an Idempotency-Key could be added later.
 func (s *StripeProvider) post(ctx context.Context, path string, form url.Values, out any) error {
+	body := form.Encode()
+	return retryx.Do(ctx, s.retry, func(ctx context.Context) error {
+		return s.postOnce(ctx, path, body, out)
+	})
+}
+
+// postOnce performs a single Stripe round-trip. It returns nil on success, a
+// retryx.Terminal-wrapped error for a non-retryable failure (4xx, an unparseable
+// success body, a request-build error), or a bare error for a TRANSIENT failure
+// (network error, 5xx) so retryx backs off and retries.
+func (s *StripeProvider) postOnce(ctx context.Context, path, body string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"https://api.stripe.com/v1"+path, strings.NewReader(form.Encode()))
+		s.apiBase()+path, strings.NewReader(body))
 	if err != nil {
-		return err
+		// A malformed request is not going to fix itself on retry.
+		return retryx.Terminal(err)
 	}
 	req.Header.Set("Authorization", "Bearer "+s.secretKey)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
+		// A context cancellation/deadline is terminal (don't keep retrying a
+		// cancelled call); any other transport error is transient and retryable.
+		if ctx.Err() != nil {
+			return retryx.Terminal(err)
+		}
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("stripe: status %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+		statusErr := fmt.Errorf("stripe: status %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+		// 5xx and 429 (rate-limit) are transient; 4xx (other than 429) is terminal.
+		if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
+			return statusErr
+		}
+		return retryx.Terminal(statusErr)
 	}
 	if out != nil {
-		return json.Unmarshal(data, out)
+		if err := json.Unmarshal(data, out); err != nil {
+			return retryx.Terminal(err)
+		}
 	}
 	return nil
 }

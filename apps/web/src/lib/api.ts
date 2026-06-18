@@ -92,6 +92,13 @@ export interface App {
   createdAt: string;
 }
 
+// GET /apps/{id} returns the app fields top-level plus the currently-active
+// release alongside them (Release is defined below). currentRelease is omitted
+// when the app has never deployed.
+export interface AppDetail extends App {
+  currentRelease?: Release;
+}
+
 // Service is a one-click catalog instance (WordPress, a database, etc.) owned by
 // an organization and grouped under a project. Mirrors domain.Service.
 export interface Service {
@@ -116,10 +123,35 @@ export type DatabaseEngine = string;
 export interface Database {
   id: string;
   orgId: string;
+  projectId?: string;
   name: string;
   engine: DatabaseEngine;
+  cpu?: number;
+  memoryMb?: number;
+  storageGb?: number;
   status: string;
+  namespace?: string;
+  release?: string;
+  host?: string;
   createdAt: string;
+}
+
+// In-cluster connection info for a managed database. Databases are internal-only
+// (ClusterIP), so `host` is the cluster service DNS — reachable from the org's
+// own workloads, not the public internet. The password is exposed ONLY here.
+export interface DatabaseConnInfo {
+  host: string;
+  port: number;
+  database: string;
+  username: string;
+  password: string;
+  connectionString: string;
+}
+
+// GET /orgs/{org}/databases/{id} returns the database fields flattened top-level
+// plus its `connection` block.
+export interface DatabaseDetail extends Database {
+  connection: DatabaseConnInfo;
 }
 
 export interface Plan {
@@ -211,6 +243,15 @@ export interface BillingResponse {
   // usage and the hourly pricing components. Optional: older API builds omit it.
   estimatedMonthlyCents?: number;
   currency?: string;
+  // Current-period charge breakdown (all whole cents, in the plan currency):
+  // baseCents = plan base price; overageCents = overage beyond included hours;
+  // usageSoFarCents = metered compute cost so far this period; chargeCents =
+  // base + overage (the projected invoice). periodStart is the period start.
+  baseCents?: number;
+  overageCents?: number;
+  usageSoFarCents?: number;
+  chargeCents?: number;
+  periodStart?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -324,16 +365,211 @@ export interface InviteInput {
   projectId?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Personal access tokens (PAT)
+// ---------------------------------------------------------------------------
+
+// The safe listing shape — NEVER carries the secret, only the display prefix.
+export interface ApiToken {
+  id: string;
+  name: string;
+  // First few chars of the plaintext (e.g. "vrt_ab12") for human recognition.
+  prefix: string;
+  scopes: string[];
+  expiresAt?: string | null;
+  lastUsedAt?: string | null;
+  createdAt: string;
+}
+
+// The create-only response: identical to ApiToken plus the one-time plaintext
+// `token` (shown ONCE; never returned again).
+export interface CreatedApiToken extends ApiToken {
+  token: string;
+}
+
+export interface CreateTokenInput {
+  name: string;
+  scopes?: string[];
+  // 0/undefined = never expires (capped server-side).
+  expiresInDays?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Audit log
+// ---------------------------------------------------------------------------
+
+export interface AuditEvent {
+  id: string;
+  orgId?: string;
+  actorUserId?: string;
+  actorEmail?: string;
+  action: string;
+  targetType?: string;
+  targetId?: string;
+  metadata?: string;
+  at: string;
+}
+
 export interface EnvVar {
   key: string;
   value: string;
+  // True when the value is stored as a secret. The API NEVER returns the value
+  // of a secret (it comes back empty/masked); only the key + this flag.
+  secret?: boolean;
 }
+
+// Payload for PUT .../env. `secret: true` stores the value encrypted-at-rest and
+// the API will never echo the value back on subsequent lists.
+export interface SetEnvInput {
+  key: string;
+  value: string;
+  secret?: boolean;
+}
+
+// DomainStatus mirrors the backend lifecycle: pending (awaiting DNS TXT),
+// verified (ownership proven, routed + TLS), failed (last check didn't match).
+export type DomainStatus = "pending" | "verified" | "failed";
 
 export interface Domain {
   id: string;
+  orgId?: string;
+  appId?: string;
   domain: string;
+  // `verified` is a convenience mirror of `status === "verified"`.
   verified: boolean;
+  status?: DomainStatus;
+  verificationToken?: string;
+  verifiedAt?: string;
+  createdAt?: string;
 }
+
+// The exact DNS records the user must publish to (a) prove ownership via the TXT
+// challenge and (b) point traffic at the platform (A or CNAME). Returned on
+// add-domain and verify so the flow is self-documenting.
+export interface DomainInstructions {
+  verificationToken: string;
+  txtName: string;
+  txtValue: string;
+  // "A" when an explicit Gateway LB host/IP is configured, else "CNAME".
+  targetType: string;
+  targetValue: string;
+}
+
+// AddDomain / VerifyDomain return the domain record flattened top-level plus the
+// DNS `instructions` block alongside it.
+export interface DomainResult extends Domain {
+  instructions: DomainInstructions;
+}
+
+// ---------------------------------------------------------------------------
+// Releases (deploy history) + rollback
+// ---------------------------------------------------------------------------
+
+export type ReleaseStatus =
+  | "deploying"
+  | "active"
+  | "failed"
+  | "superseded"
+  | "rolled_back";
+
+export interface Release {
+  id: string;
+  appId: string;
+  orgId: string;
+  revision: number;
+  image: string;
+  gitRef?: string;
+  configHash?: string;
+  cpu: number;
+  memoryMb: number;
+  status: ReleaseStatus;
+  note?: string;
+  createdAt: string;
+}
+
+// ---------------------------------------------------------------------------
+// Builds (git-source image builds)
+// ---------------------------------------------------------------------------
+
+export type BuildStatus = "pending" | "building" | "succeeded" | "failed";
+
+export interface Build {
+  id: string;
+  appId: string;
+  orgId: string;
+  status: BuildStatus;
+  commitRef?: string;
+  image?: string;
+  logs?: string;
+  createdAt: string;
+  finishedAt?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Pagination
+// ---------------------------------------------------------------------------
+
+// The pagination block returned alongside growth-prone list endpoints.
+export interface PageMeta {
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+  nextOffset?: number;
+  total?: number;
+}
+
+export interface PagedResponse<T> {
+  data: T[];
+  page: PageMeta;
+}
+
+export interface PageParams {
+  limit?: number;
+  offset?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Update / scale app
+// ---------------------------------------------------------------------------
+
+// All fields optional: PATCH /apps/{id} only applies the ones supplied.
+export interface UpdateAppInput {
+  image?: string;
+  cpu?: number;
+  memoryMb?: number;
+  gitRepository?: string;
+  gitBranch?: string;
+}
+
+export interface ScaleAppInput {
+  minReplicas?: number;
+  maxReplicas?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Live pod metrics (metrics-server snapshot)
+// ---------------------------------------------------------------------------
+
+export interface PodMetric {
+  pod: string;
+  cpuMillicores: number;
+  memoryBytes: number;
+}
+
+// A LIVE point-in-time snapshot from the cluster metrics-server. When
+// `available` is false the data is honestly absent (never synthesized);
+// `unavailable` explains why.
+export interface PodMetrics {
+  available: boolean;
+  unavailable?: string;
+  pods: PodMetric[];
+  cpuMillicores: number;
+  memoryBytes: number;
+}
+
+// ---------------------------------------------------------------------------
+// Legacy time-series metrics (kept for the dashboard sparklines / demo)
+// ---------------------------------------------------------------------------
 
 export interface MetricPoint {
   t: string;
@@ -467,6 +703,112 @@ export function buildUrl(path: string): string {
   const suffix = path.startsWith("/") ? path : `/${path}`;
   // When unconfigured, base is "" — yielding a same-origin relative URL.
   return `${base}${suffix}`;
+}
+
+/** Build a `?limit=&offset=` suffix from pagination params (empty when absent). */
+export function pageQuery(p?: PageParams): string {
+  const q = new URLSearchParams();
+  if (p?.limit !== undefined) q.set("limit", String(p.limit));
+  if (p?.offset !== undefined) q.set("offset", String(p.offset));
+  const s = q.toString();
+  return s ? `?${s}` : "";
+}
+
+/**
+ * Absolute URL of the live SSE log stream for an app (`?follow=true`). The stream
+ * is consumed via a fetch reader rather than EventSource so the request carries
+ * the auth cookies (`credentials: "include"`) — EventSource cannot. See
+ * {@link streamAppLogs}.
+ */
+export function appLogStreamUrl(orgId: string, appId: string): string {
+  return buildUrl(`/v1/orgs/${orgId}/apps/${appId}/logs?follow=true`);
+}
+
+/**
+ * Open the live app log SSE stream and invoke `onLine` for each streamed log
+ * line. Uses fetch + a streaming reader (not EventSource) so the HttpOnly auth
+ * cookies are sent. Returns a disposer that aborts the underlying request; call
+ * it on unmount to close the stream and avoid a leak.
+ *
+ * Lines arrive as Server-Sent Events (`data: <line>\n\n`); this parser extracts
+ * the payload of each `data:` field. An `event: error` frame is surfaced via the
+ * optional `onError` callback. The stream is best-effort: transport failures
+ * (including a deliberate abort) resolve quietly rather than throwing.
+ */
+export function streamAppLogs(
+  orgId: string,
+  appId: string,
+  onLine: (line: string) => void,
+  onError?: (message: string) => void,
+): () => void {
+  const controller = new AbortController();
+
+  void (async () => {
+    if (!API_BASE_URL_CONFIGURED) {
+      onError?.("The API base URL is not configured.");
+      return;
+    }
+    let res: Response;
+    try {
+      res = await fetch(appLogStreamUrl(orgId, appId), {
+        headers: { Accept: "text/event-stream" },
+        credentials: "include",
+        signal: controller.signal,
+      });
+    } catch {
+      if (!controller.signal.aborted) onError?.("Log stream unavailable.");
+      return;
+    }
+    if (!res.ok || !res.body) {
+      onError?.(`Log stream failed (${res.status}).`);
+      return;
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        // SSE frames are separated by a blank line.
+        let sep: number;
+        while ((sep = buf.indexOf("\n\n")) >= 0) {
+          const frame = buf.slice(0, sep);
+          buf = buf.slice(sep + 2);
+          parseSseFrame(frame, onLine, onError);
+        }
+      }
+    } catch {
+      // Aborted (unmount) or transport drop — both are normal stop conditions.
+    }
+  })();
+
+  return () => controller.abort();
+}
+
+// Parse one SSE frame: collect `data:` field payloads as a line; an `event:
+// error` frame routes its data to onError instead.
+function parseSseFrame(
+  frame: string,
+  onLine: (line: string) => void,
+  onError?: (message: string) => void,
+): void {
+  let isError = false;
+  const dataParts: string[] = [];
+  for (const raw of frame.split("\n")) {
+    const line = raw.replace(/\r$/, "");
+    if (line.startsWith("event:")) {
+      if (line.slice(6).trim() === "error") isError = true;
+    } else if (line.startsWith("data:")) {
+      dataParts.push(line.slice(5).replace(/^ /, ""));
+    }
+  }
+  if (dataParts.length === 0) return;
+  const payload = dataParts.join("\n");
+  if (isError) onError?.(payload);
+  else onLine(payload);
 }
 
 async function request<T>(
@@ -662,8 +1004,109 @@ export const api = {
     token: string,
     onUnauthorized?: OnUnauthorized,
     opts?: CallOpts,
+  ): Promise<AppDetail> {
+    return request<AppDetail>(`/v1/orgs/${orgId}/apps/${appId}`, {
+      token,
+      onUnauthorized,
+      signal: opts?.signal,
+    });
+  },
+
+  // PATCH /apps/{id}: update the image, requested resources, or git source. Only
+  // the supplied fields are applied. Returns the updated app.
+  updateApp(
+    orgId: string,
+    appId: string,
+    input: UpdateAppInput,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
   ): Promise<App> {
     return request<App>(`/v1/orgs/${orgId}/apps/${appId}`, {
+      method: "PATCH",
+      body: input,
+      token,
+      onUnauthorized,
+      signal: opts?.signal,
+    });
+  },
+
+  // POST /apps/{id}/scale: set the autoscaling replica bounds. Returns the app
+  // (HTTP 202 Accepted).
+  scaleApp(
+    orgId: string,
+    appId: string,
+    input: ScaleAppInput,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<App> {
+    return request<App>(`/v1/orgs/${orgId}/apps/${appId}/scale`, {
+      method: "POST",
+      body: input,
+      token,
+      onUnauthorized,
+      signal: opts?.signal,
+    });
+  },
+
+  // GET /apps/{id}/releases: the app's deploy history (newest first), paginated.
+  listReleases(
+    orgId: string,
+    appId: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts & PageParams,
+  ): Promise<PagedResponse<Release>> {
+    return request<PagedResponse<Release>>(
+      `/v1/orgs/${orgId}/apps/${appId}/releases${pageQuery(opts)}`,
+      { token, onUnauthorized, signal: opts?.signal },
+    );
+  },
+
+  // POST /apps/{id}/rollback: redeploy a prior release. `revision` 0/undefined
+  // rolls back to the previous release. Returns the app (HTTP 202 Accepted).
+  rollbackApp(
+    orgId: string,
+    appId: string,
+    revision: number | undefined,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<App> {
+    return request<App>(`/v1/orgs/${orgId}/apps/${appId}/rollback`, {
+      method: "POST",
+      body: revision ? { revision } : {},
+      token,
+      onUnauthorized,
+      signal: opts?.signal,
+    });
+  },
+
+  // GET /apps/{id}/builds: git-source image build history, paginated.
+  listBuilds(
+    orgId: string,
+    appId: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts & PageParams,
+  ): Promise<PagedResponse<Build>> {
+    return request<PagedResponse<Build>>(
+      `/v1/orgs/${orgId}/apps/${appId}/builds${pageQuery(opts)}`,
+      { token, onUnauthorized, signal: opts?.signal },
+    );
+  },
+
+  // GET /apps/{id}/builds/{buildId}: one build, including its captured logs.
+  getBuild(
+    orgId: string,
+    appId: string,
+    buildId: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<Build> {
+    return request<Build>(`/v1/orgs/${orgId}/apps/${appId}/builds/${buildId}`, {
       token,
       onUnauthorized,
       signal: opts?.signal,
@@ -888,6 +1331,67 @@ export const api = {
     });
   },
 
+  // GET /orgs/{org}/databases/{id}: one database plus its in-cluster connection
+  // info (host/port/database/username/password/connectionString). This is the
+  // ONLY endpoint that returns the password.
+  getDatabase(
+    orgId: string,
+    databaseId: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<DatabaseDetail> {
+    return request<DatabaseDetail>(
+      `/v1/orgs/${orgId}/databases/${databaseId}`,
+      {
+        token,
+        onUnauthorized,
+        signal: opts?.signal,
+      },
+    );
+  },
+
+  deployDatabase(
+    orgId: string,
+    databaseId: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<Database> {
+    return request<Database>(
+      `/v1/orgs/${orgId}/databases/${databaseId}/deploy`,
+      { method: "POST", token, onUnauthorized, signal: opts?.signal },
+    );
+  },
+
+  stopDatabase(
+    orgId: string,
+    databaseId: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<Database> {
+    return request<Database>(`/v1/orgs/${orgId}/databases/${databaseId}/stop`, {
+      method: "POST",
+      token,
+      onUnauthorized,
+      signal: opts?.signal,
+    });
+  },
+
+  restartDatabase(
+    orgId: string,
+    databaseId: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<Database> {
+    return request<Database>(
+      `/v1/orgs/${orgId}/databases/${databaseId}/restart`,
+      { method: "POST", token, onUnauthorized, signal: opts?.signal },
+    );
+  },
+
   deleteDatabase(
     orgId: string,
     databaseId: string,
@@ -1081,10 +1585,12 @@ export const api = {
     );
   },
 
+  // PUT .../env: set a variable. Pass `secret: true` to store it encrypted; the
+  // API will never echo a secret value back on subsequent lists.
   setEnv(
     orgId: string,
     appId: string,
-    input: EnvVar,
+    input: SetEnvInput,
     token: string,
     onUnauthorized?: OnUnauthorized,
     opts?: CallOpts,
@@ -1126,6 +1632,9 @@ export const api = {
     );
   },
 
+  // POST .../domains: attach a custom domain. The response carries the DNS
+  // `instructions` (TXT challenge + A/CNAME target) the user must publish before
+  // verifying. The domain starts `pending` and is not routed until verified.
   addDomain(
     orgId: string,
     appId: string,
@@ -1133,14 +1642,31 @@ export const api = {
     token: string,
     onUnauthorized?: OnUnauthorized,
     opts?: CallOpts,
-  ): Promise<Domain> {
-    return request<Domain>(`/v1/orgs/${orgId}/apps/${appId}/domains`, {
+  ): Promise<DomainResult> {
+    return request<DomainResult>(`/v1/orgs/${orgId}/apps/${appId}/domains`, {
       method: "POST",
       body: { domain },
       token,
       onUnauthorized,
       signal: opts?.signal,
     });
+  },
+
+  // POST .../domains/{id}/verify: look up the DNS TXT challenge and mark the
+  // domain verified (and route it) on match, else failed. Returns the updated
+  // domain plus the (re-)instructions.
+  verifyDomain(
+    orgId: string,
+    appId: string,
+    domainId: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<DomainResult> {
+    return request<DomainResult>(
+      `/v1/orgs/${orgId}/apps/${appId}/domains/${domainId}/verify`,
+      { method: "POST", token, onUnauthorized, signal: opts?.signal },
+    );
   },
 
   deleteDomain(
@@ -1157,15 +1683,17 @@ export const api = {
     );
   },
 
-  // App metrics (org-scoped)
+  // App metrics (org-scoped). The backend returns a LIVE pod metrics snapshot
+  // (PodMetrics) — `available: false` means metrics-server is unavailable or the
+  // app is not deployed; the UI must render an honest empty state, never fake it.
   getMetrics(
     orgId: string,
     appId: string,
     token: string,
     onUnauthorized?: OnUnauthorized,
     opts?: CallOpts,
-  ): Promise<AppMetrics> {
-    return request<AppMetrics>(`/v1/orgs/${orgId}/apps/${appId}/metrics`, {
+  ): Promise<PodMetrics> {
+    return request<PodMetrics>(`/v1/orgs/${orgId}/apps/${appId}/metrics`, {
       token,
       onUnauthorized,
       signal: opts?.signal,
@@ -1444,6 +1972,78 @@ export const api = {
       onUnauthorized,
       signal: opts?.signal,
     });
+  },
+
+  // -------------------------------------------------------------------------
+  // Personal access tokens (PAT) — /v1/tokens. The plaintext `vrt_` token is
+  // returned ONCE on create; listing never leaks the secret.
+  // -------------------------------------------------------------------------
+  listTokens(
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<ListResponse<ApiToken>> {
+    return request<ListResponse<ApiToken>>("/v1/tokens", {
+      token,
+      onUnauthorized,
+      signal: opts?.signal,
+    });
+  },
+
+  createToken(
+    input: CreateTokenInput,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<CreatedApiToken> {
+    return request<CreatedApiToken>("/v1/tokens", {
+      method: "POST",
+      body: input,
+      token,
+      onUnauthorized,
+      signal: opts?.signal,
+    });
+  },
+
+  revokeToken(
+    id: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<void> {
+    return request<void>(`/v1/tokens/${id}`, {
+      method: "DELETE",
+      token,
+      onUnauthorized,
+      signal: opts?.signal,
+    });
+  },
+
+  // -------------------------------------------------------------------------
+  // Audit log. Platform-level (super-admin) and org-scoped (org admin+) listings
+  // are paginated (limit/offset, has-more).
+  // -------------------------------------------------------------------------
+  listAdminAudit(
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts & PageParams,
+  ): Promise<PagedResponse<AuditEvent>> {
+    return request<PagedResponse<AuditEvent>>(
+      `/v1/admin/audit${pageQuery(opts)}`,
+      { token, onUnauthorized, signal: opts?.signal },
+    );
+  },
+
+  listOrgAudit(
+    orgId: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts & PageParams,
+  ): Promise<PagedResponse<AuditEvent>> {
+    return request<PagedResponse<AuditEvent>>(
+      `/v1/orgs/${orgId}/audit${pageQuery(opts)}`,
+      { token, onUnauthorized, signal: opts?.signal },
+    );
   },
 };
 

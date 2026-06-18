@@ -194,6 +194,7 @@ func (s *Server) handleCreateAppInProject(w http.ResponseWriter, r *http.Request
 		BuildPack:     req.BuildPack,
 		CPU:           req.CPU,
 		MemoryMB:      req.MemoryMB,
+		Region:        req.Region,
 	})
 	if err != nil {
 		s.writePlatformError(w, "create app in project", err)

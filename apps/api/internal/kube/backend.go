@@ -53,6 +53,13 @@ type Workload struct {
 	ServiceTemplateKey string   // e.g. wordpress, redis, postgresql
 	Domains            []string // extra custom hostnames in addition to the generated host
 
+	// Region is the (already-validated) placement region for this workload. It is
+	// plumbed onto the rendered objects as a label (vortex.v60ai.com/region) and a
+	// pod annotation so a FUTURE multi-cluster router can place/route by region. A
+	// single cluster IGNORES it (no scheduling effect today). Empty leaves the
+	// region label/annotation off entirely.
+	Region string
+
 	// StorageGB is the persistent volume size (GiB) for a stateful (database)
 	// workload. When >0 and Kind=="database", buildValues renders a
 	// volumeClaimTemplate (data mount at the engine's data dir) with a RETAIN PVC

@@ -1,7 +1,15 @@
 "use client";
 
 import { useState, type FormEvent, type ReactNode } from "react";
-import { Check, Copy } from "lucide-react";
+import {
+  Check,
+  Copy,
+  KeyRound,
+  Trash2,
+  AlertTriangle,
+  ChevronLeft,
+  ChevronRight,
+} from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import {
   api,
@@ -9,7 +17,10 @@ import {
   computeHoursUsed,
   formatCents,
   formatHourlyPrice,
+  type ApiToken,
+  type AuditEvent,
   type BillingResponse,
+  type CreatedApiToken,
   type Invitation,
   type Member,
   type MemberRole,
@@ -40,7 +51,7 @@ import { Badge, type BadgeVariant } from "@/components/ui/badge";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Tabs } from "@/components/ui/tabs";
 
-const TABS = ["General", "Team", "Billing"] as const;
+const TABS = ["General", "Team", "Billing", "API Tokens", "Audit"] as const;
 type Tab = (typeof TABS)[number];
 
 // A transient action notice. The variant lets failed mutations render an honest
@@ -101,6 +112,8 @@ export default function SettingsPage() {
         {tab === "General" && <GeneralTab />}
         {tab === "Team" && <TeamTab />}
         {tab === "Billing" && <BillingTab />}
+        {tab === "API Tokens" && <TokensTab />}
+        {tab === "Audit" && <AuditTab />}
       </TabPanel>
     </div>
   );
@@ -734,6 +747,58 @@ const EMPTY_BILLING: BillingResponse = {
   usage: {},
 };
 
+// Current-period charge breakdown sourced from GET /orgs/{org}/billing. Renders
+// only when the API supplied the breakdown fields (older builds omit them).
+function ChargeBreakdownCard({ billing }: { billing: BillingResponse }) {
+  const hasBreakdown =
+    typeof billing.chargeCents === "number" ||
+    typeof billing.baseCents === "number";
+  if (!hasBreakdown) return null;
+
+  const currency = billing.currency ?? billing.plan?.currency;
+  const rows: { label: string; cents: number; strong?: boolean }[] = [];
+  if (typeof billing.baseCents === "number")
+    rows.push({ label: "Plan base", cents: billing.baseCents });
+  if (typeof billing.overageCents === "number")
+    rows.push({ label: "Overage", cents: billing.overageCents });
+  if (typeof billing.usageSoFarCents === "number")
+    rows.push({
+      label: "Metered usage so far",
+      cents: billing.usageSoFarCents,
+    });
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Current period charges</CardTitle>
+        <CardDescription>
+          {billing.periodStart
+            ? `Billing period since ${new Date(billing.periodStart).toLocaleDateString()}.`
+            : "Projected charges for the current billing period."}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-2 text-sm">
+        {rows.map((r) => (
+          <div key={r.label} className="flex items-center justify-between">
+            <span className="text-muted-foreground">{r.label}</span>
+            <span className="tabular-nums">
+              {formatCents(r.cents, currency)}
+            </span>
+          </div>
+        ))}
+        {typeof billing.chargeCents === "number" && (
+          <div className="flex items-center justify-between border-t border-border pt-2 font-medium">
+            <span className="text-foreground">Projected charge</span>
+            <span className="tabular-nums">
+              {formatCents(billing.chargeCents, currency)}
+            </span>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function BillingTab() {
   const { activeOrgId, authedCall } = useAuth();
   const [pendingPlan, setPendingPlan] = useState<string | null>(null);
@@ -871,6 +936,8 @@ function BillingTab() {
         </CardContent>
       </Card>
 
+      <ChargeBreakdownCard billing={billing} />
+
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {plans.map((plan) => {
           const isCurrent = plan.id === currentPlanId;
@@ -954,6 +1021,389 @@ function BillingTab() {
           </CardContent>
         </Card>
       )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// API tokens (personal access tokens) — /v1/tokens
+// ---------------------------------------------------------------------------
+
+function TokensTab() {
+  const { authedCall } = useAuth();
+
+  const { data, refetch, error } = useResource(
+    () => authedCall((token, on) => api.listTokens(token, on)),
+    { data: [] as ApiToken[] },
+    [],
+  );
+  const tokens = data.data;
+
+  const [name, setName] = useState("");
+  const [expiresInDays, setExpiresInDays] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [notice, setNotice] = useState<ActionNotice | null>(null);
+  // The one-time plaintext token, shown ONCE after creation then dismissable.
+  const [created, setCreated] = useState<CreatedApiToken | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [revoking, setRevoking] = useState<string | null>(null);
+  const [toRevoke, setToRevoke] = useState<ApiToken | null>(null);
+
+  async function onCreate(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    setCreating(true);
+    setNotice(null);
+    try {
+      const days =
+        expiresInDays.trim() === "" ? undefined : Number(expiresInDays);
+      const res = await authedCall((token, on) =>
+        api.createToken({ name: trimmed, expiresInDays: days }, token, on),
+      );
+      setCreated(res);
+      setName("");
+      setExpiresInDays("");
+      refetch();
+    } catch (err) {
+      setNotice(failureNotice(err, "Couldn't create the token."));
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  async function onRevoke() {
+    if (!toRevoke) return;
+    setRevoking(toRevoke.id);
+    setNotice(null);
+    try {
+      await authedCall((token, on) => api.revokeToken(toRevoke.id, token, on));
+      setToRevoke(null);
+      refetch();
+    } catch (err) {
+      setNotice(failureNotice(err, "Couldn't revoke the token."));
+    } finally {
+      setRevoking(null);
+    }
+  }
+
+  async function copyToken() {
+    if (!created) return;
+    try {
+      if (typeof navigator !== "undefined" && navigator.clipboard) {
+        await navigator.clipboard.writeText(created.token);
+      }
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      setCopied(false);
+    }
+  }
+
+  return (
+    <div className="space-y-6">
+      {notice && <Notice variant={notice.variant}>{notice.message}</Notice>}
+      {error && (
+        <Notice variant="error">
+          Couldn&apos;t load API tokens. Showing the last known values.
+        </Notice>
+      )}
+
+      {/* One-time secret display — the plaintext token is shown ONCE. */}
+      {created && (
+        <Card className="border-warning/40">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <AlertTriangle className="h-4 w-4 text-warning" />
+              Copy your new token now
+            </CardTitle>
+            <CardDescription>
+              This is the only time the token <strong>{created.name}</strong> is
+              shown. Store it securely — you won&apos;t be able to see it again.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="flex items-center gap-2">
+              <code className="min-w-0 flex-1 truncate rounded-md border border-border bg-surface-2 px-3 py-2 font-mono text-sm">
+                {created.token}
+              </code>
+              <Button variant="secondary" size="sm" onClick={copyToken}>
+                {copied ? (
+                  <Check className="h-3.5 w-3.5" />
+                ) : (
+                  <Copy className="h-3.5 w-3.5" />
+                )}
+                {copied ? "Copied" : "Copy"}
+              </Button>
+            </div>
+            <Button variant="ghost" size="sm" onClick={() => setCreated(null)}>
+              I&apos;ve stored it — dismiss
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Create a token</CardTitle>
+          <CardDescription className="mt-1">
+            Personal access tokens authenticate API/CLI requests as you. The
+            secret is shown only once on creation.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form
+            onSubmit={onCreate}
+            className="grid gap-4 sm:grid-cols-[1fr_180px_auto] sm:items-end"
+          >
+            <div className="space-y-2">
+              <Label htmlFor="token-name">Name</Label>
+              <Input
+                id="token-name"
+                placeholder="ci-deploy"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                required
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="token-expiry">Expires in (days, optional)</Label>
+              <Input
+                id="token-expiry"
+                type="number"
+                min="0"
+                placeholder="never"
+                value={expiresInDays}
+                onChange={(e) => setExpiresInDays(e.target.value)}
+              />
+            </div>
+            <Button type="submit" loading={creating}>
+              <KeyRound className="h-4 w-4" />
+              Create token
+            </Button>
+          </form>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Your tokens</CardTitle>
+        </CardHeader>
+        <CardContent className="p-0">
+          {tokens.length === 0 ? (
+            <p className="px-6 py-4 text-sm text-muted-foreground">
+              No API tokens yet.
+            </p>
+          ) : (
+            <ul className="divide-y divide-border">
+              {tokens.map((t) => (
+                <li
+                  key={t.id}
+                  className="flex items-center justify-between gap-4 px-6 py-4"
+                >
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium">{t.name}</p>
+                    <p className="truncate font-mono text-xs text-muted-foreground">
+                      {t.prefix}…
+                      {t.expiresAt
+                        ? ` · expires ${new Date(t.expiresAt).toLocaleDateString()}`
+                        : " · never expires"}
+                      {t.lastUsedAt
+                        ? ` · last used ${new Date(t.lastUsedAt).toLocaleDateString()}`
+                        : " · never used"}
+                    </p>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-destructive hover:text-destructive"
+                    loading={revoking === t.id}
+                    disabled={revoking !== null}
+                    onClick={() => setToRevoke(t)}
+                    aria-label={`Revoke ${t.name}`}
+                  >
+                    {revoking !== t.id && <Trash2 className="h-4 w-4" />}
+                    Revoke
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </CardContent>
+      </Card>
+
+      <ConfirmDialog
+        open={toRevoke !== null}
+        title="Revoke token?"
+        description={
+          toRevoke
+            ? `"${toRevoke.name}" will stop working immediately. Any client using it must be updated.`
+            : undefined
+        }
+        confirmLabel="Revoke"
+        destructive
+        loading={toRevoke ? revoking === toRevoke.id : false}
+        onConfirm={onRevoke}
+        onCancel={() => {
+          if (revoking === null) setToRevoke(null);
+        }}
+      />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Audit log viewer — org-scoped (org admin) or platform (super-admin)
+// ---------------------------------------------------------------------------
+
+const AUDIT_PAGE_SIZE = 25;
+
+function AuditTab() {
+  const { user, activeOrgId, authedCall } = useAuth();
+  // Super-admins can view the platform-wide trail; everyone else sees the org
+  // trail (org admin+). Default to the org scope when available.
+  const [scope, setScope] = useState<"org" | "platform">(
+    activeOrgId ? "org" : "platform",
+  );
+  const [offset, setOffset] = useState(0);
+
+  const fetcher =
+    scope === "platform"
+      ? user?.isAdmin
+        ? () =>
+            authedCall((token, on) =>
+              api.listAdminAudit(token, on, {
+                limit: AUDIT_PAGE_SIZE,
+                offset,
+              }),
+            )
+        : null
+      : activeOrgId
+        ? () =>
+            authedCall((token, on) =>
+              api.listOrgAudit(activeOrgId, token, on, {
+                limit: AUDIT_PAGE_SIZE,
+                offset,
+              }),
+            )
+        : null;
+
+  const { data, loading, error } = useResource(
+    fetcher,
+    {
+      data: [] as AuditEvent[],
+      page: { limit: AUDIT_PAGE_SIZE, offset, hasMore: false },
+    },
+    [scope, offset, activeOrgId, user?.isAdmin],
+  );
+
+  const events = data.data;
+  const hasMore = data.page.hasMore;
+
+  function changeScope(next: "org" | "platform") {
+    setScope(next);
+    setOffset(0);
+  }
+
+  return (
+    <div className="space-y-4">
+      {user?.isAdmin && (
+        <div className="flex items-center gap-2">
+          <Button
+            variant={scope === "org" ? "primary" : "secondary"}
+            size="sm"
+            disabled={!activeOrgId}
+            onClick={() => changeScope("org")}
+          >
+            This organization
+          </Button>
+          <Button
+            variant={scope === "platform" ? "primary" : "secondary"}
+            size="sm"
+            onClick={() => changeScope("platform")}
+          >
+            Platform-wide
+          </Button>
+        </div>
+      )}
+
+      {error && (
+        <Notice variant="error">Couldn&apos;t load the audit log.</Notice>
+      )}
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Audit log</CardTitle>
+          <CardDescription className="mt-1">
+            Privileged actions and auth events, newest first. Secret values are
+            never recorded.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="p-0">
+          {events.length === 0 ? (
+            <p className="px-6 py-4 text-sm text-muted-foreground">
+              {loading ? "Loading audit events…" : "No audit events."}
+            </p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-border text-left text-xs uppercase tracking-wide text-muted-foreground">
+                    <th className="px-6 py-3 font-medium">When</th>
+                    <th className="px-6 py-3 font-medium">Actor</th>
+                    <th className="px-6 py-3 font-medium">Action</th>
+                    <th className="px-6 py-3 font-medium">Target</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {events.map((e) => (
+                    <tr key={e.id} className="hover:bg-muted/40">
+                      <td className="whitespace-nowrap px-6 py-3 text-muted-foreground">
+                        {new Date(e.at).toLocaleString()}
+                      </td>
+                      <td className="px-6 py-3">
+                        {e.actorEmail || e.actorUserId || "—"}
+                      </td>
+                      <td className="px-6 py-3 font-mono text-xs">
+                        {e.action}
+                      </td>
+                      <td className="px-6 py-3 font-mono text-xs text-muted-foreground">
+                        {[e.targetType, e.targetId].filter(Boolean).join("/") ||
+                          "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <div className="flex items-center justify-between">
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled={offset === 0 || loading}
+          onClick={() => setOffset((o) => Math.max(0, o - AUDIT_PAGE_SIZE))}
+        >
+          <ChevronLeft className="h-3.5 w-3.5" />
+          Previous
+        </Button>
+        <span className="text-xs text-muted-foreground">
+          Showing {events.length === 0 ? 0 : offset + 1}–
+          {offset + events.length}
+        </span>
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled={!hasMore || loading}
+          onClick={() => setOffset((o) => o + AUDIT_PAGE_SIZE)}
+        >
+          Next
+          <ChevronRight className="h-3.5 w-3.5" />
+        </Button>
+      </div>
     </div>
   );
 }

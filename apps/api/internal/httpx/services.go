@@ -53,6 +53,7 @@ type createServiceRequest struct {
 	Image       string  `json:"image"`
 	CPU         float64 `json:"cpu"`
 	MemoryMB    int     `json:"memoryMb"`
+	Region      string  `json:"region"`
 }
 
 func (s *Server) handleCreateService(w http.ResponseWriter, r *http.Request) {
@@ -70,6 +71,7 @@ func (s *Server) handleCreateService(w http.ResponseWriter, r *http.Request) {
 		Image:       req.Image,
 		CPU:         req.CPU,
 		MemoryMB:    req.MemoryMB,
+		Region:      req.Region,
 	})
 	if err != nil {
 		s.writePlatformError(w, "create service", err)

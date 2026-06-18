@@ -813,7 +813,40 @@ func (b *KubeBackend) buildValues(w Workload, h string) map[string]any {
 	for k, v := range persistence {
 		values[k] = v
 	}
+
+	// Multi-region SEAM: stamp the (validated) region onto every rendered object via
+	// extraLabels (common-chart.labels), and onto the pods via podLabels + a pod
+	// annotation, so a FUTURE multi-cluster router can place/route by region. A single
+	// cluster ignores it (no scheduling effect today). Empty region => no label/annotation.
+	if region := sanitize(w.Region); region != "" {
+		values["extraLabels"] = map[string]any{regionLabelKey: region}
+		mergeStringMap(deployment, "podLabels", map[string]any{regionLabelKey: region})
+		mergeStringMap(deployment, "additionalPodAnnotations", map[string]any{regionAnnotationKey: w.Region})
+	}
+
 	return values
+}
+
+// regionLabelKey is the workload label carrying the placement region (the
+// multi-region seam). regionAnnotationKey carries the raw (un-sanitized) region
+// as a pod annotation for human/router consumption.
+const (
+	regionLabelKey      = "vortex.v60ai.com/region"
+	regionAnnotationKey = "vortex.v60ai.com/region"
+)
+
+// mergeStringMap merges add into the map stored at parent[key] (creating it if
+// absent), preserving any existing entries. Used to attach region label/annotation
+// without clobbering other values already set on the deployment block.
+func mergeStringMap(parent map[string]any, key string, add map[string]any) {
+	cur, _ := parent[key].(map[string]any)
+	if cur == nil {
+		cur = map[string]any{}
+	}
+	for k, v := range add {
+		cur[k] = v
+	}
+	parent[key] = cur
 }
 
 // buildPersistence renders the chart's StatefulSet persistence knobs for a

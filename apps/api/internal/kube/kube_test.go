@@ -177,6 +177,50 @@ func TestApplyOvercommitAndHost(t *testing.T) {
 	}
 }
 
+func TestApplyRegionLabelAndAnnotation(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	mh := &mockHelm{}
+	b := NewWithClient(testConfig(), cs, mh)
+
+	if _, _, err := b.Apply(context.Background(), Workload{
+		OrgSlug: "acme", ProjectSlug: "web", Name: "api", Kind: "app",
+		Image: "nginx:1", CPU: 0.25, MemoryMB: 128, Region: "nyc1",
+	}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	// Object-level region label via extraLabels (common-chart.labels).
+	el, ok := mh.lastValues["extraLabels"].(map[string]any)
+	if !ok || el[regionLabelKey] != "nyc1" {
+		t.Fatalf("extraLabels = %v, want %s=nyc1", mh.lastValues["extraLabels"], regionLabelKey)
+	}
+	dep := mh.lastValues["deployment"].(map[string]any)
+	pl, ok := dep["podLabels"].(map[string]any)
+	if !ok || pl[regionLabelKey] != "nyc1" {
+		t.Fatalf("deployment.podLabels = %v, want %s=nyc1", dep["podLabels"], regionLabelKey)
+	}
+	pa, ok := dep["additionalPodAnnotations"].(map[string]any)
+	if !ok || pa[regionAnnotationKey] != "nyc1" {
+		t.Fatalf("deployment.additionalPodAnnotations = %v, want %s=nyc1", dep["additionalPodAnnotations"], regionAnnotationKey)
+	}
+}
+
+func TestApplyNoRegionOmitsLabel(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	mh := &mockHelm{}
+	b := NewWithClient(testConfig(), cs, mh)
+
+	if _, _, err := b.Apply(context.Background(), Workload{
+		OrgSlug: "acme", ProjectSlug: "web", Name: "api", Kind: "app",
+		Image: "nginx:1", CPU: 0.25, MemoryMB: 128, // no Region
+	}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if _, ok := mh.lastValues["extraLabels"]; ok {
+		t.Fatalf("extraLabels should be absent when no region set, got %v", mh.lastValues["extraLabels"])
+	}
+}
+
 func TestApplyWordPress(t *testing.T) {
 	cs := fake.NewSimpleClientset()
 	mh := &mockHelm{}

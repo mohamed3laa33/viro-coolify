@@ -56,6 +56,8 @@ func (s *Server) writePlatformError(w http.ResponseWriter, action string, err er
 		writeError(w, http.StatusPaymentRequired, err.Error())
 	case errors.Is(err, platform.ErrInvalidTemplate):
 		writeError(w, http.StatusBadRequest, "unknown catalog template")
+	case errors.Is(err, platform.ErrInvalidRegion):
+		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, platform.ErrInvalidDomain):
 		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, platform.ErrDomainTaken):
@@ -81,6 +83,7 @@ type createAppRequest struct {
 	BuildPack     string  `json:"buildPack"`
 	CPU           float64 `json:"cpu"`
 	MemoryMB      int     `json:"memoryMb"`
+	Region        string  `json:"region"`
 }
 
 func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
@@ -138,6 +141,7 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		BuildPack:     req.BuildPack,
 		CPU:           req.CPU,
 		MemoryMB:      req.MemoryMB,
+		Region:        req.Region,
 	})
 	if err != nil {
 		s.writePlatformError(w, "create app", err)
@@ -426,6 +430,7 @@ type createDatabaseRequest struct {
 	CPU       float64 `json:"cpu"`
 	MemoryMB  int     `json:"memoryMb"`
 	StorageGB int     `json:"storageGb"`
+	Region    string  `json:"region"`
 }
 
 func (s *Server) handleListDatabases(w http.ResponseWriter, r *http.Request) {
@@ -480,6 +485,7 @@ func (s *Server) handleCreateDatabase(w http.ResponseWriter, r *http.Request) {
 		CPU:       req.CPU,
 		MemoryMB:  req.MemoryMB,
 		StorageGB: req.StorageGB,
+		Region:    req.Region,
 	})
 	if err != nil {
 		s.writePlatformError(w, "create database", err)

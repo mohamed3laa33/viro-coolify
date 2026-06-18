@@ -2,6 +2,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   api,
   buildUrl,
+  pageQuery,
+  appLogStreamUrl,
+  streamAppLogs,
   API_BASE_URL,
   computeHoursUsed,
   formatCents,
@@ -573,6 +576,398 @@ describe("admin api client", () => {
     await api.deletePricing("egress", "tok");
     expect(calls[0].url).toBe(`${API_BASE_URL}/v1/admin/pricing/egress`);
     expect(calls[0].init.method).toBe("DELETE");
+  });
+});
+
+describe("app detail: releases / rollback / scale / update / builds", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("lists releases with pagination params", async () => {
+    const calls = stubFetch({ data: [], page: { limit: 25, offset: 0 } });
+    await api.listReleases("org_1", "app_1", "tok", undefined, {
+      limit: 25,
+      offset: 50,
+    });
+    expect(calls[0].url).toBe(
+      `${API_BASE_URL}/v1/orgs/org_1/apps/app_1/releases?limit=25&offset=50`,
+    );
+    expect(calls[0].init.method).toBe("GET");
+  });
+
+  it("rolls back to a specific revision with a revision body", async () => {
+    const calls = stubFetch({ id: "app_1", status: "deploying" }, 202);
+    await api.rollbackApp("org_1", "app_1", 3, "tok");
+    expect(calls[0].url).toBe(
+      `${API_BASE_URL}/v1/orgs/org_1/apps/app_1/rollback`,
+    );
+    expect(calls[0].init.method).toBe("POST");
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({ revision: 3 });
+  });
+
+  it("rolls back to the previous release with an empty body when no revision", async () => {
+    const calls = stubFetch({ id: "app_1" }, 202);
+    await api.rollbackApp("org_1", "app_1", undefined, "tok");
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({});
+  });
+
+  it("scales an app via POST with the replica bounds", async () => {
+    const calls = stubFetch({ id: "app_1" }, 202);
+    await api.scaleApp(
+      "org_1",
+      "app_1",
+      { minReplicas: 1, maxReplicas: 5 },
+      "tok",
+    );
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/orgs/org_1/apps/app_1/scale`);
+    expect(calls[0].init.method).toBe("POST");
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({
+      minReplicas: 1,
+      maxReplicas: 5,
+    });
+  });
+
+  it("updates an app via PATCH with only the supplied fields", async () => {
+    const calls = stubFetch({ id: "app_1" });
+    await api.updateApp(
+      "org_1",
+      "app_1",
+      { image: "registry/app:v2", cpu: 2, memoryMb: 1024 },
+      "tok",
+    );
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/orgs/org_1/apps/app_1`);
+    expect(calls[0].init.method).toBe("PATCH");
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({
+      image: "registry/app:v2",
+      cpu: 2,
+      memoryMb: 1024,
+    });
+  });
+
+  it("lists builds and fetches a single build with its logs", async () => {
+    const calls = stubFetch({ data: [], page: { limit: 25, offset: 0 } });
+    await api.listBuilds("org_1", "app_1", "tok");
+    expect(calls[0].url).toBe(
+      `${API_BASE_URL}/v1/orgs/org_1/apps/app_1/builds`,
+    );
+
+    const calls2 = stubFetch({ id: "b_1", logs: "boom" });
+    const b = await api.getBuild("org_1", "app_1", "b_1", "tok");
+    expect(calls2[0].url).toBe(
+      `${API_BASE_URL}/v1/orgs/org_1/apps/app_1/builds/b_1`,
+    );
+    expect(b.logs).toBe("boom");
+  });
+
+  it("requests live pod metrics over the cookie session", async () => {
+    const calls = stubFetch({
+      available: true,
+      pods: [],
+      cpuMillicores: 250,
+      memoryBytes: 1048576,
+    });
+    const m = await api.getMetrics("org_1", "app_1", "tok");
+    expect(calls[0].url).toBe(
+      `${API_BASE_URL}/v1/orgs/org_1/apps/app_1/metrics`,
+    );
+    expect(m.available).toBe(true);
+    expect(m.cpuMillicores).toBe(250);
+  });
+});
+
+describe("env secrets + domains verify", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("sets an env var with the secret flag", async () => {
+    const calls = stubFetch({ key: "K", value: "", secret: true });
+    await api.setEnv(
+      "org_1",
+      "app_1",
+      { key: "K", value: "shh", secret: true },
+      "tok",
+    );
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/orgs/org_1/apps/app_1/env`);
+    expect(calls[0].init.method).toBe("PUT");
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({
+      key: "K",
+      value: "shh",
+      secret: true,
+    });
+  });
+
+  it("adds a domain and surfaces the returned DNS instructions", async () => {
+    const calls = stubFetch(
+      {
+        id: "dom_1",
+        domain: "acme.com",
+        verified: false,
+        status: "pending",
+        instructions: {
+          verificationToken: "tok123",
+          txtName: "_vortex-challenge.acme.com",
+          txtValue: "tok123",
+          targetType: "CNAME",
+          targetValue: "app.org.vortex.v60ai.com",
+        },
+      },
+      201,
+    );
+    const res = await api.addDomain("org_1", "app_1", "acme.com", "tok");
+    expect(calls[0].url).toBe(
+      `${API_BASE_URL}/v1/orgs/org_1/apps/app_1/domains`,
+    );
+    expect(res.instructions.txtName).toBe("_vortex-challenge.acme.com");
+    expect(res.instructions.targetType).toBe("CNAME");
+  });
+
+  it("verifies a domain via POST at the verify URL", async () => {
+    const calls = stubFetch({
+      id: "dom_1",
+      domain: "acme.com",
+      verified: true,
+      status: "verified",
+      instructions: {
+        verificationToken: "t",
+        txtName: "n",
+        txtValue: "v",
+        targetType: "A",
+        targetValue: "1.2.3.4",
+      },
+    });
+    const res = await api.verifyDomain("org_1", "app_1", "dom_1", "tok");
+    expect(calls[0].url).toBe(
+      `${API_BASE_URL}/v1/orgs/org_1/apps/app_1/domains/dom_1/verify`,
+    );
+    expect(calls[0].init.method).toBe("POST");
+    expect(res.status).toBe("verified");
+  });
+});
+
+describe("database connection info + lifecycle", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("fetches a database with its connection info", async () => {
+    const calls = stubFetch({
+      id: "db_1",
+      name: "primary",
+      engine: "postgresql",
+      status: "running",
+      createdAt: "2026-01-01T00:00:00Z",
+      connection: {
+        host: "db_1.ns.svc.cluster.local",
+        port: 5432,
+        database: "app",
+        username: "app",
+        password: "s3cr3t",
+        connectionString:
+          "postgres://app:s3cr3t@db_1.ns.svc.cluster.local:5432/app",
+      },
+    });
+    const detail = await api.getDatabase("org_1", "db_1", "tok");
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/orgs/org_1/databases/db_1`);
+    expect(detail.connection.host).toBe("db_1.ns.svc.cluster.local");
+    expect(detail.connection.password).toBe("s3cr3t");
+    expect(detail.connection.port).toBe(5432);
+  });
+
+  it("posts database lifecycle actions to the right endpoints", async () => {
+    const start = stubFetch({ id: "db_1", status: "running" });
+    await api.deployDatabase("org_1", "db_1", "tok");
+    expect(start[0].url).toBe(
+      `${API_BASE_URL}/v1/orgs/org_1/databases/db_1/deploy`,
+    );
+    expect(start[0].init.method).toBe("POST");
+
+    const stop = stubFetch({ id: "db_1", status: "stopped" });
+    await api.stopDatabase("org_1", "db_1", "tok");
+    expect(stop[0].url).toBe(
+      `${API_BASE_URL}/v1/orgs/org_1/databases/db_1/stop`,
+    );
+
+    const restart = stubFetch({ id: "db_1", status: "running" });
+    await api.restartDatabase("org_1", "db_1", "tok");
+    expect(restart[0].url).toBe(
+      `${API_BASE_URL}/v1/orgs/org_1/databases/db_1/restart`,
+    );
+  });
+});
+
+describe("personal access tokens (PAT)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("lists tokens without leaking a secret", async () => {
+    const calls = stubFetch({
+      data: [{ id: "t1", name: "ci", prefix: "vrt_ab12", scopes: [] }],
+    });
+    const res = await api.listTokens("tok");
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/tokens`);
+    expect(res.data[0].prefix).toBe("vrt_ab12");
+    // The listing shape carries no `token` (plaintext) field.
+    expect(
+      (res.data[0] as unknown as { token?: string }).token,
+    ).toBeUndefined();
+  });
+
+  it("creates a token and returns the one-time plaintext token", async () => {
+    const calls = stubFetch(
+      {
+        id: "t1",
+        name: "ci",
+        prefix: "vrt_ab12",
+        scopes: [],
+        createdAt: "2026-01-01T00:00:00Z",
+        token: "vrt_abcdef0123456789",
+      },
+      201,
+    );
+    const res = await api.createToken({ name: "ci", expiresInDays: 30 }, "tok");
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/tokens`);
+    expect(calls[0].init.method).toBe("POST");
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({
+      name: "ci",
+      expiresInDays: 30,
+    });
+    // The plaintext is present ONCE on the create response.
+    expect(res.token).toBe("vrt_abcdef0123456789");
+  });
+
+  it("revokes a token via DELETE at the id URL", async () => {
+    const calls = stubFetch({});
+    await api.revokeToken("t1", "tok");
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/tokens/t1`);
+    expect(calls[0].init.method).toBe("DELETE");
+  });
+});
+
+describe("audit log", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("lists platform audit with pagination params", async () => {
+    const calls = stubFetch({
+      data: [],
+      page: { limit: 25, offset: 0, hasMore: false },
+    });
+    await api.listAdminAudit("tok", undefined, { limit: 25, offset: 25 });
+    expect(calls[0].url).toBe(
+      `${API_BASE_URL}/v1/admin/audit?limit=25&offset=25`,
+    );
+  });
+
+  it("lists org audit under the org scope", async () => {
+    const calls = stubFetch({
+      data: [],
+      page: { limit: 25, offset: 0, hasMore: false },
+    });
+    await api.listOrgAudit("org_1", "tok", undefined, { limit: 10 });
+    expect(calls[0].url).toBe(`${API_BASE_URL}/v1/orgs/org_1/audit?limit=10`);
+  });
+});
+
+describe("pageQuery", () => {
+  it("builds an empty string when no params", () => {
+    expect(pageQuery()).toBe("");
+    expect(pageQuery({})).toBe("");
+  });
+  it("includes only the supplied params", () => {
+    expect(pageQuery({ limit: 25 })).toBe("?limit=25");
+    expect(pageQuery({ offset: 50 })).toBe("?offset=50");
+    expect(pageQuery({ limit: 25, offset: 50 })).toBe("?limit=25&offset=50");
+  });
+});
+
+describe("streamAppLogs (SSE)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("builds the follow stream URL", () => {
+    expect(appLogStreamUrl("org_1", "app_1")).toBe(
+      `${API_BASE_URL}/v1/orgs/org_1/apps/app_1/logs?follow=true`,
+    );
+  });
+
+  it("appends streamed lines from SSE data frames and sends cookies", async () => {
+    // A ReadableStream that emits two SSE data frames then closes.
+    const enc = new TextEncoder();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(enc.encode("data: line one\n\n"));
+        controller.enqueue(enc.encode("data: line two\n\n"));
+        controller.close();
+      },
+    });
+    let capturedInit: RequestInit | undefined;
+    const fn = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      capturedInit = init;
+      return new Response(body, {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    });
+    vi.stubGlobal("fetch", fn);
+
+    const lines: string[] = [];
+    await new Promise<void>((resolve) => {
+      streamAppLogs("org_1", "app_1", (line) => {
+        lines.push(line);
+        if (lines.length === 2) resolve();
+      });
+    });
+
+    expect(lines).toEqual(["line one", "line two"]);
+    // The stream must carry the HttpOnly auth cookies.
+    expect(capturedInit?.credentials).toBe("include");
+  });
+
+  it("routes an SSE error frame to onError", async () => {
+    const enc = new TextEncoder();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          enc.encode("event: error\ndata: log stream ended\n\n"),
+        );
+        controller.close();
+      },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(body, {
+            status: 200,
+            headers: { "Content-Type": "text/event-stream" },
+          }),
+      ),
+    );
+
+    const errors: string[] = [];
+    await new Promise<void>((resolve) => {
+      streamAppLogs(
+        "org_1",
+        "app_1",
+        () => {},
+        (msg) => {
+          errors.push(msg);
+          resolve();
+        },
+      );
+    });
+    expect(errors).toEqual(["log stream ended"]);
   });
 });
 
