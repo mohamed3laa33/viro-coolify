@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/billing"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/domain"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/kube"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/secrets"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/store"
@@ -170,5 +171,113 @@ func TestNoopCipherStoresSecretWithoutPanic(t *testing.T) {
 	got := svc.backend.(*kube.FakeBackend).AppSecrets[app.Namespace+"/"+appSecretName(app.ID)]
 	if got["K"] != "v" {
 		t.Fatalf("noop secret round-trip: %+v", got)
+	}
+}
+
+// TestDatabasePasswordEncryptedAtRestRoundTrip asserts the managed-DB credential
+// fix: under an ENABLED cipher the password is encrypted at rest in the store
+// (carries the "v1:" prefix, not the plaintext), yet every read path
+// (CreateDatabase return, the engine ENV, conn-info, and a re-read via
+// GetDatabaseDetail) returns the original usable plaintext.
+func TestDatabasePasswordEncryptedAtRestRoundTrip(t *testing.T) {
+	svc, fb := newSvcWithCipher(t)
+	ctx := context.Background()
+
+	db, err := svc.CreateDatabase(ctx, "org-1", CreateDatabaseInput{Name: "maindb", Engine: "postgresql"})
+	if err != nil {
+		t.Fatalf("create db: %v", err)
+	}
+	plaintext := db.Password
+	if plaintext == "" || len(plaintext) != 48 {
+		t.Fatalf("unexpected generated password %q", plaintext)
+	}
+
+	// At-rest value in the store must be ENCRYPTED, not the plaintext.
+	raw, err := svc.store.GetDatabase(ctx, db.ID)
+	if err != nil {
+		t.Fatalf("raw get: %v", err)
+	}
+	if raw.Password == plaintext {
+		t.Fatal("db password stored in plaintext at rest")
+	}
+	if !secrets.IsEncrypted(raw.Password) {
+		t.Fatalf("db password not encrypted-at-rest: %q", raw.Password)
+	}
+
+	// The engine container still receives the real plaintext password in its ENV.
+	w := fb.Applied[db.Namespace+"/"+db.Release]
+	if w.Env["POSTGRES_PASSWORD"] != plaintext {
+		t.Fatalf("workload env password = %q, want plaintext %q", w.Env["POSTGRES_PASSWORD"], plaintext)
+	}
+
+	// Conn-info (re-read from the store) decrypts back to the usable plaintext and
+	// builds a connection string carrying it.
+	detail, err := svc.GetDatabaseDetail(ctx, "org-1", db.ID)
+	if err != nil {
+		t.Fatalf("get detail: %v", err)
+	}
+	if detail.Connection.Password != plaintext {
+		t.Fatalf("conn-info password = %q, want decrypted plaintext %q", detail.Connection.Password, plaintext)
+	}
+	if !strings.Contains(detail.Connection.ConnectionString, plaintext) {
+		t.Fatalf("connection string missing usable password: %q", detail.Connection.ConnectionString)
+	}
+}
+
+// TestDatabasePasswordLegacyPlaintextStillReadable asserts a smooth migration:
+// a row written BEFORE encryption (legacy plaintext, no "v1:" prefix) is still
+// returned usable through conn-info under an enabled cipher (the cipher passes a
+// non-prefixed value through unchanged).
+func TestDatabasePasswordLegacyPlaintextStillReadable(t *testing.T) {
+	svc, _ := newSvcWithCipher(t)
+	ctx := context.Background()
+
+	// Seed a legacy row directly in the store with a PLAINTEXT password.
+	legacy := &domain.Database{
+		ID: "db-legacy", OrgID: "org-1", Name: "old", Engine: "postgresql",
+		Username: "u", Password: "legacy-plaintext-pass", DatabaseName: "olddb",
+		StorageGB: 1, Status: "running", Namespace: "ns", Release: "rel",
+	}
+	if err := svc.store.CreateDatabase(ctx, legacy); err != nil {
+		t.Fatalf("seed legacy db: %v", err)
+	}
+
+	detail, err := svc.GetDatabaseDetail(ctx, "org-1", "db-legacy")
+	if err != nil {
+		t.Fatalf("get legacy detail: %v", err)
+	}
+	if detail.Connection.Password != "legacy-plaintext-pass" {
+		t.Fatalf("legacy plaintext password not passed through: %q", detail.Connection.Password)
+	}
+}
+
+// TestDatabasePasswordNoopCipherStaysPlaintext asserts the dev/test default (no key
+// => NoopCipher): credentials round-trip without panicking and remain plaintext at
+// rest (no "v1:" prefix), preserving the empty-key dev path.
+func TestDatabasePasswordNoopCipherStaysPlaintext(t *testing.T) {
+	st := store.NewMemoryStore()
+	svc := NewService(st, kube.NewFakeBackend(), billing.NewService(st, nil))
+	ctx := context.Background()
+
+	db, err := svc.CreateDatabase(ctx, "org-1", CreateDatabaseInput{Name: "d", Engine: "postgresql"})
+	if err != nil {
+		t.Fatalf("create db (noop cipher): %v", err)
+	}
+	raw, err := st.GetDatabase(ctx, db.ID)
+	if err != nil {
+		t.Fatalf("raw get: %v", err)
+	}
+	if secrets.IsEncrypted(raw.Password) {
+		t.Fatalf("no-op cipher must not produce a v1: value: %q", raw.Password)
+	}
+	if raw.Password != db.Password {
+		t.Fatalf("no-op cipher should store plaintext as-is: raw=%q ret=%q", raw.Password, db.Password)
+	}
+	detail, err := svc.GetDatabaseDetail(ctx, "org-1", db.ID)
+	if err != nil {
+		t.Fatalf("get detail: %v", err)
+	}
+	if detail.Connection.Password != db.Password {
+		t.Fatalf("conn-info password mismatch under no-op cipher: %q vs %q", detail.Connection.Password, db.Password)
 	}
 }

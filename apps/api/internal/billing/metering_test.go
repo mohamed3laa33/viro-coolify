@@ -11,6 +11,176 @@ import (
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/store"
 )
 
+// countingReporter is a UsageReporter test double that tallies every increment it
+// is handed. When failNext is set, the NEXT ReportUsage call fails (and clears the
+// flag), so a single transient provider error can be simulated.
+type countingReporter struct {
+	MockProvider
+	mu       sync.Mutex
+	calls    int
+	totalQty int64
+	lastQty  int64
+	failNext bool
+}
+
+func (r *countingReporter) ReportUsage(_ context.Context, _ string, quantity int64, _ time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.failNext {
+		r.failNext = false
+		return errors.New("provider boom")
+	}
+	r.calls++
+	r.lastQty = quantity
+	r.totalQty += quantity
+	return nil
+}
+
+// reportingFixture seeds one org with a metered subscription (si_ item id) and a
+// fixed clock, returning the service so a test can drive ReportUsage/ReportAllUsage.
+func reportingFixture(t *testing.T, rep PaymentProvider, now time.Time) (*Service, *store.MemoryStore) {
+	t.Helper()
+	st := store.NewMemoryStore()
+	ctx := context.Background()
+	if err := st.CreateOrganization(ctx, &domain.Organization{ID: "o1", Slug: "o1"}); err != nil {
+		t.Fatalf("org: %v", err)
+	}
+	if err := st.UpsertSubscription(ctx, &domain.Subscription{
+		OrgID: "o1", PlanID: "launch", Status: domain.SubActive,
+		StripeSubscriptionID: "sub_live_1", StripeSubscriptionItemID: "si_metered_1",
+		CurrentPeriodEnd: now.AddDate(0, 0, 20),
+	}); err != nil {
+		t.Fatalf("sub: %v", err)
+	}
+	svc := NewService(st, rep)
+	svc.now = func() time.Time { return now }
+	return svc, st
+}
+
+// addMeteredCents appends one metered compute-cost record (cents -> micro-cents) for
+// org o1, anchored inside the current period.
+func addMeteredCents(t *testing.T, st store.Store, at time.Time, cents int64) {
+	t.Helper()
+	if err := st.AddUsage(context.Background(), &domain.UsageRecord{
+		ID: meterBucketID("o1", at), OrgID: "o1", Metric: MeterMetric,
+		Quantity: cents * 1000, At: at,
+	}); err != nil {
+		t.Fatalf("add usage: %v", err)
+	}
+}
+
+// TestReportUsageReportsDeltaOncePerPeriod asserts the idempotency contract: across
+// repeated ticks the provider is incremented by exactly the NEW usage each time and
+// re-running with no new usage is a no-op — so the period total billed equals the
+// period usage and is never double-counted.
+func TestReportUsageReportsDeltaOncePerPeriod(t *testing.T) {
+	now := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
+	rep := &countingReporter{}
+	svc, st := reportingFixture(t, rep, now)
+	ctx := context.Background()
+
+	// Tick 1: 3c of usage so far -> increment by 3.
+	addMeteredCents(t, st, now.Add(-2*time.Hour), 3)
+	if pushed, err := svc.ReportUsage(ctx, "o1"); err != nil || !pushed {
+		t.Fatalf("tick1 ReportUsage pushed=%v err=%v, want pushed=true nil", pushed, err)
+	}
+	// Tick 2: no new usage -> no-op (delta 0), provider NOT called again.
+	if pushed, err := svc.ReportUsage(ctx, "o1"); err != nil || pushed {
+		t.Fatalf("tick2 ReportUsage pushed=%v err=%v, want pushed=false nil", pushed, err)
+	}
+	// Tick 3: 5c more usage (8c cumulative) -> increment by only the 5c delta.
+	addMeteredCents(t, st, now.Add(-1*time.Hour), 5)
+	if pushed, err := svc.ReportUsage(ctx, "o1"); err != nil || !pushed {
+		t.Fatalf("tick3 ReportUsage pushed=%v err=%v, want pushed=true nil", pushed, err)
+	}
+
+	if rep.calls != 2 {
+		t.Fatalf("provider increment calls = %d, want 2 (no call when delta is 0)", rep.calls)
+	}
+	if rep.totalQty != 8 {
+		t.Fatalf("total reported = %d, want 8 (3 + 5 deltas, never double-counted)", rep.totalQty)
+	}
+}
+
+// TestReportUsageProviderErrorRetriesSameDelta asserts resilience: a transient
+// provider error does NOT advance the watermark, so the SAME delta is retried on the
+// next tick and billed exactly once (never lost, never doubled).
+func TestReportUsageProviderErrorRetriesSameDelta(t *testing.T) {
+	now := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
+	rep := &countingReporter{failNext: true}
+	svc, st := reportingFixture(t, rep, now)
+	ctx := context.Background()
+	addMeteredCents(t, st, now.Add(-1*time.Hour), 4)
+
+	// Tick 1: the provider call fails -> error surfaces, nothing billed.
+	if pushed, err := svc.ReportUsage(ctx, "o1"); err == nil || pushed {
+		t.Fatalf("tick1 want (false, error) on provider failure, got pushed=%v err=%v", pushed, err)
+	}
+	if rep.totalQty != 0 {
+		t.Fatalf("nothing should be billed after a failure, got %d", rep.totalQty)
+	}
+	// Tick 2: retry succeeds -> the same 4c delta is billed exactly once.
+	if pushed, err := svc.ReportUsage(ctx, "o1"); err != nil || !pushed {
+		t.Fatalf("tick2 retry want (true, nil), got pushed=%v err=%v", pushed, err)
+	}
+	if rep.totalQty != 4 {
+		t.Fatalf("retry should bill the same 4c once, got %d", rep.totalQty)
+	}
+}
+
+// TestReportAllUsageContinuesOnError asserts the loop-level contract used by the
+// metering tick: one org's provider failure does not abort reporting for the others,
+// and the first error is surfaced for observability.
+func TestReportAllUsageContinuesOnError(t *testing.T) {
+	now := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
+	rep := &countingReporter{}
+	svc, st := reportingFixture(t, rep, now)
+	ctx := context.Background()
+
+	// Second org with its own metered subscription + usage.
+	if err := st.CreateOrganization(ctx, &domain.Organization{ID: "o2", Slug: "o2"}); err != nil {
+		t.Fatalf("org2: %v", err)
+	}
+	if err := st.UpsertSubscription(ctx, &domain.Subscription{
+		OrgID: "o2", PlanID: "launch", Status: domain.SubActive,
+		StripeSubscriptionID: "sub_live_2", StripeSubscriptionItemID: "si_metered_2",
+		CurrentPeriodEnd: now.AddDate(0, 0, 20),
+	}); err != nil {
+		t.Fatalf("sub2: %v", err)
+	}
+	addMeteredCents(t, st, now.Add(-1*time.Hour), 3) // o1
+	if err := st.AddUsage(ctx, &domain.UsageRecord{
+		ID: meterBucketID("o2", now.Add(-1*time.Hour)), OrgID: "o2",
+		Metric: MeterMetric, Quantity: 7 * 1000, At: now.Add(-1 * time.Hour),
+	}); err != nil {
+		t.Fatalf("usage o2: %v", err)
+	}
+
+	// Fail exactly one org's report; the other must still be billed.
+	rep.failNext = true
+	reported, err := svc.ReportAllUsage(ctx)
+	if err == nil {
+		t.Fatal("ReportAllUsage should surface the first provider error")
+	}
+	if reported != 1 {
+		t.Fatalf("reported orgs = %d, want 1 (the other org despite one failure)", reported)
+	}
+	if rep.totalQty == 0 {
+		t.Fatal("the non-failing org's usage must still be reported")
+	}
+}
+
+// TestReportAllUsageMockNoOp asserts the dev/test default (MockProvider, no usage
+// reporting) makes the whole pass a no-op with no error.
+func TestReportAllUsageMockNoOp(t *testing.T) {
+	st := store.NewMemoryStore()
+	svc := NewService(st, MockProvider{})
+	reported, err := svc.ReportAllUsage(context.Background())
+	if err != nil || reported != 0 {
+		t.Fatalf("mock ReportAllUsage = (%d, %v), want (0, nil)", reported, err)
+	}
+}
+
 // addUsageFailStore fails the metering write (AddUsageIfAbsent) for one specific
 // org, so we can assert that MeterUsage is continue-on-error (one bad org doesn't
 // abort the rest of the hour).

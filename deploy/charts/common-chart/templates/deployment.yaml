@@ -104,13 +104,15 @@ spec:
                 command: {{- toYaml .preStop.command | nindent 16 }}
           {{- end }}
           {{- end }}
-          {{- with .Values.deployment.livenessProbe }}
+          {{- $liveness := include "common-chart.probe" (dict "ctx" $ "probe" .Values.deployment.livenessProbe "kind" "liveness") }}
+          {{- with $liveness }}
           livenessProbe:
-            {{- toYaml . | trim | nindent 12 }}
+            {{- . | nindent 12 }}
           {{- end }}
-          {{- with .Values.deployment.readinessProbe }}
+          {{- $readiness := include "common-chart.probe" (dict "ctx" $ "probe" .Values.deployment.readinessProbe "kind" "readiness") }}
+          {{- with $readiness }}
           readinessProbe:
-            {{- toYaml . | trim | nindent 12 }}
+            {{- . | nindent 12 }}
           {{- end }}
           {{- with .Values.deployment.startupProbe }}
           startupProbe:

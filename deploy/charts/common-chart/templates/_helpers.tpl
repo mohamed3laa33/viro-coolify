@@ -78,6 +78,61 @@ Allow the release namespace to be overridden for multi-namespace deployments in 
 {{- end -}}
 
 {{/*
+Resolve the default probe port for a workload. Prefers the first service port's
+targetPort (the actual container port); falls back to its `port`. Returns empty
+when no service port is defined, in which case callers skip default probes.
+*/}}
+{{- define "common-chart.probePort" -}}
+{{- $port := "" -}}
+{{- range .Values.service.ports -}}
+  {{- if eq $port "" -}}
+    {{- $port = (.targetPort | default .port) -}}
+  {{- end -}}
+{{- end -}}
+{{- $port -}}
+{{- end -}}
+
+{{/*
+Render a container probe (liveness/readiness). Centralizes probe defaulting so
+tenant workloads always ship sane health checks without app-specific hardcoding:
+
+  1. An explicit per-workload probe (.Values.deployment.<kind>Probe) always wins.
+  2. Otherwise, when a service port exists, a sensible default is synthesized:
+       - httpGet on .Values.deployment.probes.httpPath if that path is set
+         (admin/values-driven HTTP override), else
+       - a tcpSocket probe on the resolved service/container port.
+  3. With no service port and no override, nothing is rendered.
+
+Call with a dict: (dict "ctx" $ "probe" <explicitProbe> "kind" "liveness"|"readiness").
+Emits at base indent; callers re-indent with `nindent`.
+*/}}
+{{- define "common-chart.probe" -}}
+{{- $ctx := .ctx -}}
+{{- $explicit := .probe -}}
+{{- if $explicit -}}
+{{- toYaml $explicit | trim -}}
+{{- else -}}
+{{- $port := include "common-chart.probePort" $ctx -}}
+{{- if $port -}}
+{{- $defaults := $ctx.Values.deployment.probes | default dict -}}
+{{- $httpPath := $defaults.httpPath | default "" -}}
+{{- if $httpPath -}}
+httpGet:
+  path: {{ $httpPath | quote }}
+  port: {{ $port }}
+{{- else -}}
+tcpSocket:
+  port: {{ $port }}
+{{- end }}
+initialDelaySeconds: {{ (get $defaults (printf "%sInitialDelaySeconds" .kind)) | default $defaults.initialDelaySeconds | default (ternary 10 5 (eq .kind "liveness")) }}
+periodSeconds: {{ $defaults.periodSeconds | default 10 }}
+timeoutSeconds: {{ $defaults.timeoutSeconds | default 3 }}
+failureThreshold: {{ $defaults.failureThreshold | default 3 }}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Renders a value that contains template.
 */}}
 {{- define "common-chart.tplvalues.render" -}}

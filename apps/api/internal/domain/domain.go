@@ -294,13 +294,16 @@ type Database struct {
 	Status    string  `json:"status"`
 	// Generated connection credentials. The engine container initializes itself
 	// with these on first boot. These are NEVER serialized on the bare model
-	// (json:"-") so a bulk listing can't leak every database's plaintext
-	// password; credentials are exposed ONLY through the connection-info detail
-	// endpoint, whose DatabaseConnInfo DTO carries them via explicit fields.
+	// (json:"-") so a bulk listing can't leak every database's password;
+	// credentials are exposed ONLY through the connection-info detail endpoint,
+	// whose DatabaseConnInfo DTO carries them via explicit fields.
 	//
-	// TODO(security): these are stored plaintext-at-rest for now. A later security
-	// wave must encrypt them (or move the source of truth to a K8s Secret and have
-	// the chart mount it via envFrom). Do not block durability/usability on it.
+	// SECURITY: Password is ENCRYPTED at rest (AES-256-GCM via internal/secrets):
+	// the platform layer encrypts it before persisting and decrypts it on read
+	// (ownedDatabase), so this field is plaintext in memory but a "v1:"-prefixed
+	// ciphertext in the store. When no encryption key is configured (dev) the no-op
+	// cipher stores it plaintext, and legacy pre-encryption rows (no "v1:" prefix)
+	// are passed through unchanged for a smooth migration.
 	Username     string `json:"-"`
 	Password     string `json:"-"`
 	DatabaseName string `json:"-"`
@@ -481,6 +484,20 @@ type UsageRecord struct {
 // a restart or a downtime gap is filled exactly once and never double-counted.
 type MeterState struct {
 	LastMeteredHour time.Time `json:"lastMeteredHour"`
+}
+
+// UsageReportState persists how much metered usage has ALREADY been reported to
+// the payment provider (Stripe) for an org's current billing period. It is a
+// per-org singleton. Stripe usage records are reported with action=increment, so
+// the reporting loop reports only the DELTA (current-period cents minus
+// ReportedCents) and then advances ReportedCents — reporting the cumulative total
+// every tick would double-bill. PeriodStart scopes the watermark to a billing
+// period: when a new period begins, ReportedCents resets to zero (the period's
+// usage starts over). This mirrors the metering loop's idempotency watermark.
+type UsageReportState struct {
+	OrgID         string    `json:"orgId"`
+	PeriodStart   time.Time `json:"periodStart"`
+	ReportedCents int64     `json:"reportedCents"`
 }
 
 // AuditEvent is an append-only record of a privileged mutation or security-

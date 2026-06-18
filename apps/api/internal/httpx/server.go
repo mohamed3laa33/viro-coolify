@@ -370,6 +370,20 @@ func (s *Server) meterOnce(ctx context.Context) {
 		s.logger.Error("metering tick", "err", err)
 	}
 	s.logger.Info("metered usage", "orgs", n)
+
+	// Push the freshly-metered usage to the payment provider so metered invoices are
+	// not $0. ReportAllUsage is idempotent per org (reports only the delta since the
+	// last successful report) and continue-on-error: a provider failure for one org
+	// never crashes the loop or double-bills — the same delta is retried next tick.
+	// It is a no-op when the provider has no usage reporting (MockProvider in dev).
+	reported, rerr := s.billing.ReportAllUsage(ctx)
+	if rerr != nil {
+		s.metrics.tickError("metering")
+		s.logger.Error("usage reporting tick", "err", rerr)
+	}
+	if reported > 0 {
+		s.logger.Info("reported metered usage to provider", "orgs", reported)
+	}
 }
 
 // StartTokenCleanup launches a background ticker that deletes expired and revoked

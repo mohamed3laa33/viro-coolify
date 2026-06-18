@@ -2,6 +2,7 @@
 # Point it at any plain/new cluster and run ONE command — no manual kubectl:
 #
 #   VORTEX_JWT_SECRET=$(openssl rand -hex 32) \
+#   VORTEX_SECRET_ENCRYPTION_KEY=$(openssl rand -hex 32) \
 #   VORTEX_PG_PASSWORD=$(openssl rand -hex 24) \
 #   VORTEX_DATABASE_URL="postgres://vortex:${VORTEX_PG_PASSWORD}@vortex-postgres.vortex.svc.cluster.local:5432/vortex?sslmode=require" \
 #   VORTEX_DO_TOKEN=dop_v1_xxx \
@@ -30,6 +31,9 @@ environments:
         tag: '{{ env "VORTEX_IMAGE_TAG" | default "latest" }}'
         baseDomain: '{{ env "VORTEX_BASE_DOMAIN" | default "vortex.v60ai.com" }}'
         jwtSecret: '{{ requiredEnv "VORTEX_JWT_SECRET" }}'
+        # App-secret encryption key. The API refuses to boot in production without it
+        # (config.go), so source it via requiredEnv — a missing value fails loudly.
+        secretEncryptionKey: '{{ requiredEnv "VORTEX_SECRET_ENCRYPTION_KEY" }}'
         # Postgres password and connection string are REQUIRED — no insecure default.
         # Supply a strong password (e.g. `openssl rand -hex 24`); the database URL must
         # use sslmode=require. Example:
@@ -40,7 +44,9 @@ environments:
         adminEmails: '{{ env "VORTEX_ADMIN_EMAILS" | default "" }}'
         stripeSecretKey: '{{ env "VORTEX_STRIPE_SECRET_KEY" | default "" }}'
         stripeWebhookSecret: '{{ env "VORTEX_STRIPE_WEBHOOK_SECRET" | default "" }}'
-        doToken: '{{ env "VORTEX_DO_TOKEN" | default "" }}'
+        # DNS-01 token for the wildcard cert. REQUIRED — defaulting empty silently
+        # skips TLS issuance, so source it via requiredEnv to fail loudly instead.
+        doToken: '{{ requiredEnv "VORTEX_DO_TOKEN" }}'
 
 ---
 
@@ -112,6 +118,7 @@ releases:
           webHost: 'app.{{ .Values.baseDomain }}'
         secrets:
           jwtSecret: '{{ .Values.jwtSecret }}'
+          secretEncryptionKey: '{{ .Values.secretEncryptionKey }}'
           databaseUrl: '{{ .Values.databaseUrl }}'
           stripeSecretKey: '{{ .Values.stripeSecretKey }}'
           stripeWebhookSecret: '{{ .Values.stripeWebhookSecret }}'

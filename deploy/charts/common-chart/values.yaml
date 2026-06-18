@@ -118,7 +118,24 @@ deployment:
   # -- Assign custom affinity rules
   affinity: {}
 
-  # -- Controller Container liveness probe configuration
+  # -- Default health-probe behavior, applied ONLY when livenessProbe /
+  # readinessProbe below are left empty. The chart synthesizes a sensible probe
+  # from the first service port (see _helpers.tpl "common-chart.probe"):
+  #   * tcpSocket on the container/service port by default, or
+  #   * httpGet on `probes.httpPath` when that path is set (HTTP override).
+  # All values are admin/values-driven with no app-specific hardcoding; an explicit
+  # per-workload livenessProbe/readinessProbe always wins over these defaults.
+  probes:
+    # httpPath: "/healthz"        # set to switch the default probe to httpGet
+    initialDelaySeconds: 5        # readiness default; liveness defaults to 10
+    # livenessInitialDelaySeconds: 10
+    # readinessInitialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+  # -- Controller Container liveness probe configuration. Leave empty to use the
+  # `probes` defaults above; set explicitly to override per workload.
   # ref: https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
   livenessProbe: {}
     # failureThreshold: 3
@@ -129,7 +146,8 @@ deployment:
     #   port: 80
     # periodSeconds: 10
 
-  # -- Controller Container readiness probe configuration
+  # -- Controller Container readiness probe configuration. Leave empty to use the
+  # `probes` defaults above; set explicitly to override per workload.
   readinessProbe: {}
     # failureThreshold: 3
     # successThreshold: 1

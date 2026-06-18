@@ -184,35 +184,130 @@ type UsageReporter interface {
 	ReportUsage(ctx context.Context, subscriptionItemID string, quantity int64, at time.Time) error
 }
 
+// ReportAllUsage reports the current-period metered usage of EVERY org to the
+// payment provider, intended to run once per metering tick right after MeterUsage.
+// It mirrors MeterUsage's continue-on-error contract: a single org's reporting
+// failure (e.g. a transient provider error) does not abort the rest, and the first
+// error is returned for observability. Because reporting is idempotent per org (see
+// ReportUsage), a failed org is simply retried — and re-billed for the same cents —
+// on the next tick, never double-billed. Returns the number of orgs whose usage was
+// actually pushed to the provider (delta > 0).
+func (s *Service) ReportAllUsage(ctx context.Context) (int, error) {
+	// A provider with no usage reporting (MockProvider in dev/tests) makes the whole
+	// pass a no-op — skip the org scan entirely.
+	if _, ok := s.provider.(UsageReporter); !ok {
+		return 0, nil
+	}
+	orgs, err := s.store.ListAllOrgs(ctx)
+	if err != nil {
+		return 0, err
+	}
+	reported := 0
+	var firstErr error
+	for _, org := range orgs {
+		// Stop promptly on shutdown so we don't keep hitting a draining store/provider.
+		if err := ctx.Err(); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			break
+		}
+		pushed, err := s.ReportUsage(ctx, org.ID)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if pushed {
+			reported++
+		}
+	}
+	return reported, firstErr
+}
+
 // ReportUsage reports an org's current-period size-aware metered usage (in cents)
-// to the payment provider for metered/usage-based billing. It is a no-op when the
-// provider does not support usage reporting (MockProvider) or the org has no
-// metered subscription-item id yet. The reported id is the si_ item id captured
-// from the subscription webhook (the per-item usage endpoint requires it); reporting
-// against the sub_ id would 404 in production.
-func (s *Service) ReportUsage(ctx context.Context, orgID string) error {
+// to the payment provider for metered/usage-based billing, IDEMPOTENTLY. It is a
+// no-op (pushed=false) when the provider does not support usage reporting
+// (MockProvider) or the org has no metered subscription-item id yet. The reported
+// id is the si_ item id captured from the subscription webhook (the per-item usage
+// endpoint requires it); reporting against the sub_ id would 404 in production.
+//
+// Idempotency (mirrors the metering loop's per-bucket watermark): Stripe usage
+// records use action=increment, so reporting the cumulative period total on every
+// tick would DOUBLE-BILL. Instead this reports only the DELTA — the current-period
+// cents MINUS the cents already reported for this period (the per-org
+// UsageReportState watermark) — and advances the watermark ONLY after the provider
+// accepts the increment. A re-run with no new usage therefore reports nothing; a
+// provider error leaves the watermark unmoved so the same delta is retried next
+// tick (re-billing the same cents exactly once, never twice). When the billing
+// period rolls over (the period start moves forward) the watermark resets to zero
+// so the new period's usage starts from a clean slate.
+//
+// pushed reports whether a non-zero increment was actually sent to the provider.
+func (s *Service) ReportUsage(ctx context.Context, orgID string) (pushed bool, err error) {
 	reporter, ok := s.provider.(UsageReporter)
 	if !ok {
-		return nil // provider has no usage reporting (mock) -> no-op
+		return false, nil // provider has no usage reporting (mock) -> no-op
 	}
 	sub, err := s.store.GetSubscription(ctx, orgID)
 	if errors.Is(err, store.ErrNotFound) {
-		return nil
+		return false, nil
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
 	// Report against the metered subscription-ITEM id (si_), not the sub_ id.
 	if sub.StripeSubscriptionItemID == "" {
-		return nil
+		return false, nil
 	}
-	records, err := s.store.ListUsageByOrgSince(ctx, orgID, s.periodStart(sub), store.Page{})
+	periodStart := s.periodStart(sub)
+	records, err := s.store.ListUsageByOrgSince(ctx, orgID, periodStart, store.Page{})
 	if err != nil {
-		return err
+		return false, err
 	}
 	cents := usageSoFarCents(records)
-	if cents <= 0 {
-		return nil
+
+	// Load the per-org reported-usage watermark. A missing watermark (or one from a
+	// prior billing period) means nothing has been reported for THIS period yet.
+	already := int64(0)
+	if rs, rerr := s.store.GetUsageReportState(ctx, orgID); rerr == nil && rs != nil {
+		if !rs.PeriodStart.Before(periodStart) {
+			already = rs.ReportedCents
+		}
+	} else if rerr != nil && !errors.Is(rerr, store.ErrNotFound) {
+		return false, rerr
 	}
-	return reporter.ReportUsage(ctx, sub.StripeSubscriptionItemID, cents, s.now())
+
+	delta := cents - already
+	if delta <= 0 {
+		// Nothing new to report (already reported, or no/negative usage). Still
+		// persist the period anchor so a period rollover is recorded even with zero
+		// new usage, keeping the watermark from leaking across periods.
+		if err := s.persistReportState(ctx, orgID, periodStart, already); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	if err := reporter.ReportUsage(ctx, sub.StripeSubscriptionItemID, delta, s.now()); err != nil {
+		// Provider error: do NOT advance the watermark, so this exact delta is retried
+		// next tick (idempotent — the same cents are billed once, never twice).
+		return false, err
+	}
+	if err := s.persistReportState(ctx, orgID, periodStart, cents); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// persistReportState advances an org's usage-reporting watermark to (periodStart,
+// cents). It is called only after the provider has accepted the increment (or when
+// there is nothing to report), so the watermark never runs ahead of what the
+// provider actually billed.
+func (s *Service) persistReportState(ctx context.Context, orgID string, periodStart time.Time, cents int64) error {
+	return s.store.SetUsageReportState(ctx, &domain.UsageReportState{
+		OrgID:         orgID,
+		PeriodStart:   periodStart,
+		ReportedCents: cents,
+	})
 }

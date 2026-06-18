@@ -1312,7 +1312,9 @@ func (s *Service) CreateDatabase(ctx context.Context, orgID string, in CreateDat
 	db.Release = release
 	db.Host = host
 
-	if err := s.store.CreateDatabase(ctx, db); err != nil {
+	// Persist with the credentials encrypted at rest; the returned db keeps the
+	// plaintext password for the immediate conn-info response.
+	if err := s.createDatabase(ctx, db); err != nil {
 		return nil, err
 	}
 	return db, nil
@@ -1444,7 +1446,7 @@ func (s *Service) DeployDatabase(ctx context.Context, orgID, dbID string) (*doma
 	db.Release = release
 	db.Host = host
 	db.Status = "deploying"
-	if err := s.store.UpdateDatabase(ctx, db); err != nil {
+	if err := s.updateDatabase(ctx, db); err != nil {
 		return nil, err
 	}
 	return db, nil
@@ -1502,7 +1504,7 @@ func (s *Service) databaseAction(ctx context.Context, orgID, dbID, status string
 		}
 	}
 	db.Status = status
-	if err := s.store.UpdateDatabase(ctx, db); err != nil {
+	if err := s.updateDatabase(ctx, db); err != nil {
 		return nil, err
 	}
 	return db, nil
@@ -1534,5 +1536,66 @@ func (s *Service) ownedDatabase(ctx context.Context, orgID, dbID string) (*domai
 	if db.OrgID != orgID {
 		return nil, ErrNotFound
 	}
+	// Decrypt the at-rest credentials so every caller (conn-info, connection-string,
+	// dbWorkload env, write-backs) works with the real plaintext password. A legacy
+	// plaintext value (written before encryption) lacks the "v1:" prefix and is
+	// passed through unchanged by the cipher.
+	if err := s.decryptDBPassword(db); err != nil {
+		return nil, err
+	}
 	return db, nil
+}
+
+// decryptDBPassword decrypts a database record's at-rest password in place. A
+// legacy plaintext value (no "v1:" prefix) is returned unchanged. A real encrypted
+// "v1:" blob that won't Open under an ENABLED cipher is a wrong/rotated key — an
+// operator error surfaced rather than silently handing out a broken credential.
+func (s *Service) decryptDBPassword(db *domain.Database) error {
+	if db == nil || db.Password == "" {
+		return nil
+	}
+	dec, err := s.cipher.Decrypt(db.Password)
+	if err != nil {
+		if s.cipher.Enabled() && secrets.IsEncrypted(db.Password) {
+			return fmt.Errorf("platform: decrypt db password for %s: %w", db.ID, err)
+		}
+		// No-op cipher or a legacy non-"v1:" value: leave it as-is.
+		return nil
+	}
+	db.Password = dec
+	return nil
+}
+
+// storeDatabasePassword returns a copy of the database whose Password is ENCRYPTED
+// at rest (AES-256-GCM when a key is configured; pass-through under the no-op cipher
+// in dev). The original (with its plaintext password) is left untouched so the
+// caller can keep using it (e.g. to render the workload env / return conn info).
+func (s *Service) encryptedForStore(db *domain.Database) (*domain.Database, error) {
+	cp := *db
+	if cp.Password != "" {
+		enc, err := s.cipher.Encrypt(cp.Password)
+		if err != nil {
+			return nil, fmt.Errorf("platform: encrypt db password for %s: %w", db.ID, err)
+		}
+		cp.Password = enc
+	}
+	return &cp, nil
+}
+
+// createDatabase persists a new database with its credentials encrypted at rest.
+func (s *Service) createDatabase(ctx context.Context, db *domain.Database) error {
+	enc, err := s.encryptedForStore(db)
+	if err != nil {
+		return err
+	}
+	return s.store.CreateDatabase(ctx, enc)
+}
+
+// updateDatabase persists a database update with its credentials encrypted at rest.
+func (s *Service) updateDatabase(ctx context.Context, db *domain.Database) error {
+	enc, err := s.encryptedForStore(db)
+	if err != nil {
+		return err
+	}
+	return s.store.UpdateDatabase(ctx, enc)
 }

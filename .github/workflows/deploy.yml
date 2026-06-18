@@ -7,6 +7,7 @@ name: Deploy to DigitalOcean
 #   DIGITALOCEAN_ACCESS_TOKEN    - DO API token (kubernetes access)
 #   DO_CLUSTER_NAME              - DOKS cluster name (e.g. vortex)
 #   VORTEX_JWT_SECRET            - production JWT signing secret
+#   VORTEX_SECRET_ENCRYPTION_KEY - app-secret encryption key (API refuses to boot without it)
 #   VORTEX_DATABASE_URL          - managed Postgres connection string
 #   VORTEX_STRIPE_SECRET_KEY     - Stripe key (optional)
 #   VORTEX_STRIPE_WEBHOOK_SECRET - Stripe webhook secret (optional)
@@ -89,6 +90,7 @@ jobs:
             --set image.tag="${{ steps.tag.outputs.tag }}" \
             --set image.pullSecret="ghcr-pull" \
             --set secrets.jwtSecret="${{ secrets.VORTEX_JWT_SECRET }}" \
+            --set secrets.secretEncryptionKey="${{ secrets.VORTEX_SECRET_ENCRYPTION_KEY }}" \
             --set secrets.databaseUrl="${{ secrets.VORTEX_DATABASE_URL }}" \
             --set secrets.stripeSecretKey="${{ secrets.VORTEX_STRIPE_SECRET_KEY }}" \
             --set secrets.stripeWebhookSecret="${{ secrets.VORTEX_STRIPE_WEBHOOK_SECRET }}" \

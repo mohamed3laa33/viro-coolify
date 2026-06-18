@@ -100,6 +100,7 @@ type MemoryStore struct {
 	settings       domain.PlatformSettings              // singleton
 	processedEvts  map[string]struct{}                  // stripe event id dedupe
 	meterState     *domain.MeterState                   // metering progress (singleton)
+	reportState    map[string]domain.UsageReportState   // usage-report watermark by org
 }
 
 // NewMemoryStore returns an in-memory store seeded with the default business
@@ -129,6 +130,7 @@ func NewMemoryStore() *MemoryStore {
 		resetTokens:    make(map[string]domain.PasswordResetToken),
 		apiTokens:      make(map[string]domain.ApiToken),
 		processedEvts:  make(map[string]struct{}),
+		reportState:    make(map[string]domain.UsageReportState),
 	}
 	s.seed()
 	return s
@@ -1124,6 +1126,24 @@ func (s *MemoryStore) SetMeterState(_ context.Context, st *domain.MeterState) er
 	defer s.mu.Unlock()
 	cp := *st
 	s.meterState = &cp
+	return nil
+}
+
+func (s *MemoryStore) GetUsageReportState(_ context.Context, orgID string) (*domain.UsageReportState, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	st, ok := s.reportState[orgID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	cp := st
+	return &cp, nil
+}
+
+func (s *MemoryStore) SetUsageReportState(_ context.Context, st *domain.UsageReportState) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reportState[st.OrgID] = *st
 	return nil
 }
 

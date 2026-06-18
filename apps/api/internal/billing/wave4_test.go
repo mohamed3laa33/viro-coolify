@@ -610,7 +610,7 @@ func TestReportUsageMockNoOp(t *testing.T) {
 	svc := NewService(st, MockProvider{})
 	ctx := context.Background()
 	_ = st.UpsertSubscription(ctx, &domain.Subscription{OrgID: "o1", PlanID: "launch", Status: domain.SubActive, StripeSubscriptionID: "sub_1", CurrentPeriodEnd: time.Now().AddDate(0, 1, 0)})
-	if err := svc.ReportUsage(ctx, "o1"); err != nil {
+	if _, err := svc.ReportUsage(ctx, "o1"); err != nil {
 		t.Fatalf("mock ReportUsage should be a no-op, got %v", err)
 	}
 }
@@ -657,7 +657,7 @@ func TestReportUsageUsesSubscriptionItemID(t *testing.T) {
 		})
 	}
 
-	if err := svc.ReportUsage(ctx, "o1"); err != nil {
+	if _, err := svc.ReportUsage(ctx, "o1"); err != nil {
 		t.Fatalf("report usage: %v", err)
 	}
 	if rep.gotCalls != 1 {
@@ -681,7 +681,7 @@ func TestReportUsageNoOpWithoutItemID(t *testing.T) {
 		OrgID: "o1", PlanID: "launch", Status: domain.SubActive,
 		StripeSubscriptionID: "sub_live_1", CurrentPeriodEnd: time.Now().AddDate(0, 1, 0),
 	})
-	if err := svc.ReportUsage(ctx, "o1"); err != nil {
+	if _, err := svc.ReportUsage(ctx, "o1"); err != nil {
 		t.Fatalf("report usage: %v", err)
 	}
 	if rep.gotCalls != 0 {

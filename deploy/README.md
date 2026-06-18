@@ -29,6 +29,7 @@ doctl auth init                       # once, with your DO token
 ./deploy/scripts/01-provision-doks.sh # cluster + registry + Gateway API + cert-manager
 ./deploy/scripts/02-build-and-push.sh # build + push images to DOCR
 VORTEX_JWT_SECRET=$(openssl rand -hex 32) \
+VORTEX_SECRET_ENCRYPTION_KEY=$(openssl rand -hex 32) \
 VORTEX_DATABASE_URL=postgres://... \
 VORTEX_COOLIFY_BASE_URL=https://coolify.example.com \
 VORTEX_COOLIFY_TOKEN=... \
@@ -51,7 +52,7 @@ The chart lives in `deploy/helm/viro`. Key values (`values.yaml`):
 | Value | Purpose |
 |---|---|
 | `image.registry`, `image.tag` | DOCR registry + image tag |
-| `secrets.*` | JWT secret, DB URL, Coolify + Stripe creds (pass via `--set`, never commit) |
+| `secrets.*` | JWT secret, secret-encryption key, DB URL, Coolify + Stripe creds (pass via `--set`, never commit) |
 | `ingress.apiHost`, `ingress.webHost` | public hostnames |
 | `api.replicas`, `web.replicas` | scaling |
 | `postgres.enabled` | in-cluster PG for testing (prod uses managed) |
@@ -59,7 +60,7 @@ The chart lives in `deploy/helm/viro`. Key values (`values.yaml`):
 ```bash
 helm upgrade --install viro deploy/helm/viro -n viro --create-namespace \
   --set image.tag=$(git rev-parse --short HEAD) \
-  --set secrets.jwtSecret=... --set secrets.databaseUrl=...
+  --set secrets.jwtSecret=... --set secrets.secretEncryptionKey=... --set secrets.databaseUrl=...
 ```
 
 ## DNS + TLS

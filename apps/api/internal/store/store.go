@@ -278,6 +278,14 @@ type Store interface {
 	GetMeterState(ctx context.Context) (*domain.MeterState, error)
 	SetMeterState(ctx context.Context, st *domain.MeterState) error
 
+	// Usage-reporting watermark (per-org singleton). GetUsageReportState returns
+	// ErrNotFound before any usage has been reported for the org so the caller seeds
+	// a zero watermark. It records how many current-period cents have already been
+	// reported to the payment provider, so the reporting loop reports only the delta
+	// (Stripe increments) and never double-bills on a re-run.
+	GetUsageReportState(ctx context.Context, orgID string) (*domain.UsageReportState, error)
+	SetUsageReportState(ctx context.Context, st *domain.UsageReportState) error
+
 	// Plans (billing catalog, super-admin managed).
 	ListPlans(ctx context.Context) ([]domain.Plan, error)
 	GetPlan(ctx context.Context, id string) (*domain.Plan, error)

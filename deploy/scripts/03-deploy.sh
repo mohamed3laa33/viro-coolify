@@ -4,7 +4,8 @@
 #   ./deploy/scripts/03-deploy.sh [tag]
 #
 # Secrets are passed via env vars and NEVER committed:
-#   VORTEX_JWT_SECRET, VORTEX_DATABASE_URL, VORTEX_COOLIFY_BASE_URL, VORTEX_COOLIFY_TOKEN,
+#   VORTEX_JWT_SECRET, VORTEX_SECRET_ENCRYPTION_KEY, VORTEX_DATABASE_URL,
+#   VORTEX_COOLIFY_BASE_URL, VORTEX_COOLIFY_TOKEN,
 #   VORTEX_STRIPE_SECRET_KEY, VORTEX_STRIPE_WEBHOOK_SECRET
 set -euo pipefail
 
@@ -23,6 +24,7 @@ helm upgrade --install "${RELEASE}" "${CHART}" \
   --set image.registry="registry.digitalocean.com/${REGISTRY_NAME}" \
   --set image.tag="${TAG}" \
   --set secrets.jwtSecret="${VORTEX_JWT_SECRET:?set VORTEX_JWT_SECRET}" \
+  --set secrets.secretEncryptionKey="${VORTEX_SECRET_ENCRYPTION_KEY:?set VORTEX_SECRET_ENCRYPTION_KEY}" \
   --set secrets.databaseUrl="${VORTEX_DATABASE_URL:?set VORTEX_DATABASE_URL}" \
   --set secrets.coolifyBaseUrl="${VORTEX_COOLIFY_BASE_URL:-}" \
   --set secrets.coolifyToken="${VORTEX_COOLIFY_TOKEN:-}" \

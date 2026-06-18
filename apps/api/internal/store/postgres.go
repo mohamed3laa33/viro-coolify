@@ -1681,6 +1681,25 @@ func (s *PostgresStore) SetMeterState(ctx context.Context, st *domain.MeterState
 	return mapErr(err)
 }
 
+func (s *PostgresStore) GetUsageReportState(ctx context.Context, orgID string) (*domain.UsageReportState, error) {
+	st := domain.UsageReportState{OrgID: orgID}
+	err := s.pool.QueryRow(ctx,
+		`SELECT period_start, reported_cents FROM usage_report_state WHERE org_id = $1`,
+		orgID).Scan(&st.PeriodStart, &st.ReportedCents)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return &st, nil
+}
+
+func (s *PostgresStore) SetUsageReportState(ctx context.Context, st *domain.UsageReportState) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO usage_report_state (org_id, period_start, reported_cents) VALUES ($1, $2, $3)
+		 ON CONFLICT (org_id) DO UPDATE SET period_start = EXCLUDED.period_start, reported_cents = EXCLUDED.reported_cents`,
+		st.OrgID, st.PeriodStart, st.ReportedCents)
+	return mapErr(err)
+}
+
 // ---- Plans ----
 
 func (s *PostgresStore) ListPlans(ctx context.Context) ([]domain.Plan, error) {

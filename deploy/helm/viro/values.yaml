@@ -95,6 +95,10 @@ networkPolicy:
 secrets:
   existingSecret: ""        # if set, use this Secret instead of creating one
   jwtSecret: "change-me-in-production"
+  # App-secret encryption key. The API hard-requires this in production (it refuses
+  # to boot without it, see config.go); a missing key would otherwise silently fall
+  # back to plaintext storage. Supply a strong value (e.g. `openssl rand -hex 32`).
+  secretEncryptionKey: "change-me-in-production"
   # No insecure default: a real connection string MUST be supplied (via the helmfile's
   # required VORTEX_DATABASE_URL, --set, or an out-of-git values file). Use sslmode=require.
   databaseUrl: ""
