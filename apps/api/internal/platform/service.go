@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/url"
 	"regexp"
 	"strings"
@@ -169,6 +170,26 @@ type Service struct {
 	// pass-through (dev) when no key is configured, so the system never panics for
 	// a missing key.
 	cipher secrets.Cipher
+
+	// baseDomain is the platform apex (e.g. "vortex.v60ai.com"). A tenant may NOT
+	// claim it or any subdomain of it as a custom domain (that would hijack a
+	// platform/other-tenant host), and it backs the CNAME target hint returned to
+	// the user. Empty disables the apex guard (dev/tests still validate the FQDN).
+	baseDomain string
+	// gatewayLBHost is an optional explicit A/ALIAS target (the shared Gateway
+	// LoadBalancer hostname/IP) advertised in the DNS instructions. When empty the
+	// instructions advise a CNAME to the app's generated host instead.
+	gatewayLBHost string
+
+	// resolver looks up the DNS TXT challenge record. Overridable in tests via
+	// WithResolver so verification can be exercised without real DNS.
+	resolver Resolver
+}
+
+// Resolver is the minimal DNS surface VerifyDomain needs: TXT record lookup. The
+// stdlib *net.Resolver satisfies it; tests inject a fake to avoid real DNS.
+type Resolver interface {
+	LookupTXT(ctx context.Context, name string) ([]string, error)
 }
 
 // Option customizes Service construction.
@@ -237,6 +258,29 @@ func WithCipher(c secrets.Cipher) Option {
 	}
 }
 
+// WithBaseDomain sets the platform apex used to (a) reject tenant claims on the
+// platform host / its subdomains and (b) build the custom-domain DNS instructions.
+func WithBaseDomain(d string) Option {
+	return func(s *Service) { s.baseDomain = strings.ToLower(strings.TrimSpace(d)) }
+}
+
+// WithGatewayLBHost sets the explicit shared-Gateway LoadBalancer host/IP
+// advertised as the A/ALIAS target in custom-domain DNS instructions. Empty
+// leaves a CNAME-to-generated-host instruction.
+func WithGatewayLBHost(h string) Option {
+	return func(s *Service) { s.gatewayLBHost = strings.TrimSpace(h) }
+}
+
+// WithResolver overrides the DNS resolver used for TXT-challenge verification
+// (tests inject a fake). A nil resolver is ignored (the stdlib default stands).
+func WithResolver(r Resolver) Option {
+	return func(s *Service) {
+		if r != nil {
+			s.resolver = r
+		}
+	}
+}
+
 // NewService builds a platform service. The backend is the Kubernetes deploy
 // surface (kube.Backend); tests inject kube.FakeBackend. The builder is the
 // git-source image builder (build.Builder); tests inject build.FakeBuilder. The
@@ -257,6 +301,7 @@ func NewService(s store.Store, backend kube.Backend, b *billing.Service, opts ..
 		now:          time.Now,
 		buildTimeout: 10 * time.Minute,
 		cipher:       secrets.NoopCipher{},
+		resolver:     net.DefaultResolver,
 	}
 	for _, opt := range opts {
 		opt(svc)
@@ -380,8 +425,10 @@ func (s *Service) resolvedEnv(ctx context.Context, appID string) (plain, secret 
 	return plain, secret, nil
 }
 
-// appDomains returns the custom hostnames attached to the app (in addition to
-// the generated host), or nil when none are set / the lookup fails.
+// appDomains returns the VERIFIED custom hostnames attached to the app (in
+// addition to the generated host), or nil when none are verified / the lookup
+// fails. Only verified domains are routed: a pending/failed domain has not proven
+// ownership and must NEVER reach the workload's HTTPRoute hostnames.
 func (s *Service) appDomains(ctx context.Context, appID string) []string {
 	doms, err := s.store.ListDomainsByApp(ctx, appID)
 	if err != nil || len(doms) == 0 {
@@ -389,9 +436,12 @@ func (s *Service) appDomains(ctx context.Context, appID string) []string {
 	}
 	out := make([]string, 0, len(doms))
 	for _, d := range doms {
-		if d.Domain != "" {
+		if d.Domain != "" && d.IsVerified() {
 			out = append(out, d.Domain)
 		}
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

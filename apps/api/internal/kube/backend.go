@@ -170,4 +170,20 @@ type Backend interface {
 	// metrics-server. When the metrics-server is unavailable it returns
 	// WorkloadMetrics{Available:false} (never fabricated numbers), not an error.
 	Metrics(ctx context.Context, namespace, release string) (WorkloadMetrics, error)
+
+	// EnsureDomainCertificate creates (idempotently) a cert-manager Certificate for
+	// a VERIFIED custom hostname, signed by the platform ClusterIssuer, into a TLS
+	// Secret in the shared Gateway namespace. Called when a domain becomes verified.
+	EnsureDomainCertificate(ctx context.Context, host string) error
+	// RemoveDomainCertificate deletes the per-domain Certificate (its Secret is GC'd
+	// by cert-manager). Idempotent; called on domain delete.
+	RemoveDomainCertificate(ctx context.Context, host string) error
+	// EnsureGatewayListener adds (idempotently) a dedicated HTTPS listener for the
+	// custom host to the SHARED Gateway, terminating TLS with certSecret. It merges
+	// into spec.listeners without clobbering other tenants' listeners. Called when a
+	// domain becomes verified.
+	EnsureGatewayListener(ctx context.Context, host, certSecret string) error
+	// RemoveGatewayListener removes the per-domain listener from the shared Gateway,
+	// preserving all others. Idempotent; called on domain delete.
+	RemoveGatewayListener(ctx context.Context, host string) error
 }

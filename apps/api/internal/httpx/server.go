@@ -56,9 +56,10 @@ type Server struct {
 type Option func(*serverOptions)
 
 type serverOptions struct {
-	backend kube.Backend
-	builder build.Builder
-	mailer  notify.Mailer
+	backend  kube.Backend
+	builder  build.Builder
+	mailer   notify.Mailer
+	resolver platform.Resolver
 }
 
 // WithMailer overrides the email transport (e.g. a notify.RecordingMailer in
@@ -79,6 +80,13 @@ func WithBackend(b kube.Backend) Option {
 // FakeBuilder fallback when no cluster is reachable).
 func WithBuilder(b build.Builder) Option {
 	return func(o *serverOptions) { o.builder = b }
+}
+
+// WithDomainResolver overrides the DNS resolver used for custom-domain TXT
+// verification (tests inject a fake to avoid real DNS). When unset the platform
+// service uses the stdlib net.DefaultResolver.
+func WithDomainResolver(r platform.Resolver) Option {
+	return func(o *serverOptions) { o.resolver = r }
 }
 
 // NewServer constructs a Server with its dependencies and routes wired up.
@@ -209,6 +217,9 @@ func NewServer(cfg *config.Config, logger *slog.Logger, st store.Store, opts ...
 		platform.WithDBStorageDefault(cfg.DBDefaultStorageGB),
 		platform.WithDBStorageClass(cfg.DBStorageClass),
 		platform.WithCipher(cipher),
+		platform.WithBaseDomain(cfg.BaseDomain),
+		platform.WithGatewayLBHost(cfg.GatewayLBHost),
+		platform.WithResolver(so.resolver),
 	)
 	s.router = s.routes()
 	return s
@@ -259,6 +270,7 @@ func newKubeBackend(cfg *config.Config, logger *slog.Logger, reg *registry) kube
 		ChartPath:                   cfg.KubeChartPath,
 		GatewayName:                 cfg.GatewayName,
 		GatewayNamespace:            cfg.GatewayNamespace,
+		ClusterIssuer:               cfg.ClusterIssuer,
 		CPUOvercommitFactor:         settings.CPUOvercommitFactor,
 		MemoryOvercommitFactor:      settings.MemoryOvercommitFactor,
 		HelmTimeout:                 time.Duration(cfg.HelmTimeoutSec) * time.Second,
@@ -764,6 +776,7 @@ func (s *Server) routes() chi.Router {
 						// App domains.
 						r.With(s.appProjectAuthz(domain.RoleMember)).Get("/{appID}/domains", s.handleListAppDomains)
 						r.With(s.appProjectAuthz(domain.RoleAdmin)).Post("/{appID}/domains", s.handleAddAppDomain)
+						r.With(s.appProjectAuthz(domain.RoleAdmin)).Post("/{appID}/domains/{domainID}/verify", s.handleVerifyAppDomain)
 						r.With(s.appProjectAuthz(domain.RoleAdmin)).Delete("/{appID}/domains/{domainID}", s.handleDeleteAppDomain)
 
 						// App metrics.

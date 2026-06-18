@@ -96,6 +96,13 @@ type Store interface {
 	CreateDomain(ctx context.Context, d *domain.Domain) error
 	GetDomain(ctx context.Context, id string) (*domain.Domain, error)
 	ListDomainsByApp(ctx context.Context, appID string) ([]domain.Domain, error)
+	// GetVerifiedDomainByHost returns the single VERIFIED domain row owning the
+	// given host (case-insensitive match on the domain column WHERE
+	// status='verified'), regardless of app/org. It is the global hostname-ownership
+	// lookup used to reject a second tenant verifying a host already claimed by
+	// another. Returns ErrNotFound when no verified row owns the host.
+	GetVerifiedDomainByHost(ctx context.Context, host string) (*domain.Domain, error)
+	UpdateDomain(ctx context.Context, d *domain.Domain) error
 	DeleteDomain(ctx context.Context, id string) error
 
 	// Projects (Org → Project → App).

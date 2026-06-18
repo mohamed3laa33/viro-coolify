@@ -38,8 +38,15 @@ type Config struct {
 	KubeChartPath    string // path to the common-chart used for workload installs
 	GatewayName      string // shared Gateway every per-app HTTPRoute attaches to
 	GatewayNamespace string // namespace of the shared Gateway
-	HelmTimeoutSec   int    // per-Apply helm deadline (seconds); --wait --atomic
-	ReconcileSec     int    // status reconciler interval (seconds)
+	// ClusterIssuer is the cert-manager ClusterIssuer that signs per-tenant
+	// custom-domain certificates. Empty disables per-domain TLS issuance.
+	ClusterIssuer string
+	// GatewayLBHost optionally advertises the shared Gateway LoadBalancer host/IP
+	// as the A/ALIAS target in custom-domain DNS instructions. Empty advises a
+	// CNAME to the app's generated host instead.
+	GatewayLBHost  string
+	HelmTimeoutSec int // per-Apply helm deadline (seconds); --wait --atomic
+	ReconcileSec   int // status reconciler interval (seconds)
 
 	// DBDefaultStorageGB is the default persistent-volume size (GiB) for a managed
 	// database when the create request does not specify one. Admin-tunable.
@@ -137,6 +144,8 @@ func Load() (*Config, error) {
 		KubeChartPath:    getenv("KUBE_CHART_PATH", "deploy/charts/common-chart"),
 		GatewayName:      getenv("GATEWAY_NAME", "vortex"),
 		GatewayNamespace: getenv("GATEWAY_NAMESPACE", "vortex"),
+		ClusterIssuer:    getenv("CLUSTER_ISSUER", "vortex-letsencrypt"),
+		GatewayLBHost:    getenv("GATEWAY_LB_HOST", ""),
 		HelmTimeoutSec:   getenvInt("HELM_TIMEOUT_SEC", 300),
 		ReconcileSec:     getenvInt("RECONCILE_SEC", 30),
 

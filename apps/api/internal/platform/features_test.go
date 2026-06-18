@@ -279,8 +279,11 @@ func TestDomainsAddListDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("add domain: %v", err)
 	}
-	if d.Domain != "example.com" || d.Verified {
-		t.Fatalf("unexpected domain: %+v", d)
+	if d.Domain.Domain != "example.com" || d.Verified || d.Status != domain.DomainPending {
+		t.Fatalf("unexpected domain: %+v", d.Domain)
+	}
+	if d.Instructions.VerificationToken == "" || d.VerificationToken == "" {
+		t.Fatalf("expected a verification token, got %+v", d)
 	}
 	list, _ := svc.ListDomains(ctx, "org-1", app.ID)
 	if len(list) != 1 {

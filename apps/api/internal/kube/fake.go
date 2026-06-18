@@ -37,6 +37,15 @@ type FakeBackend struct {
 	// LogStream).
 	LogLines string
 
+	// DomainCerts records every host an EnsureDomainCertificate was issued for and
+	// removes it on RemoveDomainCertificate, so domain-TLS tests can assert that a
+	// VERIFIED custom domain got a cert (and a deleted one got it removed).
+	DomainCerts map[string]bool
+	// GatewayListeners records each host attached to the shared Gateway via
+	// EnsureGatewayListener (cleared by RemoveGatewayListener), mapping host ->
+	// cert Secret name so tests can assert the listener references the right cert.
+	GatewayListeners map[string]string
+
 	// MetricsAvailable controls whether Metrics reports live data. When false the
 	// fake mimics a cluster without a metrics-server (honest "unavailable").
 	MetricsAvailable bool
@@ -51,14 +60,16 @@ var _ Backend = (*FakeBackend)(nil)
 // NewFakeBackend returns an initialized FakeBackend.
 func NewFakeBackend() *FakeBackend {
 	return &FakeBackend{
-		BaseDomain:  "vortex.v60ai.com",
-		Tenants:     map[string]Quota{},
-		Applied:     map[string]Workload{},
-		Hosts:       map[string]string{},
-		Replicas:    map[string]int{},
-		PullSecrets: map[string]bool{},
-		AppSecrets:  map[string]map[string]string{},
-		LogLines:    "fake log line\n",
+		BaseDomain:       "vortex.v60ai.com",
+		Tenants:          map[string]Quota{},
+		Applied:          map[string]Workload{},
+		Hosts:            map[string]string{},
+		Replicas:         map[string]int{},
+		PullSecrets:      map[string]bool{},
+		AppSecrets:       map[string]map[string]string{},
+		DomainCerts:      map[string]bool{},
+		GatewayListeners: map[string]string{},
+		LogLines:         "fake log line\n",
 		// Deterministic test values: a deployed workload reports a fixed live usage
 		// so platform/handler tests can assert REAL (non-synthetic) numbers.
 		MetricsAvailable: true,
@@ -211,6 +222,43 @@ func (f *FakeBackend) Metrics(_ context.Context, namespace, release string) (Wor
 		CPUMillicores: f.CPUMillicores,
 		MemoryBytes:   f.MemoryBytes,
 	}, nil
+}
+
+// EnsureDomainCertificate records that a per-domain TLS cert was issued for host.
+func (f *FakeBackend) EnsureDomainCertificate(_ context.Context, host string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.DomainCerts[strings.ToLower(strings.TrimSpace(host))] = true
+	return nil
+}
+
+// RemoveDomainCertificate clears the recorded per-domain TLS cert for host.
+func (f *FakeBackend) RemoveDomainCertificate(_ context.Context, host string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.DomainCerts, strings.ToLower(strings.TrimSpace(host)))
+	return nil
+}
+
+// EnsureGatewayListener records that host was attached to the shared Gateway with
+// the given cert Secret (defaulting to the derived per-domain Secret name).
+func (f *FakeBackend) EnsureGatewayListener(_ context.Context, host, certSecret string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	host = strings.ToLower(strings.TrimSpace(host))
+	if certSecret == "" {
+		certSecret = DomainCertSecret(host)
+	}
+	f.GatewayListeners[host] = certSecret
+	return nil
+}
+
+// RemoveGatewayListener clears the recorded shared-Gateway listener for host.
+func (f *FakeBackend) RemoveGatewayListener(_ context.Context, host string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.GatewayListeners, strings.ToLower(strings.TrimSpace(host)))
+	return nil
 }
 
 func (f *FakeBackend) Status(_ context.Context, namespace, release string) (Status, error) {

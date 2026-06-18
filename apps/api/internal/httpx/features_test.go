@@ -157,13 +157,39 @@ func TestAppDomainEndpoints(t *testing.T) {
 		t.Fatalf("add domain = %d %s", rec.Code, rec.Body.String())
 	}
 	var d struct {
-		ID       string `json:"id"`
-		Domain   string `json:"domain"`
-		Verified bool   `json:"verified"`
+		ID                string `json:"id"`
+		Domain            string `json:"domain"`
+		Verified          bool   `json:"verified"`
+		Status            string `json:"status"`
+		VerificationToken string `json:"verificationToken"`
+		Instructions      struct {
+			TXTName     string `json:"txtName"`
+			TXTValue    string `json:"txtValue"`
+			TargetType  string `json:"targetType"`
+			TargetValue string `json:"targetValue"`
+		} `json:"instructions"`
 	}
 	_ = json.NewDecoder(rec.Body).Decode(&d)
-	if d.ID == "" || d.Domain != "example.com" {
+	if d.ID == "" || d.Domain != "example.com" || d.Status != "pending" || d.Verified {
 		t.Fatalf("unexpected domain: %+v", d)
+	}
+	if d.VerificationToken == "" || d.Instructions.TXTName != "_vortex-challenge.example.com" || d.Instructions.TXTValue != d.VerificationToken {
+		t.Fatalf("expected verification instructions, got %+v", d)
+	}
+
+	// Verify the endpoint is wired: with no real TXT record published the
+	// challenge fails, so the domain transitions to "failed" (never spoof-verified).
+	vrec := doJSON(t, s, http.MethodPost, base+"/"+d.ID+"/verify", "", token)
+	if vrec.Code != http.StatusOK {
+		t.Fatalf("verify domain = %d %s", vrec.Code, vrec.Body.String())
+	}
+	var vd struct {
+		Status   string `json:"status"`
+		Verified bool   `json:"verified"`
+	}
+	_ = json.NewDecoder(vrec.Body).Decode(&vd)
+	if vd.Status != "failed" || vd.Verified {
+		t.Fatalf("expected failed verification without a TXT record, got %+v", vd)
 	}
 
 	rec = doJSON(t, s, http.MethodGet, base, "", token)

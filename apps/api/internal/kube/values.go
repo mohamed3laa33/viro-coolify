@@ -1,6 +1,8 @@
 package kube
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"math"
 	"regexp"
@@ -35,6 +37,36 @@ func host(name, projSlug, orgSlug, baseDomain string) string {
 	return fmt.Sprintf("%s.%s.%s.%s",
 		sanitize(name), sanitize(projSlug), sanitize(orgSlug), baseDomain)
 }
+
+// domainSlug derives a DNS-1123-safe, deterministic, collision-resistant slug
+// from an arbitrary custom hostname so it can name a Certificate / Secret /
+// Gateway listener. It combines a sanitized, length-capped prefix of the host
+// with a short hash of the FULL host, so two distinct hosts that sanitize to the
+// same prefix never collide on the same object name.
+func domainSlug(host string) string {
+	host = strings.ToLower(strings.TrimSpace(host))
+	sum := sha256.Sum256([]byte(host))
+	short := hex.EncodeToString(sum[:])[:10]
+	prefix := sanitize(host)
+	if len(prefix) > 40 {
+		prefix = strings.Trim(prefix[:40], "-")
+	}
+	if prefix == "" {
+		return short
+	}
+	return prefix + "-" + short
+}
+
+// DomainCertName is the cert-manager Certificate object name for a custom host.
+func DomainCertName(host string) string { return "vortex-dom-" + domainSlug(host) }
+
+// DomainCertSecret is the TLS Secret name cert-manager writes for a custom host
+// (referenced by both the Certificate and the Gateway listener).
+func DomainCertSecret(host string) string { return "vortex-dom-tls-" + domainSlug(host) }
+
+// DomainListenerName is the shared-Gateway HTTPS listener name for a custom host.
+// Gateway listener names are validated as DNS-1123 labels (<=63 chars).
+func DomainListenerName(host string) string { return "d-" + domainSlug(host) }
 
 // milliCPU renders cores as a millicore quantity string, e.g. 0.2 -> "200m".
 // It rounds to the nearest millicore so the result is always integral.

@@ -24,8 +24,11 @@ func TestDeployReAppliesWithEnvAndDomains(t *testing.T) {
 	if err := svc.store.SetAppEnv(ctx, app.ID, "FOO", "bar", false); err != nil {
 		t.Fatalf("set env: %v", err)
 	}
+	// Only VERIFIED custom domains are routed (added to the workload hostnames), so
+	// the domain is created already-verified here.
 	if err := svc.store.CreateDomain(ctx, &domain.Domain{
 		ID: "d1", OrgID: "org-1", AppID: app.ID, Domain: "www.example.com",
+		Status: domain.DomainVerified, Verified: true,
 	}); err != nil {
 		t.Fatalf("create domain: %v", err)
 	}

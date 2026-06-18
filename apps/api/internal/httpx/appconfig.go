@@ -77,19 +77,34 @@ func (s *Server) handleAddAppDomain(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "domain is required")
 		return
 	}
-	d, err := s.platform.AddDomain(r.Context(), chi.URLParam(r, "orgID"), chi.URLParam(r, "appID"), req.Domain)
+	orgID, appID := chi.URLParam(r, "orgID"), chi.URLParam(r, "appID")
+	d, err := s.platform.AddDomain(r.Context(), orgID, appID, req.Domain)
 	if err != nil {
 		s.writePlatformError(w, "add app domain", err)
 		return
 	}
+	s.audit(r.Context(), orgID, "domain.add", "domain", appID+"/"+d.Domain.Domain, "")
 	writeJSON(w, http.StatusCreated, d)
 }
 
+func (s *Server) handleVerifyAppDomain(w http.ResponseWriter, r *http.Request) {
+	orgID, appID, domainID := chi.URLParam(r, "orgID"), chi.URLParam(r, "appID"), chi.URLParam(r, "domainID")
+	d, err := s.platform.VerifyDomain(r.Context(), orgID, appID, domainID)
+	if err != nil {
+		s.writePlatformError(w, "verify app domain", err)
+		return
+	}
+	s.audit(r.Context(), orgID, "domain.verify", "domain", appID+"/"+d.Domain.Domain, string(d.Status))
+	writeJSON(w, http.StatusOK, d)
+}
+
 func (s *Server) handleDeleteAppDomain(w http.ResponseWriter, r *http.Request) {
-	if err := s.platform.DeleteDomain(r.Context(), chi.URLParam(r, "orgID"), chi.URLParam(r, "appID"), chi.URLParam(r, "domainID")); err != nil {
+	orgID, appID, domainID := chi.URLParam(r, "orgID"), chi.URLParam(r, "appID"), chi.URLParam(r, "domainID")
+	if err := s.platform.DeleteDomain(r.Context(), orgID, appID, domainID); err != nil {
 		s.writePlatformError(w, "delete app domain", err)
 		return
 	}
+	s.audit(r.Context(), orgID, "domain.delete", "domain", appID+"/"+domainID, "")
 	w.WriteHeader(http.StatusNoContent)
 }
 

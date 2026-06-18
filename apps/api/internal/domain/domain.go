@@ -181,14 +181,44 @@ type Build struct {
 	FinishedAt time.Time   `json:"finishedAt,omitempty"`
 }
 
-// Domain is a custom domain (FQDN) attached to an app.
+// DomainStatus is the ownership-verification lifecycle of a custom domain.
+type DomainStatus string
+
+const (
+	// DomainPending is a freshly-added domain awaiting DNS TXT verification. It is
+	// NOT routed and serves no TLS until it becomes verified.
+	DomainPending DomainStatus = "pending"
+	// DomainVerified means the tenant proved ownership (DNS TXT challenge matched).
+	// Only verified domains are attached to the Gateway, issued a TLS certificate,
+	// and routed by the app's HTTPRoute.
+	DomainVerified DomainStatus = "verified"
+	// DomainFailed means the last verification attempt did not find a matching TXT
+	// record. The domain may be re-verified once DNS is corrected.
+	DomainFailed DomainStatus = "failed"
+)
+
+// Domain is a custom domain (FQDN) attached to an app. Ownership is proven via a
+// DNS TXT challenge (Status/VerificationToken/VerifiedAt) before the domain is
+// ever routed or issued TLS — an unverified domain never serves the tenant.
 type Domain struct {
-	ID        string    `json:"id"`
-	OrgID     string    `json:"orgId"`
-	AppID     string    `json:"appId"`
-	Domain    string    `json:"domain"`
-	Verified  bool      `json:"verified"`
-	CreatedAt time.Time `json:"createdAt"`
+	ID     string `json:"id"`
+	OrgID  string `json:"orgId"`
+	AppID  string `json:"appId"`
+	Domain string `json:"domain"`
+	// Verified is kept as a convenience mirror of Status==DomainVerified for
+	// back-compat with existing consumers; Status is the source of truth.
+	Verified bool         `json:"verified"`
+	Status   DomainStatus `json:"status"`
+	// VerificationToken is the random value the tenant must publish as a TXT record
+	// at _vortex-challenge.<domain> to prove ownership. Generated with crypto/rand.
+	VerificationToken string    `json:"verificationToken,omitempty"`
+	VerifiedAt        time.Time `json:"verifiedAt,omitempty"`
+	CreatedAt         time.Time `json:"createdAt"`
+}
+
+// IsVerified reports whether the domain has proven ownership and may be routed.
+func (d Domain) IsVerified() bool {
+	return d.Status == DomainVerified || (d.Status == "" && d.Verified)
 }
 
 // Database is a Vortex managed database owned by an organization. It is deployed

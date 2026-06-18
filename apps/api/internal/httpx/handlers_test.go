@@ -28,8 +28,17 @@ func newTestServer(t *testing.T, coolifyURL string) *Server {
 	// double for kube.Backend) so resource creation is deterministic and never
 	// touches a real cluster.
 	return NewServer(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)),
-		store.NewMemoryStore(), WithBackend(kube.NewFakeBackend()))
+		store.NewMemoryStore(), WithBackend(kube.NewFakeBackend()),
+		// Hermetic custom-domain verification: an empty-TXT resolver never matches,
+		// so tests never touch real DNS (and a verify resolves to "failed").
+		WithDomainResolver(emptyResolver{}))
 }
+
+// emptyResolver is a platform.Resolver that returns no TXT records, so custom-
+// domain verification deterministically fails without any real DNS lookup.
+type emptyResolver struct{}
+
+func (emptyResolver) LookupTXT(_ context.Context, _ string) ([]string, error) { return nil, nil }
 
 // signup registers a user and returns their access token (for authenticated requests).
 func signup(t *testing.T, s *Server, email string) string {

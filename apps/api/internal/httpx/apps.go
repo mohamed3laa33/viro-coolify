@@ -49,6 +49,10 @@ func (s *Server) writePlatformError(w http.ResponseWriter, action string, err er
 		writeError(w, http.StatusPaymentRequired, err.Error())
 	case errors.Is(err, platform.ErrInvalidTemplate):
 		writeError(w, http.StatusBadRequest, "unknown catalog template")
+	case errors.Is(err, platform.ErrInvalidDomain):
+		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, platform.ErrDomainTaken):
+		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, platform.ErrNoImage):
 		writeError(w, http.StatusConflict, err.Error())
 	default:

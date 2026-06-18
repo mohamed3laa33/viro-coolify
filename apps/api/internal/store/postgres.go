@@ -793,18 +793,32 @@ func (s *PostgresStore) ListAuditEvents(ctx context.Context, f domain.AuditFilte
 
 func (s *PostgresStore) CreateDomain(ctx context.Context, d *domain.Domain) error {
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO domains (id, org_id, app_id, domain, verified, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6)`,
-		d.ID, d.OrgID, d.AppID, d.Domain, d.Verified, d.CreatedAt,
+		`INSERT INTO domains (id, org_id, app_id, domain, verified, status, verification_token, verified_at, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		d.ID, d.OrgID, d.AppID, d.Domain, d.Verified, string(d.Status), d.VerificationToken, nullTime(d.VerifiedAt), d.CreatedAt,
 	)
 	return mapErr(err)
 }
 
-func (s *PostgresStore) GetDomain(ctx context.Context, id string) (*domain.Domain, error) {
+// scanDomain scans a domains row (with nullable verified_at) into a Domain.
+func scanDomain(row interface{ Scan(...any) error }) (domain.Domain, error) {
 	var d domain.Domain
-	err := s.pool.QueryRow(ctx,
-		`SELECT id, org_id, app_id, domain, verified, created_at FROM domains WHERE id = $1`, id,
-	).Scan(&d.ID, &d.OrgID, &d.AppID, &d.Domain, &d.Verified, &d.CreatedAt)
+	var status string
+	var verifiedAt *time.Time
+	if err := row.Scan(&d.ID, &d.OrgID, &d.AppID, &d.Domain, &d.Verified, &status, &d.VerificationToken, &verifiedAt, &d.CreatedAt); err != nil {
+		return domain.Domain{}, err
+	}
+	d.Status = domain.DomainStatus(status)
+	if verifiedAt != nil {
+		d.VerifiedAt = *verifiedAt
+	}
+	return d, nil
+}
+
+func (s *PostgresStore) GetDomain(ctx context.Context, id string) (*domain.Domain, error) {
+	row := s.pool.QueryRow(ctx,
+		`SELECT id, org_id, app_id, domain, verified, status, verification_token, verified_at, created_at FROM domains WHERE id = $1`, id)
+	d, err := scanDomain(row)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -813,20 +827,49 @@ func (s *PostgresStore) GetDomain(ctx context.Context, id string) (*domain.Domai
 
 func (s *PostgresStore) ListDomainsByApp(ctx context.Context, appID string) ([]domain.Domain, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, org_id, app_id, domain, verified, created_at FROM domains WHERE app_id = $1`, appID)
+		`SELECT id, org_id, app_id, domain, verified, status, verification_token, verified_at, created_at FROM domains WHERE app_id = $1`, appID)
 	if err != nil {
 		return nil, mapErr(err)
 	}
 	defer rows.Close()
 	out := make([]domain.Domain, 0)
 	for rows.Next() {
-		var d domain.Domain
-		if err := rows.Scan(&d.ID, &d.OrgID, &d.AppID, &d.Domain, &d.Verified, &d.CreatedAt); err != nil {
+		d, err := scanDomain(rows)
+		if err != nil {
 			return nil, mapErr(err)
 		}
 		out = append(out, d)
 	}
 	return out, mapErr(rows.Err())
+}
+
+// GetVerifiedDomainByHost returns the single VERIFIED domain owning host
+// (case-insensitive, status='verified'), regardless of app/org. The DB partial
+// unique index (domains_verified_host_uniq) guarantees at most one such row.
+// Returns ErrNotFound when no verified row owns the host.
+func (s *PostgresStore) GetVerifiedDomainByHost(ctx context.Context, host string) (*domain.Domain, error) {
+	row := s.pool.QueryRow(ctx,
+		`SELECT id, org_id, app_id, domain, verified, status, verification_token, verified_at, created_at
+		 FROM domains WHERE lower(domain) = lower($1) AND status = 'verified' LIMIT 1`, host)
+	d, err := scanDomain(row)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return &d, nil
+}
+
+func (s *PostgresStore) UpdateDomain(ctx context.Context, d *domain.Domain) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE domains SET domain = $2, verified = $3, status = $4, verification_token = $5, verified_at = $6 WHERE id = $1`,
+		d.ID, d.Domain, d.Verified, string(d.Status), d.VerificationToken, nullTime(d.VerifiedAt),
+	)
+	if err != nil {
+		return mapErr(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *PostgresStore) DeleteDomain(ctx context.Context, id string) error {

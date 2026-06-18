@@ -1105,6 +1105,32 @@ func (s *MemoryStore) ListDomainsByApp(_ context.Context, appID string) ([]domai
 	return out, nil
 }
 
+// GetVerifiedDomainByHost returns the single VERIFIED domain owning host
+// (case-insensitive), regardless of app/org, so VerifyDomain can reject a second
+// tenant claiming a host already verified by another. ErrNotFound when none.
+func (s *MemoryStore) GetVerifiedDomainByHost(_ context.Context, host string) (*domain.Domain, error) {
+	want := strings.ToLower(strings.TrimSpace(host))
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, d := range s.domains {
+		if d.IsVerified() && strings.EqualFold(d.Domain, want) {
+			cp := d
+			return &cp, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+func (s *MemoryStore) UpdateDomain(_ context.Context, d *domain.Domain) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.domains[d.ID]; !ok {
+		return ErrNotFound
+	}
+	s.domains[d.ID] = *d
+	return nil
+}
+
 func (s *MemoryStore) DeleteDomain(_ context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

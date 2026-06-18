@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -38,6 +39,10 @@ type Config struct {
 	// HTTPRoute attaches to via parentRefs.
 	GatewayName      string
 	GatewayNamespace string
+	// ClusterIssuer is the cert-manager ClusterIssuer name that signs per-tenant
+	// custom-domain certificates (e.g. "vortex-letsencrypt"). Empty disables
+	// per-domain TLS issuance (EnsureDomainCertificate then no-ops).
+	ClusterIssuer string
 	// CPUOvercommitFactor / MemoryOvercommitFactor scale requested size down to the
 	// scheduler requests (e.g. 0.2 and 0.35). Limits stay at the full requested size.
 	CPUOvercommitFactor    float64
@@ -75,6 +80,29 @@ var scaledObjectGVR = schema.GroupVersionResource{
 // kedaPausedAnnotation, when set on a ScaledObject, pins the workload to the
 // annotated replica count (KEDA stops scaling it). Removing it resumes scaling.
 const kedaPausedAnnotation = "autoscaling.keda.sh/paused-replicas"
+
+// certificateGVR is the cert-manager Certificate CRD, driven via the dynamic
+// client (it is not in the typed clientset).
+var certificateGVR = schema.GroupVersionResource{
+	Group:    "cert-manager.io",
+	Version:  "v1",
+	Resource: "certificates",
+}
+
+// gatewayGVR is the Gateway API Gateway CRD, driven via the dynamic client.
+var gatewayGVR = schema.GroupVersionResource{
+	Group:    "gateway.networking.k8s.io",
+	Version:  "v1",
+	Resource: "gateways",
+}
+
+// maxGatewayListeners is the Gateway API hard limit on listeners per Gateway
+// (spec: a Gateway may define at most 64 listeners). EnsureGatewayListener
+// refuses to add a per-domain HTTPS listener once this ceiling is reached rather
+// than producing an invalid Gateway the controller would reject wholesale. At
+// that scale the platform should move to a dedicated per-tenant Gateway; this
+// guard makes the limit explicit instead of silently corrupting the shared one.
+const maxGatewayListeners = 64
 
 // KubeBackend is the real Backend: a typed clientset for namespace/quota/status/logs
 // plus a HelmRunner for chart installs.
@@ -1052,4 +1080,194 @@ func statusFrom(replicas, ready int32) Status {
 		phase = "Pending"
 	}
 	return Status{Phase: phase, Replicas: int(replicas), ReadyReplicas: int(ready)}
+}
+
+// ---------------------------------------------------------------------------
+// Custom-domain TLS (cert-manager Certificate + shared-Gateway HTTPS listener)
+// ---------------------------------------------------------------------------
+
+// EnsureDomainCertificate creates (idempotently) a cert-manager Certificate for
+// the exact custom hostname, signed by the configured ClusterIssuer, materialized
+// into a TLS Secret in the shared Gateway namespace. The Certificate + Secret are
+// named deterministically from the host (DomainCertSecret), so the call is safe
+// to repeat when a domain re-verifies. With no ClusterIssuer or no dynamic client
+// configured it no-ops (local/dev), so non-cluster flows keep working.
+func (b *KubeBackend) EnsureDomainCertificate(ctx context.Context, host string) error {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" {
+		return fmt.Errorf("kube: empty custom-domain host")
+	}
+	if b.dynamic == nil || b.cfg.ClusterIssuer == "" {
+		return nil
+	}
+	ns := b.cfg.GatewayNamespace
+	name := DomainCertName(host)
+	secretName := DomainCertSecret(host)
+
+	cert := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "cert-manager.io/v1",
+		"kind":       "Certificate",
+		"metadata": map[string]any{
+			"name":      name,
+			"namespace": ns,
+			"labels":    map[string]any{"app.kubernetes.io/managed-by": "vortex"},
+		},
+		"spec": map[string]any{
+			"secretName": secretName,
+			"dnsNames":   []any{host},
+			"issuerRef": map[string]any{
+				"name": b.cfg.ClusterIssuer,
+				"kind": "ClusterIssuer",
+			},
+		},
+	}}
+	cert.SetGroupVersionKind(certificateGVR.GroupVersion().WithKind("Certificate"))
+
+	return upsert(ctx,
+		func() error {
+			_, err := b.dynamic.Resource(certificateGVR).Namespace(ns).Create(ctx, cert, metav1.CreateOptions{})
+			return err
+		},
+		func() error {
+			cur, err := b.dynamic.Resource(certificateGVR).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+			if err := unstructured.SetNestedMap(cur.Object, cert.Object["spec"].(map[string]any), "spec"); err != nil {
+				return err
+			}
+			_, err = b.dynamic.Resource(certificateGVR).Namespace(ns).Update(ctx, cur, metav1.UpdateOptions{})
+			return err
+		},
+	)
+}
+
+// RemoveDomainCertificate deletes the cert-manager Certificate for the host (its
+// TLS Secret is garbage-collected by cert-manager). A missing Certificate, no
+// dynamic client, or no ClusterIssuer is not an error (idempotent cleanup).
+func (b *KubeBackend) RemoveDomainCertificate(ctx context.Context, host string) error {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" || b.dynamic == nil || b.cfg.ClusterIssuer == "" {
+		return nil
+	}
+	ns := b.cfg.GatewayNamespace
+	err := b.dynamic.Resource(certificateGVR).Namespace(ns).Delete(ctx, DomainCertName(host), metav1.DeleteOptions{})
+	if err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("kube: delete domain certificate %s/%s: %w", ns, DomainCertName(host), err)
+	}
+	return nil
+}
+
+// EnsureGatewayListener adds (idempotently) a dedicated HTTPS listener to the
+// SHARED Gateway terminating TLS for the custom host with the per-domain cert
+// Secret. It MERGES into the existing spec.listeners under RetryOnConflict so it
+// never clobbers other tenants' listeners (or the wildcard listener), and refuses
+// to exceed the Gateway API 64-listener limit (see maxGatewayListeners) — at that
+// scale a dedicated per-tenant Gateway is required. With no dynamic client it
+// no-ops (local/dev).
+func (b *KubeBackend) EnsureGatewayListener(ctx context.Context, host, certSecret string) error {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" {
+		return fmt.Errorf("kube: empty custom-domain host")
+	}
+	if b.dynamic == nil {
+		return nil
+	}
+	if certSecret == "" {
+		certSecret = DomainCertSecret(host)
+	}
+	ns := b.cfg.GatewayNamespace
+	lname := DomainListenerName(host)
+
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		gw, err := b.dynamic.Resource(gatewayGVR).Namespace(ns).Get(ctx, b.cfg.GatewayName, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("kube: get gateway %s/%s: %w", ns, b.cfg.GatewayName, err)
+		}
+		listeners, _, _ := unstructured.NestedSlice(gw.Object, "spec", "listeners")
+		// Idempotent: if a listener for this host already exists, nothing to do.
+		for _, l := range listeners {
+			if m, ok := l.(map[string]any); ok {
+				if n, _ := m["name"].(string); n == lname {
+					return nil
+				}
+			}
+		}
+		if len(listeners) >= maxGatewayListeners {
+			return fmt.Errorf("kube: shared gateway %s/%s at the %d-listener limit; cannot attach %s (move tenant to a dedicated Gateway)",
+				ns, b.cfg.GatewayName, maxGatewayListeners, host)
+		}
+		listeners = append(listeners, domainListener(lname, host, certSecret))
+		if err := unstructured.SetNestedSlice(gw.Object, listeners, "spec", "listeners"); err != nil {
+			return err
+		}
+		_, err = b.dynamic.Resource(gatewayGVR).Namespace(ns).Update(ctx, gw, metav1.UpdateOptions{})
+		return err
+	})
+}
+
+// RemoveGatewayListener removes the per-domain HTTPS listener from the shared
+// Gateway, preserving every other listener. A missing Gateway/listener (or no
+// dynamic client) is not an error (idempotent cleanup).
+func (b *KubeBackend) RemoveGatewayListener(ctx context.Context, host string) error {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" || b.dynamic == nil {
+		return nil
+	}
+	ns := b.cfg.GatewayNamespace
+	lname := DomainListenerName(host)
+
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		gw, err := b.dynamic.Resource(gatewayGVR).Namespace(ns).Get(ctx, b.cfg.GatewayName, metav1.GetOptions{})
+		if err != nil {
+			if errors.IsNotFound(err) {
+				return nil
+			}
+			return fmt.Errorf("kube: get gateway %s/%s: %w", ns, b.cfg.GatewayName, err)
+		}
+		listeners, found, _ := unstructured.NestedSlice(gw.Object, "spec", "listeners")
+		if !found {
+			return nil
+		}
+		out := make([]any, 0, len(listeners))
+		removed := false
+		for _, l := range listeners {
+			if m, ok := l.(map[string]any); ok {
+				if n, _ := m["name"].(string); n == lname {
+					removed = true
+					continue
+				}
+			}
+			out = append(out, l)
+		}
+		if !removed {
+			return nil
+		}
+		if err := unstructured.SetNestedSlice(gw.Object, out, "spec", "listeners"); err != nil {
+			return err
+		}
+		_, err = b.dynamic.Resource(gatewayGVR).Namespace(ns).Update(ctx, gw, metav1.UpdateOptions{})
+		return err
+	})
+}
+
+// domainListener renders one Gateway API HTTPS listener (Terminate TLS with the
+// per-domain cert Secret) for the exact host, accepting routes from all
+// namespaces so the tenant's per-app HTTPRoute (in its own namespace) attaches.
+func domainListener(name, host, certSecret string) map[string]any {
+	return map[string]any{
+		"name":     name,
+		"protocol": "HTTPS",
+		"port":     int64(443),
+		"hostname": host,
+		"tls": map[string]any{
+			"mode": "Terminate",
+			"certificateRefs": []any{
+				map[string]any{"kind": "Secret", "name": certSecret},
+			},
+		},
+		"allowedRoutes": map[string]any{
+			"namespaces": map[string]any{"from": "All"},
+		},
+	}
 }
