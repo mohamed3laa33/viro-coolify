@@ -147,14 +147,23 @@ function NavLink({
 }
 
 /**
- * Custom DOM event the {@link MobileSidebar} listens for. The Topbar can render
- * a hamburger button that calls {@link openMobileSidebar} (or dispatches this
- * event) without importing any shared provider — keeping this component fully
- * self-contained and avoiding edits to foundation files.
+ * Canonical DOM event name the {@link MobileSidebar} drawer listens for. This is
+ * the single source of truth for the open mechanism: {@link openMobileSidebar}
+ * dispatches it and the drawer listens for it — nothing else.
+ *
+ * The preferred way for other client components (e.g. the Topbar hamburger) to
+ * open the drawer is to import and call {@link openMobileSidebar}. The event
+ * constant is exported as well so a caller can dispatch the SAME event directly
+ * (`window.dispatchEvent(new CustomEvent(SIDEBAR_OPEN_EVENT))`) without importing
+ * any shared provider — keeping this component fully self-contained.
  */
 export const SIDEBAR_OPEN_EVENT = "vortex:sidebar-open";
 
-/** Dispatch the open event; safe to call from any client component. */
+/**
+ * Canonical opener for the mobile navigation drawer. Safe to call from any
+ * client component; no-ops during SSR. Prefer this over dispatching the event
+ * by hand.
+ */
 export function openMobileSidebar() {
   if (typeof window === "undefined") return;
   window.dispatchEvent(new CustomEvent(SIDEBAR_OPEN_EVENT));
@@ -288,7 +297,8 @@ export function MobileSidebar() {
 
   const close = useCallback(() => setOpen(false), []);
 
-  // Open on the shared custom event.
+  // Open on the canonical custom event — the only open mechanism. Callers reach
+  // it via openMobileSidebar() or by dispatching SIDEBAR_OPEN_EVENT directly.
   useEffect(() => {
     function onOpen() {
       setOpen(true);

@@ -1,9 +1,11 @@
 "use client";
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { X } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { api, type AdminPlan, type Settings } from "@/lib/api";
+import { errorMessage } from "@/lib/errors";
+import { isDemoMode } from "@/lib/demo";
 import { useDemoData } from "@/lib/demo-data";
 import { useResource } from "@/lib/use-resource";
 import { PageHeader } from "@/components/page-header";
@@ -38,16 +40,44 @@ const EMPTY_SETTINGS: Settings = {
 
 export default function AdminSettingsPage() {
   const { authedCall } = useAuth();
+  const demo = isDemoMode();
 
   // Demo fallbacks load lazily (demo mode only); prod shows EMPTY_SETTINGS.
   const demoSettings = useDemoData((m) => m.mockSettings, EMPTY_SETTINGS);
   const demoPlans = useDemoData((m) => m.mockPlans, [] as AdminPlan[]);
 
-  const { data: settings, usingFallback } = useResource(
-    () => authedCall((token, on) => api.getSettings(token, on)),
+  // useResource reports a boolean `error`; capture the real failure here so we
+  // can surface the actual ApiError message instead of a generic placeholder.
+  const fetchErrorRef = useRef<string | null>(null);
+
+  const {
+    data: settings,
+    error,
+    refetch,
+    usingFallback,
+  } = useResource(
+    (signal) =>
+      authedCall(
+        (token, on) =>
+          api
+            .getSettings(token, on, { signal })
+            .then((res) => {
+              fetchErrorRef.current = null;
+              return res;
+            })
+            .catch((err: unknown) => {
+              fetchErrorRef.current = errorMessage(
+                err,
+                "Couldn’t load settings — the API is unreachable.",
+              );
+              throw err;
+            }),
+        signal,
+      ),
     demoSettings,
     [demoSettings],
   );
+  const showError = error && !demo;
 
   const { data: plansData } = useResource(
     () => authedCall((token, on) => api.listAdminPlans(token, on)),
@@ -100,10 +130,10 @@ export default function AdminSettingsPage() {
     try {
       await authedCall((token, on) => api.updateSettings(form, token, on));
       setNotice({ variant: "success", message: "Settings saved." });
-    } catch {
+    } catch (err) {
       setNotice({
         variant: "error",
-        message: "Save failed (API unreachable — demo mode).",
+        message: errorMessage(err, "Save failed — the API is unreachable."),
       });
     } finally {
       setPending(false);
@@ -117,9 +147,21 @@ export default function AdminSettingsPage() {
         description="Defaults, resource overcommit, and regions for the whole platform."
       />
 
-      {usingFallback && (
+      {usingFallback && demo && (
         <Notice variant="warning">
           Showing demo data — admin API unreachable. Edits won&apos;t persist.
+        </Notice>
+      )}
+
+      {showError && (
+        <Notice variant="error" className="items-center justify-between gap-4">
+          <span>
+            {fetchErrorRef.current ??
+              "Couldn’t load settings — the API is unreachable."}
+          </span>
+          <Button size="sm" variant="secondary" onClick={refetch}>
+            Retry
+          </Button>
         </Notice>
       )}
 
@@ -267,14 +309,16 @@ export default function AdminSettingsPage() {
                     {r === form.defaultRegion && (
                       <Badge variant="info">default</Badge>
                     )}
-                    <button
+                    <Button
                       type="button"
+                      variant="ghost"
+                      size="icon"
                       onClick={() => removeRegion(r)}
-                      className="inline-flex items-center justify-center text-muted-foreground hover:text-destructive pointer-coarse:min-h-11 pointer-coarse:min-w-11"
+                      className="-mr-1 h-5 w-5 text-muted-foreground hover:text-destructive"
                       aria-label={`Remove ${r}`}
                     >
                       <X className="h-3.5 w-3.5" />
-                    </button>
+                    </Button>
                   </span>
                 ))}
                 {form.regions.length === 0 && (

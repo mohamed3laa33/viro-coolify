@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { ApiError } from "@/lib/api";
+
 interface ResourceState<T> {
   data: T;
   loading: boolean;
@@ -9,6 +11,12 @@ interface ResourceState<T> {
   usingFallback: boolean;
   /** True when the network call itself failed (distinct from a skipped fetch). */
   error: boolean;
+  /**
+   * HTTP status from the failed request when it was an {@link ApiError} (the
+   * backend returned a 4xx/5xx). `null` when there is no error or the failure
+   * was a network/TypeError rather than an HTTP response.
+   */
+  errorStatus: number | null;
   /** Re-run the fetcher imperatively (e.g. after a mutation). */
   refetch: () => void;
 }
@@ -26,11 +34,15 @@ interface ResourceState<T> {
  * - `revalidateOnFocus` re-runs the fetcher when the tab/window regains focus
  *   (only for keyed calls, and only if the cached value is older than `ttlMs`).
  *   Defaults to true.
+ * - `refetchIntervalMs` polls the fetcher on a fixed interval (ms). The timer
+ *   is cleared on unmount and skips ticks while the tab is hidden
+ *   (`document.hidden`) to avoid wasted background work. Omit/`0` to disable.
  */
 export interface UseResourceOptions {
   cacheKey?: string;
   ttlMs?: number;
   revalidateOnFocus?: boolean;
+  refetchIntervalMs?: number;
 }
 
 const DEFAULT_TTL_MS = 30_000;
@@ -52,6 +64,16 @@ const cache = new Map<string, CacheEntry>();
 /** Test/utility seam: drop all cached entries. */
 export function __clearResourceCache(): void {
   cache.clear();
+}
+
+/**
+ * Drop the cached entry for `key` so the next keyed `useResource` read (or
+ * explicit `refetch`) hits the network again. Call this after a mutation that
+ * invalidates a previously fetched resource (e.g. after creating/deleting an
+ * app, invalidate the apps list key). No-op when the key was never cached.
+ */
+export function invalidate(key: string): void {
+  cache.delete(key);
 }
 
 function isFresh(entry: CacheEntry | undefined, ttlMs: number): boolean {
@@ -156,12 +178,14 @@ export function useResource<T>(
     cacheKey,
     ttlMs = DEFAULT_TTL_MS,
     revalidateOnFocus = true,
+    refetchIntervalMs = 0,
   } = options;
 
   const [data, setData] = useState<T>(fallback);
   const [loading, setLoading] = useState(true);
   const [usingFallback, setUsingFallback] = useState(false);
   const [error, setError] = useState(false);
+  const [errorStatus, setErrorStatus] = useState<number | null>(null);
   const [nonce, setNonce] = useState(0);
 
   const refetch = useCallback(() => setNonce((n) => n + 1), []);
@@ -171,6 +195,13 @@ export function useResource<T>(
   const fetcherRef = useRef(fetcher);
   fetcherRef.current = fetcher;
 
+  // Track whether the effect below has already run once for this hook instance.
+  // The first run may reuse a fresh cross-instance cache entry (dedupe/TTL);
+  // any later run is triggered by a dependency change, which means the fetcher's
+  // inputs changed — so the cached value (keyed to the old inputs) is stale and
+  // must be re-fetched even if it is still within the TTL.
+  const hasRunRef = useRef(false);
+
   useEffect(() => {
     let active = true;
 
@@ -179,6 +210,7 @@ export function useResource<T>(
       setData(fallback);
       setUsingFallback(true);
       setError(false);
+      setErrorStatus(null);
       setLoading(false);
       return;
     }
@@ -187,15 +219,14 @@ export function useResource<T>(
 
     setLoading(true);
 
+    // Force a fresh fetch on an explicit refetch (bumped nonce) OR on any
+    // re-run driven by a dependency change (the inputs differ from the cached
+    // value). Only the very first run for this instance honors the cache.
+    const force = nonce > 0 || hasRunRef.current;
+    hasRunRef.current = true;
+
     const run = cacheKey
-      ? fetchThroughCache(
-          cacheKey,
-          fetcher,
-          controller.signal,
-          ttlMs,
-          // A bumped nonce (explicit refetch) forces a fresh fetch.
-          nonce > 0,
-        )
+      ? fetchThroughCache(cacheKey, fetcher, controller.signal, ttlMs, force)
       : fetcher(controller.signal);
 
     run
@@ -204,6 +235,7 @@ export function useResource<T>(
         setData(result);
         setUsingFallback(false);
         setError(false);
+        setErrorStatus(null);
       })
       .catch((err: unknown) => {
         if (!active) return;
@@ -217,6 +249,9 @@ export function useResource<T>(
         setData(fallback);
         setUsingFallback(true);
         setError(true);
+        // Capture the HTTP status only when the backend actually responded
+        // (ApiError); leave null for network/TypeError failures.
+        setErrorStatus(err instanceof ApiError ? err.status : null);
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -248,5 +283,23 @@ export function useResource<T>(
     return () => window.removeEventListener("focus", onFocus);
   }, [cacheKey, revalidateOnFocus, ttlMs]);
 
-  return { data, loading, usingFallback, error, refetch };
+  // Poll on a fixed interval when requested. The timer is cleared on unmount
+  // (and re-created when the interval changes). Each tick reuses the refetch
+  // path, which forces a fresh fetch for keyed calls and a new AbortController
+  // for all calls. Ticks are skipped while the tab is hidden to avoid wasted
+  // background work; the focus listener / next visible tick picks it back up.
+  useEffect(() => {
+    if (!refetchIntervalMs || refetchIntervalMs <= 0) return;
+    if (typeof window === "undefined") return;
+
+    const id = window.setInterval(() => {
+      if (!fetcherRef.current) return;
+      if (typeof document !== "undefined" && document.hidden) return;
+      setNonce((n) => n + 1);
+    }, refetchIntervalMs);
+
+    return () => window.clearInterval(id);
+  }, [refetchIntervalMs]);
+
+  return { data, loading, usingFallback, error, errorStatus, refetch };
 }

@@ -419,7 +419,7 @@ export const mockInvitations: Invitation[] = [
     email: "ada@acme.dev",
     role: "member",
     projectId: "proj_platform",
-    token: "inv_tok_ada_8f21c4",
+    token: "demo-invite-code-ada",
     status: "pending",
     createdAt: "2026-06-10T10:00:00Z",
   },
@@ -428,7 +428,7 @@ export const mockInvitations: Invitation[] = [
     email: "linus@acme.dev",
     role: "admin",
     projectId: null,
-    token: "inv_tok_linus_3a90fe",
+    token: "demo-invite-code-linus",
     status: "pending",
     createdAt: "2026-06-14T10:00:00Z",
   },
@@ -439,9 +439,9 @@ export const mockEnv: EnvVar[] = [
   { key: "PORT", value: "8080" },
   {
     key: "DATABASE_URL",
-    value: "postgres://demo:demo@db.demo.local:5432/demo",
+    value: "demo-database-connection",
   },
-  { key: "REDIS_URL", value: "redis://demo:demo@cache.demo.local:6379" },
+  { key: "REDIS_URL", value: "demo-cache-connection" },
   { key: "LOG_LEVEL", value: "info" },
 ];
 

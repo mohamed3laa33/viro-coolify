@@ -1,20 +1,25 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useState, type FormEvent, type ReactNode } from "react";
 import { Check, Copy } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import {
   api,
+  ApiError,
   computeHoursUsed,
   formatCents,
+  formatHourlyPrice,
   type BillingResponse,
   type Invitation,
   type Member,
   type MemberRole,
   type Plan,
+  type PricingComponent,
   type Project,
   type Settings,
 } from "@/lib/api";
+import { isDemoMode } from "@/lib/demo";
+import { errorMessage } from "@/lib/errors";
 import { useDemoData } from "@/lib/demo-data";
 import { useResource } from "@/lib/use-resource";
 import { cn } from "@/lib/utils";
@@ -30,11 +35,40 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
-import { Notice } from "@/components/ui/notice";
+import { Notice, type NoticeVariant } from "@/components/ui/notice";
 import { Badge, type BadgeVariant } from "@/components/ui/badge";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { Tabs } from "@/components/ui/tabs";
 
 const TABS = ["General", "Team", "Billing"] as const;
 type Tab = (typeof TABS)[number];
+
+// A transient action notice. The variant lets failed mutations render an honest
+// `error` banner (invariant #6) rather than reusing the neutral `info` style.
+interface ActionNotice {
+  variant: NoticeVariant;
+  message: string;
+}
+
+// Build the notice for a failed mutation. In production this is always an honest
+// `error` banner carrying the backend's message (or a real network fallback) and
+// never "queued locally"/"demo mode" wording (invariant #6). Only in demo mode,
+// and only for a true network failure, do we hint that the unreachable API means
+// the action was not actually applied.
+function failureNotice(err: unknown, fallback: string): ActionNotice {
+  // A real backend 4xx/5xx is always surfaced honestly via its message.
+  const backendError = err instanceof ApiError;
+  if (isDemoMode() && !backendError) {
+    // Demo mode + a true network/TypeError: the API was unreachable, so the
+    // mutation was NOT applied. Flag that explicitly so it is not read as
+    // success, without claiming it was queued/persisted (invariant #6).
+    return {
+      variant: "warning",
+      message: `${fallback} (demo mode: API unreachable, not applied)`,
+    };
+  }
+  return { variant: "error", message: errorMessage(err, fallback) };
+}
 
 const ROLE_VARIANT: Record<MemberRole, BadgeVariant> = {
   owner: "default",
@@ -61,31 +95,30 @@ export default function SettingsPage() {
         description="Manage your organization, team, and billing."
       />
 
-      <div className="border-b border-border">
-        <nav className="-mb-px flex gap-6">
-          {TABS.map((t) => (
-            <button
-              key={t}
-              type="button"
-              onClick={() => setTab(t)}
-              className={cn(
-                "inline-flex items-center border-b-2 px-1 pb-3 pt-1 text-sm font-medium transition-colors pointer-coarse:min-h-11",
-                tab === t
-                  ? "border-primary text-foreground"
-                  : "border-transparent text-muted-foreground hover:text-foreground",
-              )}
-            >
-              {t}
-            </button>
-          ))}
-        </nav>
-      </div>
+      <Tabs tabs={TABS} active={tab} onChange={setTab} />
 
-      {tab === "General" && <GeneralTab />}
+      <TabPanel tab={tab}>
+        {tab === "General" && <GeneralTab />}
+        {tab === "Team" && <TeamTab />}
+        {tab === "Billing" && <BillingTab />}
+      </TabPanel>
+    </div>
+  );
+}
 
-      {tab === "Team" && <TeamTab />}
-
-      {tab === "Billing" && <BillingTab />}
+// Wraps the active tab's content as an ARIA tabpanel. The Tabs primitive owns
+// the tab `id`s (generated via useId), so we expose a self-describing panel
+// (role + label + focusable) rather than referencing ids we cannot read here.
+function TabPanel({ tab, children }: { tab: Tab; children: ReactNode }) {
+  return (
+    <div
+      role="tabpanel"
+      id={`settings-tabpanel-${tab}`}
+      aria-label={tab}
+      tabIndex={0}
+      className="focus-visible:outline-none"
+    >
+      {children}
     </div>
   );
 }
@@ -120,10 +153,56 @@ function GeneralTab() {
     [user?.isAdmin, demoSettings],
   );
 
-  // TODO(backend): add org update route (PATCH /v1/orgs/:id). Until it exists,
-  // org name/slug/billing-email are read-only and Save is disabled. Don't wire
-  // these inputs to a fake handler — keep the control honest (invariant #6).
-  const editingDisabledNote = "Org settings editing is coming soon";
+  const [name, setName] = useState<string | null>(null);
+  const [billingEmail, setBillingEmail] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [notice, setNotice] = useState<ActionNotice | null>(null);
+  const [fieldError, setFieldError] = useState(false);
+
+  // Controlled inputs seeded from the active org/user, but only once the user
+  // starts editing (null = "use the live value"). This keeps the inputs in sync
+  // when the active org changes without clobbering in-progress edits.
+  const nameValue = name ?? activeOrg?.name ?? "";
+  const billingEmailValue = billingEmail ?? user?.email ?? "";
+
+  async function onSave(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (!activeOrgId) {
+      setNotice({
+        variant: "error",
+        message: "No active organization to update.",
+      });
+      return;
+    }
+    const trimmedName = nameValue.trim();
+    const trimmedEmail = billingEmailValue.trim();
+    if (!trimmedName) {
+      setFieldError(true);
+      setNotice({
+        variant: "error",
+        message: "Organization name is required.",
+      });
+      return;
+    }
+    setFieldError(false);
+    setSaving(true);
+    setNotice(null);
+    try {
+      await authedCall((token, on) =>
+        api.updateOrg(
+          activeOrgId,
+          { name: trimmedName, billingEmail: trimmedEmail || undefined },
+          token,
+          on,
+        ),
+      );
+      setNotice({ variant: "success", message: "Organization updated." });
+    } catch (err) {
+      setNotice(failureNotice(err, "Couldn't update the organization."));
+    } finally {
+      setSaving(false);
+    }
+  }
 
   return (
     <Card>
@@ -134,69 +213,69 @@ function GeneralTab() {
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
+        {notice && <Notice variant={notice.variant}>{notice.message}</Notice>}
         {settingsError && (
           <Notice variant="error">
             Couldn&apos;t load platform settings. Showing the last known
             defaults.
           </Notice>
         )}
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div className="space-y-2">
-            <Label htmlFor="org-name">Organization name</Label>
-            <Input
-              id="org-name"
-              key={`name-${activeOrg?.id ?? "none"}`}
-              defaultValue={activeOrg?.name ?? ""}
-              readOnly
-              title={editingDisabledNote}
-              aria-label={editingDisabledNote}
-            />
+        <form onSubmit={onSave} className="space-y-4">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="org-name">Organization name</Label>
+              <Input
+                id="org-name"
+                value={nameValue}
+                onChange={(e) => setName(e.target.value)}
+                aria-invalid={fieldError || undefined}
+                aria-describedby={fieldError ? "org-name-error" : undefined}
+                required
+              />
+              {fieldError && (
+                <p id="org-name-error" className="text-xs text-destructive">
+                  Organization name is required.
+                </p>
+              )}
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="org-slug">Slug</Label>
+              <Input
+                id="org-slug"
+                key={`slug-${activeOrg?.id ?? "none"}`}
+                defaultValue={activeOrg?.slug ?? ""}
+                readOnly
+                title="The slug is fixed at creation time."
+                aria-label="Organization slug (read-only)"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="billing-email">Billing email</Label>
+              <Input
+                id="billing-email"
+                type="email"
+                value={billingEmailValue}
+                onChange={(e) => setBillingEmail(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="region">Default region</Label>
+              <Input
+                id="region"
+                key={`region-${settings.defaultRegion}`}
+                defaultValue={settings.defaultRegion}
+                readOnly
+                title="The default region is set on the admin settings page."
+                aria-label="Default region (read-only)"
+              />
+            </div>
           </div>
-          <div className="space-y-2">
-            <Label htmlFor="org-slug">Slug</Label>
-            <Input
-              id="org-slug"
-              key={`slug-${activeOrg?.id ?? "none"}`}
-              defaultValue={activeOrg?.slug ?? ""}
-              readOnly
-              title={editingDisabledNote}
-              aria-label={editingDisabledNote}
-            />
+          <div className="flex items-center justify-end">
+            <Button type="submit" loading={saving} disabled={!activeOrgId}>
+              Save changes
+            </Button>
           </div>
-          <div className="space-y-2">
-            <Label htmlFor="billing-email">Billing email</Label>
-            <Input
-              id="billing-email"
-              type="email"
-              key={`email-${user?.id ?? "none"}`}
-              defaultValue={user?.email ?? ""}
-              readOnly
-              title={editingDisabledNote}
-              aria-label={editingDisabledNote}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="region">Default region</Label>
-            <Input
-              id="region"
-              key={`region-${settings.defaultRegion}`}
-              defaultValue={settings.defaultRegion}
-              readOnly
-            />
-          </div>
-        </div>
-        <div className="flex items-center justify-end gap-3">
-          <p className="text-xs text-muted-foreground">
-            {editingDisabledNote}.
-          </p>
-          <Button
-            disabled
-            title={editingDisabledNote}
-            aria-label={editingDisabledNote}
-          >
-            Save changes
-          </Button>
-        </div>
+        </form>
       </CardContent>
     </Card>
   );
@@ -218,7 +297,11 @@ function TeamTab() {
   );
   const demoProjects = useDemoData((m) => m.mockProjects, [] as Project[]);
 
-  const { data: membersData, error: membersError } = useResource(
+  const {
+    data: membersData,
+    refetch: refetchMembers,
+    error: membersError,
+  } = useResource(
     activeOrgId
       ? () => authedCall((token, on) => api.listMembers(activeOrgId, token, on))
       : null,
@@ -256,15 +339,27 @@ function TeamTab() {
   const [role, setRole] = useState<MemberRole>("member");
   const [projectId, setProjectId] = useState("");
   const [pending, setPending] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<ActionNotice | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
+
+  // userId currently being role-changed (disables that row's Select).
+  const [savingRole, setSavingRole] = useState<string | null>(null);
+  // Member pending removal confirmation, then the in-flight delete.
+  const [memberToRemove, setMemberToRemove] = useState<Member | null>(null);
+  const [removingMember, setRemovingMember] = useState(false);
+  // Invitation pending revoke confirmation, then the in-flight delete.
+  const [inviteToRevoke, setInviteToRevoke] = useState<Invitation | null>(null);
+  const [revokingInvite, setRevokingInvite] = useState(false);
 
   async function onInvite(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const trimmed = email.trim();
     if (!trimmed) return;
     if (!activeOrgId) {
-      setNotice("Invite unavailable — no active organization (demo mode).");
+      setNotice({
+        variant: "error",
+        message: "No active organization to invite to.",
+      });
       return;
     }
     setPending(true);
@@ -285,11 +380,83 @@ function TeamTab() {
       setEmail("");
       setRole("member");
       setProjectId("");
+      setNotice({
+        variant: "success",
+        message: `Invitation sent to ${trimmed}.`,
+      });
       refetchInvites();
-    } catch {
-      setNotice("Invitation queued locally (API unreachable — demo mode).");
+    } catch (err) {
+      setNotice(failureNotice(err, "Couldn't send the invitation."));
     } finally {
       setPending(false);
+    }
+  }
+
+  async function onChangeRole(member: Member, nextRole: MemberRole) {
+    if (!activeOrgId || nextRole === member.role) return;
+    setSavingRole(member.userId);
+    setNotice(null);
+    try {
+      await authedCall((token, on) =>
+        api.updateMember(
+          activeOrgId,
+          member.userId,
+          { role: nextRole },
+          token,
+          on,
+        ),
+      );
+      setNotice({
+        variant: "success",
+        message: `${member.name || member.email} is now ${nextRole}.`,
+      });
+      refetchMembers();
+    } catch (err) {
+      setNotice(failureNotice(err, "Couldn't change the member's role."));
+    } finally {
+      setSavingRole(null);
+    }
+  }
+
+  async function onConfirmRemoveMember() {
+    if (!activeOrgId || !memberToRemove) return;
+    setRemovingMember(true);
+    setNotice(null);
+    try {
+      await authedCall((token, on) =>
+        api.removeMember(activeOrgId, memberToRemove.userId, token, on),
+      );
+      setNotice({
+        variant: "success",
+        message: `Removed ${memberToRemove.name || memberToRemove.email}.`,
+      });
+      setMemberToRemove(null);
+      refetchMembers();
+    } catch (err) {
+      setNotice(failureNotice(err, "Couldn't remove the member."));
+    } finally {
+      setRemovingMember(false);
+    }
+  }
+
+  async function onConfirmRevokeInvite() {
+    if (!activeOrgId || !inviteToRevoke) return;
+    setRevokingInvite(true);
+    setNotice(null);
+    try {
+      await authedCall((token, on) =>
+        api.revokeInvitation(activeOrgId, inviteToRevoke.id, token, on),
+      );
+      setNotice({
+        variant: "success",
+        message: `Revoked the invitation for ${inviteToRevoke.email}.`,
+      });
+      setInviteToRevoke(null);
+      refetchInvites();
+    } catch (err) {
+      setNotice(failureNotice(err, "Couldn't revoke the invitation."));
+    } finally {
+      setRevokingInvite(false);
     }
   }
 
@@ -311,7 +478,7 @@ function TeamTab() {
 
   return (
     <div className="space-y-6">
-      {notice && <Notice variant="info">{notice}</Notice>}
+      {notice && <Notice variant={notice.variant}>{notice.message}</Notice>}
 
       {(membersError || invitesError) && (
         <Notice variant="error">
@@ -323,31 +490,60 @@ function TeamTab() {
         <CardHeader>
           <CardTitle>Team members</CardTitle>
           <CardDescription className="mt-1">
-            People with access to this organization.
+            People with access to this organization. Owners can change roles or
+            remove members.
           </CardDescription>
         </CardHeader>
-        {/* TODO(backend): role change / member removal need API routes
-            (PATCH/DELETE /v1/orgs/:id/members/:userId). Until they exist this
-            list stays read-only — don't add no-op edit/remove controls. */}
         <CardContent className="p-0">
           <ul className="divide-y divide-border">
             {members.map((m) => (
               <li
                 key={m.userId}
-                className="flex items-center justify-between px-6 py-4"
+                className="flex items-center justify-between gap-4 px-6 py-4"
               >
-                <div className="flex items-center gap-3">
-                  <span className="flex h-9 w-9 items-center justify-center rounded-full bg-brand-balloon text-xs font-semibold text-white">
+                <div className="flex min-w-0 items-center gap-3">
+                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-brand-balloon text-xs font-semibold text-white">
                     {initials(m.name || m.email)}
                   </span>
-                  <div>
-                    <p className="text-sm font-medium">{m.name || m.email}</p>
-                    <p className="text-xs text-muted-foreground">{m.email}</p>
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium">
+                      {m.name || m.email}
+                    </p>
+                    <p className="truncate text-xs text-muted-foreground">
+                      {m.email}
+                    </p>
                   </div>
                 </div>
-                <Badge variant={ROLE_VARIANT[m.role]} className="capitalize">
-                  {m.role}
-                </Badge>
+                <div className="flex shrink-0 items-center gap-2">
+                  <Label
+                    htmlFor={`member-role-${m.userId}`}
+                    className="sr-only"
+                  >
+                    Role for {m.name || m.email}
+                  </Label>
+                  <div className="w-32">
+                    <Select
+                      id={`member-role-${m.userId}`}
+                      value={m.role}
+                      disabled={!activeOrgId || savingRole === m.userId}
+                      onChange={(e) =>
+                        onChangeRole(m, e.target.value as MemberRole)
+                      }
+                    >
+                      <option value="member">Member</option>
+                      <option value="admin">Admin</option>
+                      <option value="owner">Owner</option>
+                    </Select>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={!activeOrgId}
+                    onClick={() => setMemberToRemove(m)}
+                  >
+                    Remove
+                  </Button>
+                </div>
               </li>
             ))}
           </ul>
@@ -418,9 +614,6 @@ function TeamTab() {
             Share the invite link manually until email delivery is enabled.
           </CardDescription>
         </CardHeader>
-        {/* TODO(backend): revoke pending invitation needs an API route
-            (DELETE /v1/orgs/:id/invitations/:inviteId). Until it exists we
-            only surface copy-link — no fake revoke control. */}
         <CardContent className="p-0">
           {invitations.length === 0 ? (
             <p className="px-6 py-4 text-sm text-muted-foreground">
@@ -472,6 +665,14 @@ function TeamTab() {
                       )}
                       {copied === inv.token ? "Copied" : "Copy link"}
                     </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={!activeOrgId}
+                      onClick={() => setInviteToRevoke(inv)}
+                    >
+                      Revoke
+                    </Button>
                   </div>
                 </li>
               ))}
@@ -479,6 +680,40 @@ function TeamTab() {
           )}
         </CardContent>
       </Card>
+
+      <ConfirmDialog
+        open={memberToRemove !== null}
+        title="Remove member?"
+        description={
+          memberToRemove
+            ? `${memberToRemove.name || memberToRemove.email} will lose access to this organization. They can be re-invited later.`
+            : undefined
+        }
+        confirmLabel="Remove"
+        destructive
+        loading={removingMember}
+        onConfirm={onConfirmRemoveMember}
+        onCancel={() => {
+          if (!removingMember) setMemberToRemove(null);
+        }}
+      />
+
+      <ConfirmDialog
+        open={inviteToRevoke !== null}
+        title="Revoke invitation?"
+        description={
+          inviteToRevoke
+            ? `The invitation for ${inviteToRevoke.email} will stop working immediately.`
+            : undefined
+        }
+        confirmLabel="Revoke"
+        destructive
+        loading={revokingInvite}
+        onConfirm={onConfirmRevokeInvite}
+        onCancel={() => {
+          if (!revokingInvite) setInviteToRevoke(null);
+        }}
+      />
     </div>
   );
 }
@@ -502,7 +737,7 @@ const EMPTY_BILLING: BillingResponse = {
 function BillingTab() {
   const { activeOrgId, authedCall } = useAuth();
   const [pendingPlan, setPendingPlan] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<ActionNotice | null>(null);
 
   // Demo fallbacks load lazily (demo mode only); prod shows real empty states.
   const demoPlans = useDemoData((m) => m.mockPlans, [] as Plan[]);
@@ -515,6 +750,19 @@ function BillingTab() {
     { cacheKey: "plans" },
   );
   const plans = plansData.data;
+
+  // Public hourly rates (admin-managed). Read-only here; no demo fabrication —
+  // an empty list is the honest prod fallback (invariant #1: business values
+  // come from the API/admin, never hardcoded).
+  const { data: pricingData } = useResource(
+    () => api.getPricing(),
+    { data: [] as PricingComponent[] },
+    [],
+    { cacheKey: "pricing" },
+  );
+  const pricing = pricingData.data
+    .filter((c) => c.active)
+    .sort((a, b) => a.sortOrder - b.sortOrder);
 
   const {
     data: billing,
@@ -541,7 +789,10 @@ function BillingTab() {
 
   async function subscribe(planId: string) {
     if (!activeOrgId) {
-      setNotice("Subscribe unavailable — no active organization (demo mode).");
+      setNotice({
+        variant: "error",
+        message: "No active organization to subscribe.",
+      });
       return;
     }
     setPendingPlan(planId);
@@ -554,10 +805,13 @@ function BillingTab() {
         window.location.href = res.checkoutUrl;
         return;
       }
-      setNotice(`Subscription updated — status: ${res.subscription.status}`);
+      setNotice({
+        variant: "success",
+        message: `Subscription updated — status: ${res.subscription.status}`,
+      });
       refetch();
-    } catch {
-      setNotice("Subscription queued locally (API unreachable — demo mode).");
+    } catch (err) {
+      setNotice(failureNotice(err, "Couldn't update the subscription."));
     } finally {
       setPendingPlan(null);
     }
@@ -565,7 +819,7 @@ function BillingTab() {
 
   return (
     <div className="space-y-6">
-      {notice && <Notice variant="info">{notice}</Notice>}
+      {notice && <Notice variant={notice.variant}>{notice.message}</Notice>}
 
       {(plansError || billingError) && (
         <Notice variant="error">
@@ -673,6 +927,33 @@ function BillingTab() {
           );
         })}
       </div>
+
+      {pricing.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Hourly rates</CardTitle>
+            <CardDescription>
+              Metered, per-unit rates used to compute overages and usage-based
+              charges.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="p-0">
+            <ul className="divide-y divide-border">
+              {pricing.map((c) => (
+                <li
+                  key={c.key}
+                  className="flex items-center justify-between gap-4 px-6 py-3 text-sm"
+                >
+                  <span className="text-foreground">{c.name}</span>
+                  <span className="font-medium tabular-nums text-muted-foreground">
+                    {formatHourlyPrice(c)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

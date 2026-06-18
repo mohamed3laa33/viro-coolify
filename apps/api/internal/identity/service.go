@@ -24,6 +24,11 @@ var (
 	ErrValidation         = errors.New("identity: validation failed")
 	ErrForbidden          = errors.New("identity: forbidden")
 	ErrInvitationInvalid  = errors.New("identity: invitation is invalid or expired")
+	ErrNotFound           = errors.New("identity: not found")
+	// ErrConflict reports a state conflict that must not proceed, e.g. removing
+	// or demoting the last remaining owner of an organization, or deleting a
+	// project that still owns apps/services.
+	ErrConflict = errors.New("identity: conflict")
 )
 
 // Service holds identity business logic.
@@ -239,6 +244,132 @@ func (s *Service) Authorize(ctx context.Context, userID, orgID string, min domai
 	return m, nil
 }
 
+// UpdateOrgInput carries the editable organization fields. A nil pointer leaves
+// the corresponding field unchanged.
+type UpdateOrgInput struct {
+	Name         *string
+	BillingEmail *string
+}
+
+// UpdateOrganization mutates the org's editable fields (name, billing email).
+// Caller must be an org admin+. Empty/whitespace-only names are rejected; a
+// supplied billing email must be a valid address (an empty string clears it).
+func (s *Service) UpdateOrganization(ctx context.Context, userID, orgID string, in UpdateOrgInput) (*domain.Organization, error) {
+	if _, err := s.Authorize(ctx, userID, orgID, domain.RoleAdmin); err != nil {
+		return nil, err
+	}
+	org, err := s.store.GetOrganization(ctx, orgID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get organization: %w", err)
+	}
+	if in.Name != nil {
+		name := strings.TrimSpace(*in.Name)
+		if name == "" {
+			return nil, fmt.Errorf("%w: organization name is required", ErrValidation)
+		}
+		org.Name = name
+	}
+	if in.BillingEmail != nil {
+		email := normalizeEmail(*in.BillingEmail)
+		if email != "" && !emailRe.MatchString(email) {
+			return nil, fmt.Errorf("%w: invalid billing email", ErrValidation)
+		}
+		org.BillingEmail = email
+	}
+	if err := s.store.UpdateOrg(ctx, org); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("update organization: %w", err)
+	}
+	return org, nil
+}
+
+// UpdateMemberRole changes an existing member's role within an org. Caller must
+// be an org owner. Demoting the last remaining owner is rejected with
+// ErrConflict so an org is never left ownerless.
+func (s *Service) UpdateMemberRole(ctx context.Context, actorID, orgID, targetUserID string, role domain.Role) error {
+	if _, err := s.Authorize(ctx, actorID, orgID, domain.RoleOwner); err != nil {
+		return err
+	}
+	if !role.Valid() {
+		return fmt.Errorf("%w: invalid role", ErrValidation)
+	}
+	target, err := s.store.GetMembership(ctx, orgID, targetUserID)
+	if errors.Is(err, store.ErrNotFound) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("get membership: %w", err)
+	}
+	// Block demoting the org's last owner away from owner.
+	if target.Role == domain.RoleOwner && role != domain.RoleOwner {
+		owners, err := s.countOwners(ctx, orgID)
+		if err != nil {
+			return err
+		}
+		if owners <= 1 {
+			return fmt.Errorf("%w: an organization must have at least one owner", ErrConflict)
+		}
+	}
+	if err := s.store.UpdateMembershipRole(ctx, orgID, targetUserID, role); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("update membership role: %w", err)
+	}
+	return nil
+}
+
+// RemoveMember removes a member from an org. Caller must be an org owner.
+// Removing the last remaining owner is rejected with ErrConflict.
+func (s *Service) RemoveMember(ctx context.Context, actorID, orgID, targetUserID string) error {
+	if _, err := s.Authorize(ctx, actorID, orgID, domain.RoleOwner); err != nil {
+		return err
+	}
+	target, err := s.store.GetMembership(ctx, orgID, targetUserID)
+	if errors.Is(err, store.ErrNotFound) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("get membership: %w", err)
+	}
+	if target.Role == domain.RoleOwner {
+		owners, err := s.countOwners(ctx, orgID)
+		if err != nil {
+			return err
+		}
+		if owners <= 1 {
+			return fmt.Errorf("%w: an organization must have at least one owner", ErrConflict)
+		}
+	}
+	if err := s.store.RemoveMembership(ctx, orgID, targetUserID); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("remove membership: %w", err)
+	}
+	return nil
+}
+
+// countOwners returns how many members of the org hold the owner role.
+func (s *Service) countOwners(ctx context.Context, orgID string) (int, error) {
+	members, err := s.store.ListMemberships(ctx, orgID)
+	if err != nil {
+		return 0, fmt.Errorf("list memberships: %w", err)
+	}
+	n := 0
+	for _, m := range members {
+		if m.Role == domain.RoleOwner {
+			n++
+		}
+	}
+	return n, nil
+}
+
 // ---- Projects (Org → Project → App) ----
 
 func (s *Service) createDefaultProject(ctx context.Context, orgID string) (*domain.Project, error) {
@@ -301,6 +432,36 @@ func (s *Service) ListProjects(ctx context.Context, userID, orgID string) ([]dom
 		return nil, err
 	}
 	return s.store.ListProjectsByOrg(ctx, orgID)
+}
+
+// DeleteProject removes an empty project from the org. Caller must be an org
+// admin+. The default project cannot be deleted, and a project that still owns
+// apps or services is rejected with ErrConflict (the store enforces emptiness).
+func (s *Service) DeleteProject(ctx context.Context, userID, orgID, projectID string) error {
+	if _, err := s.Authorize(ctx, userID, orgID, domain.RoleAdmin); err != nil {
+		return err
+	}
+	p, err := s.store.GetProject(ctx, projectID)
+	if errors.Is(err, store.ErrNotFound) || (err == nil && p.OrgID != orgID) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("get project: %w", err)
+	}
+	if p.IsDefault {
+		return fmt.Errorf("%w: the default project cannot be deleted", ErrConflict)
+	}
+	if err := s.store.DeleteProject(ctx, orgID, projectID); err != nil {
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			return ErrNotFound
+		case errors.Is(err, store.ErrConflict):
+			return fmt.Errorf("%w: project still contains apps or services", ErrConflict)
+		default:
+			return fmt.Errorf("delete project: %w", err)
+		}
+	}
+	return nil
 }
 
 // AuthorizeProject reports an error unless the user can act on the project with
@@ -383,6 +544,22 @@ func (s *Service) ListInvitations(ctx context.Context, userID, orgID string) ([]
 		return nil, err
 	}
 	return s.store.ListInvitationsByOrg(ctx, orgID)
+}
+
+// RevokeInvitation marks a pending invitation as revoked so its token can no
+// longer be accepted. Caller must be an org admin+. A missing invitation (or one
+// not belonging to the org) yields ErrNotFound.
+func (s *Service) RevokeInvitation(ctx context.Context, userID, orgID, inviteID string) error {
+	if _, err := s.Authorize(ctx, userID, orgID, domain.RoleAdmin); err != nil {
+		return err
+	}
+	if err := s.store.RevokeInvitation(ctx, orgID, inviteID); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("revoke invitation: %w", err)
+	}
+	return nil
 }
 
 // AcceptInvitation accepts a pending invitation for the authenticated user. The

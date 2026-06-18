@@ -3,10 +3,12 @@
 import { Building2, Users } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { api, type AdminOverview, type AdminPlan } from "@/lib/api";
+import { isDemoMode } from "@/lib/demo";
 import { useDemoData } from "@/lib/demo-data";
 import { useResource } from "@/lib/use-resource";
 import { PageHeader } from "@/components/page-header";
 import { StatCard } from "@/components/stat-card";
+import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -33,12 +35,17 @@ const EMPTY_OVERVIEW: AdminOverview = {
 
 export default function AdminOverviewPage() {
   const { authedCall } = useAuth();
+  const demo = isDemoMode();
 
   // Demo fallbacks load lazily (demo mode only); prod shows real empty states.
   const demoOverview = useDemoData((m) => m.mockAdminOverview, EMPTY_OVERVIEW);
   const demoPlans = useDemoData((m) => m.mockPlans, [] as AdminPlan[]);
 
-  const { data: overview, usingFallback } = useResource(
+  const {
+    data: overview,
+    usingFallback,
+    refetch,
+  } = useResource(
     () => authedCall((token, on) => api.getAdminOverview(token, on)),
     demoOverview,
     [demoOverview],
@@ -65,11 +72,22 @@ export default function AdminOverviewPage() {
         description="Platform-wide totals across every organization."
       />
 
-      {usingFallback && (
-        <Notice variant="warning">
-          Showing demo data — admin API unreachable.
-        </Notice>
-      )}
+      {usingFallback &&
+        (demo ? (
+          <Notice variant="warning">
+            Showing demo data — admin API unreachable.
+          </Notice>
+        ) : (
+          <Notice
+            variant="error"
+            className="items-center justify-between gap-4"
+          >
+            <span>Couldn&apos;t reach the admin API.</span>
+            <Button size="sm" variant="secondary" onClick={refetch}>
+              Retry
+            </Button>
+          </Notice>
+        ))}
 
       <div className="grid gap-4 sm:grid-cols-2">
         <StatCard

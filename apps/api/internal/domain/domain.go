@@ -45,10 +45,11 @@ type User struct {
 
 // Organization is the tenancy boundary that owns apps, databases and billing.
 type Organization struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Slug      string    `json:"slug"`
-	CreatedAt time.Time `json:"createdAt"`
+	ID           string    `json:"id"`
+	Name         string    `json:"name"`
+	Slug         string    `json:"slug"`
+	BillingEmail string    `json:"billingEmail,omitempty"`
+	CreatedAt    time.Time `json:"createdAt"`
 }
 
 // Membership links a user to an organization with a role.

@@ -57,6 +57,8 @@ jobs:
         run: npm run format:check
       - name: Unit tests
         run: npm run test
+      - name: Coverage (enforces vitest thresholds)
+        run: npm run test:coverage
       - name: Build
         run: npm run build
         env:
@@ -64,6 +66,27 @@ jobs:
           # api.ts requires the public API URL at build time; CI just needs a
           # non-empty value to compile (the artifact is not deployed).
           NEXT_PUBLIC_VORTEX_API_URL: "https://api.vortex.v60ai.com"
+      - name: Guard — touch-target variant emits in built CSS
+        # The `pointer-coarse:min-h-[2.75rem]` utility must survive into the
+        # production CSS so 44px touch targets can't silently regress. The
+        # minifier strips spaces in media queries, so match space-insensitively.
+        run: |
+          shopt -s globstar nullglob
+          css=$(cat .next/static/css/**/*.css .next/static/css/*.css 2>/dev/null || true)
+          if [ -z "$css" ]; then
+            echo "::error::No built CSS found under .next/static/css — did the build emit styles?"
+            exit 1
+          fi
+          stripped=$(printf '%s' "$css" | tr -d ' ')
+          if ! printf '%s' "$stripped" | grep -q '@media(pointer:coarse)'; then
+            echo "::error::Missing '@media (pointer: coarse)' rule in built CSS — pointer-coarse variant regressed."
+            exit 1
+          fi
+          if ! printf '%s' "$stripped" | grep -q 'min-height:2.75rem'; then
+            echo "::error::Missing 'min-height:2.75rem' (44px touch target) in built CSS — touch-target utility regressed."
+            exit 1
+          fi
+          echo "OK: touch-target variant ('@media (pointer: coarse)' + 'min-height:2.75rem') present in built CSS."
       - name: Dependency audit (npm)
         run: npm audit --audit-level=high --omit=dev
 
@@ -109,4 +132,50 @@ jobs:
         run: semgrep ci
         env:
           SEMGREP_RULES: "p/default p/security-audit p/secrets p/golang p/typescript"
+
+  e2e:
+    name: E2E (Playwright)
+    # Opt-in only: keeps PRs fast. Run on demand via `gh workflow run ci.yml`
+    # or the Actions "Run workflow" button. Skips cleanly if no Playwright
+    # config/tests exist yet so it never blocks the dispatch.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Detect Playwright config
+        id: detect
+        run: |
+          if ls playwright.config.* >/dev/null 2>&1; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "No Playwright config found — skipping E2E."
+          fi
+      - name: Install Playwright browsers
+        if: steps.detect.outputs.present == 'true'
+        run: npx playwright install --with-deps
+      - name: Run Playwright tests
+        if: steps.detect.outputs.present == 'true'
+        run: npx playwright test
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+          NEXT_PUBLIC_VORTEX_API_URL: "https://api.vortex.v60ai.com"
+      - name: Upload Playwright report
+        if: steps.detect.outputs.present == 'true' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: apps/web/playwright-report
+          if-no-files-found: ignore
+          retention-days: 7
 

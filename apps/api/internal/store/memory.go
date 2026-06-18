@@ -235,6 +235,22 @@ func (s *MemoryStore) GetOrganization(_ context.Context, id string) (*domain.Org
 	return &o, nil
 }
 
+// UpdateOrg persists the mutable org fields (name, billing email). The org ID
+// is the stable lookup key and is not changed here.
+func (s *MemoryStore) UpdateOrg(_ context.Context, o *domain.Organization) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	existing, ok := s.organizations[o.ID]
+	if !ok {
+		return ErrNotFound
+	}
+	existing.Name = o.Name
+	existing.BillingEmail = o.BillingEmail
+	s.organizations[o.ID] = existing
+	*o = existing
+	return nil
+}
+
 func (s *MemoryStore) ListOrganizationsForUser(_ context.Context, userID string) ([]domain.Organization, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -280,6 +296,30 @@ func (s *MemoryStore) ListMemberships(_ context.Context, orgID string) ([]domain
 		}
 	}
 	return out, nil
+}
+
+func (s *MemoryStore) UpdateMembershipRole(_ context.Context, orgID, userID string, role domain.Role) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := membershipKey(orgID, userID)
+	m, ok := s.memberships[key]
+	if !ok {
+		return ErrNotFound
+	}
+	m.Role = role
+	s.memberships[key] = m
+	return nil
+}
+
+func (s *MemoryStore) RemoveMembership(_ context.Context, orgID, userID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := membershipKey(orgID, userID)
+	if _, ok := s.memberships[key]; !ok {
+		return ErrNotFound
+	}
+	delete(s.memberships, key)
+	return nil
 }
 
 func (s *MemoryStore) CreateApp(_ context.Context, a *domain.App) error {
@@ -468,6 +508,30 @@ func (s *MemoryStore) ListProjectsByOrg(_ context.Context, orgID string) ([]doma
 	return out, nil
 }
 
+// DeleteProject removes an empty project scoped to orgID. It returns ErrNotFound
+// when the project does not exist within the org, and ErrConflict when the
+// project still owns any apps or services.
+func (s *MemoryStore) DeleteProject(_ context.Context, orgID, projectID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.projects[projectID]
+	if !ok || p.OrgID != orgID {
+		return ErrNotFound
+	}
+	for _, a := range s.apps {
+		if a.ProjectID == projectID {
+			return ErrConflict
+		}
+	}
+	for _, svc := range s.services {
+		if svc.ProjectID == projectID {
+			return ErrConflict
+		}
+	}
+	delete(s.projects, projectID)
+	return nil
+}
+
 func projectMemberKey(projectID, userID string) string { return projectID + "\x00" + userID }
 
 func (s *MemoryStore) AddProjectMembership(_ context.Context, m domain.ProjectMembership) error {
@@ -531,6 +595,20 @@ func (s *MemoryStore) UpdateInvitation(_ context.Context, inv *domain.Invitation
 		return ErrNotFound
 	}
 	s.invitations[inv.ID] = *inv
+	return nil
+}
+
+// RevokeInvitation marks an org's invitation as revoked. It returns ErrNotFound
+// when no matching invitation exists within the org.
+func (s *MemoryStore) RevokeInvitation(_ context.Context, orgID, inviteID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	inv, ok := s.invitations[inviteID]
+	if !ok || inv.OrgID != orgID {
+		return ErrNotFound
+	}
+	inv.Status = domain.InviteRevoked
+	s.invitations[inviteID] = inv
 	return nil
 }
 

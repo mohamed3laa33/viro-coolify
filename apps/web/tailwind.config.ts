@@ -1,4 +1,5 @@
 import type { Config } from "tailwindcss";
+import plugin from "tailwindcss/plugin";
 import tailwindcssAnimate from "tailwindcss-animate";
 
 const config: Config = {
@@ -24,6 +25,7 @@ const config: Config = {
           DEFAULT: "hsl(var(--card))",
           foreground: "hsl(var(--foreground))",
         },
+        "surface-1": "hsl(var(--surface-1))",
         "surface-2": "hsl(var(--surface-2))",
         muted: {
           DEFAULT: "hsl(var(--muted))",
@@ -34,22 +36,15 @@ const config: Config = {
         primary: {
           DEFAULT: "hsl(var(--primary))",
           foreground: "hsl(var(--primary-foreground))",
+          // Lighter primary that clears WCAG AA (>=4.5:1) as text on the dark
+          // --background and on bg-primary/10..15 tints, where --primary fails.
+          bright: "hsl(var(--primary-bright))",
         },
         success: "hsl(var(--success))",
         warning: "hsl(var(--warning))",
         destructive: "hsl(var(--destructive))",
         info: "hsl(var(--info))",
         brand: {
-          50: "#f5f0ff",
-          100: "#ede4ff",
-          200: "#dcceff",
-          300: "#c3a6ff",
-          400: "#a472ff",
-          500: "#8b46f5",
-          600: "#7c3aed",
-          700: "#6d28d9",
-          800: "#5b21b6",
-          900: "#4c1d95",
           // Brand gradient stops, both backed by CSS tokens in globals.css.
           violet: "hsl(var(--brand-violet))",
           magenta: "hsl(var(--brand-magenta))",
@@ -91,7 +86,14 @@ const config: Config = {
       },
     },
   },
-  plugins: [tailwindcssAnimate],
+  plugins: [
+    tailwindcssAnimate,
+    // Emit pointer-coarse:* utilities under @media (pointer: coarse) so the
+    // ~44px touch-target classes (e.g. pointer-coarse:min-h-11) take effect.
+    plugin(({ addVariant }) => {
+      addVariant("pointer-coarse", "@media (pointer: coarse)");
+    }),
+  ],
 };
 
 export default config;

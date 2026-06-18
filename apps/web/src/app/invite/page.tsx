@@ -6,6 +6,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { CheckCircle2, Loader2, MailCheck } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { api, type Invitation } from "@/lib/api";
+import { errorMessage } from "@/lib/errors";
 import { Logo } from "@/components/logo";
 import {
   Card,
@@ -17,6 +18,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Notice } from "@/components/ui/notice";
 
 function AcceptInvite() {
   const router = useRouter();
@@ -52,9 +54,12 @@ function AcceptInvite() {
         api.acceptInvitation(trimmed, t, on),
       );
       setAccepted(res);
-    } catch {
+    } catch (err) {
       setError(
-        "Could not accept this invitation. It may be invalid, expired, or already used.",
+        errorMessage(
+          err,
+          "Could not accept this invitation. It may be invalid, expired, or already used.",
+        ),
       );
     } finally {
       setPending(false);
@@ -118,13 +123,15 @@ function AcceptInvite() {
               value={token}
               onChange={(e) => setToken(e.target.value)}
               required
+              aria-invalid={error ? true : undefined}
+              aria-describedby={error ? "invite-token-error" : undefined}
             />
           </div>
 
           {error && (
-            <p className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+            <Notice id="invite-token-error" variant="error">
               {error}
-            </p>
+            </Notice>
           )}
 
           <Button type="submit" className="w-full" disabled={pending}>

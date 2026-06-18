@@ -1,9 +1,11 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
 import { Pencil, Plus, Trash2 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { api, type AdminPlan, type AdminPlanInput } from "@/lib/api";
+import { errorMessage } from "@/lib/errors";
+import { isDemoMode } from "@/lib/demo";
 import { useDemoData } from "@/lib/demo-data";
 import { useResource } from "@/lib/use-resource";
 import { cn } from "@/lib/utils";
@@ -13,6 +15,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Notice } from "@/components/ui/notice";
 
 const EMPTY_PLAN: AdminPlanInput = {
@@ -46,39 +49,64 @@ function formatPrice(plan: AdminPlan): string {
 
 export default function AdminPlansPage() {
   const { authedCall } = useAuth();
+  const demo = isDemoMode();
 
   // Demo fallback loads lazily (demo mode only); prod shows a real empty table.
   const demoPlans = useDemoData((m) => m.mockPlans, [] as AdminPlan[]);
 
-  const { data, refetch, usingFallback } = useResource(
-    () => authedCall((token, on) => api.listAdminPlans(token, on)),
+  // useResource reports a boolean `error`; capture the real failure here so we
+  // can surface the actual ApiError message instead of a generic placeholder.
+  const fetchErrorRef = useRef<string | null>(null);
+
+  const { data, error, refetch, usingFallback } = useResource(
+    (signal) =>
+      authedCall(
+        (token, on) =>
+          api
+            .listAdminPlans(token, on, { signal })
+            .then((res) => {
+              fetchErrorRef.current = null;
+              return res;
+            })
+            .catch((err: unknown) => {
+              fetchErrorRef.current = errorMessage(
+                err,
+                "Couldn’t load plans — the API is unreachable.",
+              );
+              throw err;
+            }),
+        signal,
+      ),
     { data: demoPlans },
     [demoPlans],
   );
   const plans = data.data;
+  const showError = error && !demo;
 
   // null = closed; "new" = create form; otherwise the plan id being edited.
   const [editing, setEditing] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<AdminPlan | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const editingPlan =
     editing && editing !== "new"
       ? (plans.find((p) => p.id === editing) ?? null)
       : null;
 
-  async function onDelete(plan: AdminPlan) {
-    if (
-      typeof window !== "undefined" &&
-      !window.confirm(`Delete plan "${plan.name}"? This cannot be undone.`)
-    ) {
-      return;
-    }
+  async function onConfirmDelete() {
+    const plan = confirmDelete;
+    if (!plan) return;
     setNotice(null);
+    setDeleting(true);
     try {
       await authedCall((token, on) => api.deletePlan(plan.id, token, on));
+      setConfirmDelete(null);
       refetch();
-    } catch {
-      setNotice("Delete failed (API unreachable — demo mode).");
+    } catch (err) {
+      setNotice(errorMessage(err, `Could not delete ${plan.name}.`));
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -97,9 +125,21 @@ export default function AdminPlansPage() {
         }
       />
 
-      {usingFallback && (
+      {usingFallback && demo && (
         <Notice variant="warning">
           Showing demo data — admin API unreachable. Edits won&apos;t persist.
+        </Notice>
+      )}
+
+      {showError && (
+        <Notice variant="error" className="items-center justify-between gap-4">
+          <span>
+            {fetchErrorRef.current ??
+              "Couldn’t load plans — the API is unreachable."}
+          </span>
+          <Button size="sm" variant="secondary" onClick={refetch}>
+            Retry
+          </Button>
         </Notice>
       )}
 
@@ -117,8 +157,8 @@ export default function AdminPlansPage() {
               await authedCall((token, on) => api.createPlan(input, token, on));
               setEditing(null);
               refetch();
-            } catch {
-              setNotice("Create failed (API unreachable — demo mode).");
+            } catch (err) {
+              setNotice(errorMessage(err, "Could not create the plan."));
             }
           }}
         />
@@ -199,7 +239,8 @@ export default function AdminPlansPage() {
                         <Button
                           variant="ghost"
                           size="sm"
-                          onClick={() => onDelete(plan)}
+                          onClick={() => setConfirmDelete(plan)}
+                          aria-label={`Delete ${plan.name}`}
                         >
                           <Trash2 className="h-3.5 w-3.5 text-destructive" />
                         </Button>
@@ -226,12 +267,27 @@ export default function AdminPlansPage() {
               );
               setEditing(null);
               refetch();
-            } catch {
-              setNotice("Update failed (API unreachable — demo mode).");
+            } catch (err) {
+              setNotice(errorMessage(err, "Could not update the plan."));
             }
           }}
         />
       )}
+
+      <ConfirmDialog
+        open={confirmDelete !== null}
+        title={
+          confirmDelete
+            ? `Delete plan “${confirmDelete.name}”?`
+            : "Delete plan?"
+        }
+        description="This cannot be undone. Existing subscriptions on this plan are unaffected."
+        confirmLabel="Delete plan"
+        destructive
+        loading={deleting}
+        onConfirm={onConfirmDelete}
+        onCancel={() => setConfirmDelete(null)}
+      />
     </div>
   );
 }

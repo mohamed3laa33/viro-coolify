@@ -5,16 +5,11 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Plus, Search, GitBranch, Package, X, Rocket } from "lucide-react";
 import { useAuth } from "@/lib/auth";
-import {
-  api,
-  ApiError,
-  statusVariant,
-  type App,
-  type CreateAppInput,
-} from "@/lib/api";
+import { api, statusVariant, type App, type CreateAppInput } from "@/lib/api";
+import { errorMessage } from "@/lib/errors";
 import { isDemoMode } from "@/lib/demo";
 import { useDemoData } from "@/lib/demo-data";
-import { useResource } from "@/lib/use-resource";
+import { invalidate, useResource } from "@/lib/use-resource";
 import { PageHeader } from "@/components/page-header";
 import { EmptyState } from "@/components/empty-state";
 import { Button } from "@/components/ui/button";
@@ -25,18 +20,15 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Notice } from "@/components/ui/notice";
 import { StatusDot } from "@/components/ui/status-dot";
 import { Badge, type BadgeVariant } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
 
 // Build packs the backend recognizes. Surfaced as a dropdown rather than a
 // free-text field so we only ever submit a supported value.
 const BUILD_PACKS = ["nixpacks", "dockerfile", "static"] as const;
 
-// Extract a human-readable message from an unknown thrown value, preferring the
-// real ApiError message over a generic fallback.
-function errorMessage(err: unknown, fallback: string): string {
-  if (err instanceof ApiError) return err.message;
-  if (err instanceof Error && err.message) return err.message;
-  return fallback;
-}
+// Deploy sources the create form offers: build from a Git repo, or run a
+// prebuilt container image directly.
+type DeploySource = "git" | "image";
 
 // The status helper can yield "muted", which the Badge renders as "outline".
 function statusBadgeVariant(status: string): BadgeVariant {
@@ -56,7 +48,7 @@ export default function AppsPage() {
   // Demo fallback loads lazily (demo mode only); never shipped to prod.
   const demoApps = useDemoData((m) => m.mockApps, [] as App[]);
 
-  const { data, error, refetch } = useResource(
+  const { data, loading, error, refetch } = useResource(
     activeOrgId
       ? (signal) =>
           authedCall(
@@ -79,6 +71,9 @@ export default function AppsPage() {
       : null,
     { data: demoApps },
     [activeOrgId, demoApps],
+    // Share the cache with the sidebar/dashboard so the apps list dedupes and
+    // a create/delete here can invalidate it for every view.
+    { cacheKey: activeOrgId ? `apps:${activeOrgId}` : undefined },
   );
 
   const showError = error && !isDemoMode();
@@ -104,6 +99,7 @@ export default function AppsPage() {
           onClose={() => setCreating(false)}
           onCreated={() => {
             setCreating(false);
+            if (activeOrgId) invalidate(`apps:${activeOrgId}`);
             refetch();
           }}
         />
@@ -130,45 +126,77 @@ export default function AppsPage() {
         />
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {apps.map((app) => (
-          <Link key={app.id} href={`/dashboard/apps/${app.id}`}>
-            <Card className="h-full p-5 transition-colors hover:border-primary/40">
-              <div className="flex items-start justify-between">
-                <div className="min-w-0">
-                  <p className="truncate font-medium">{app.name}</p>
-                  <p className="truncate font-mono text-xs text-muted-foreground">
-                    {app.gitRepository}
-                  </p>
+      {apps.length > 0 && (
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {apps.map((app) => (
+            <Link key={app.id} href={`/dashboard/apps/${app.id}`}>
+              <Card className="h-full p-5 transition-colors hover:border-primary/40">
+                <div className="flex items-start justify-between">
+                  <div className="min-w-0">
+                    <p className="truncate font-medium">{app.name}</p>
+                    <p className="truncate font-mono text-xs text-muted-foreground">
+                      {app.image || app.gitRepository}
+                    </p>
+                  </div>
+                  <StatusDot status={app.status} />
                 </div>
-                <StatusDot status={app.status} />
-              </div>
 
-              <div className="mt-5 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                <span className="inline-flex items-center gap-1">
-                  <GitBranch className="h-3.5 w-3.5" />
-                  {app.gitBranch}
-                </span>
-                <span className="inline-flex items-center gap-1">
-                  <Package className="h-3.5 w-3.5" />
-                  {app.buildPack}
-                </span>
-              </div>
+                <div className="mt-5 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                  {app.image ? (
+                    <span className="inline-flex items-center gap-1">
+                      <Package className="h-3.5 w-3.5" />
+                      image
+                    </span>
+                  ) : (
+                    <>
+                      <span className="inline-flex items-center gap-1">
+                        <GitBranch className="h-3.5 w-3.5" />
+                        {app.gitBranch}
+                      </span>
+                      <span className="inline-flex items-center gap-1">
+                        <Package className="h-3.5 w-3.5" />
+                        {app.buildPack}
+                      </span>
+                    </>
+                  )}
+                </div>
 
-              <div className="mt-4">
-                <Badge
-                  variant={statusBadgeVariant(app.status)}
-                  className="capitalize"
-                >
-                  {app.status}
-                </Badge>
+                <div className="mt-4">
+                  <Badge
+                    variant={statusBadgeVariant(app.status)}
+                    className="capitalize"
+                  >
+                    {app.status}
+                  </Badge>
+                </div>
+              </Card>
+            </Link>
+          ))}
+        </div>
+      )}
+
+      {/* Skeleton rows on first load (list empty) so the empty state doesn't
+          flash before data arrives. */}
+      {loading && apps.length === 0 && !showError && (
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <Card key={i} className="h-full space-y-5 p-5">
+              <div className="flex items-start justify-between">
+                <div className="min-w-0 space-y-2">
+                  <Skeleton className="h-4 w-32" />
+                  <Skeleton className="h-3 w-40" />
+                </div>
+                <Skeleton className="h-2.5 w-2.5 rounded-full" />
               </div>
+              <Skeleton className="h-3 w-28" />
+              <Skeleton className="h-5 w-20" />
             </Card>
-          </Link>
-        ))}
-      </div>
+          ))}
+        </div>
+      )}
 
-      {apps.length === 0 &&
+      {!loading &&
+        apps.length === 0 &&
         !showError &&
         (query ? (
           <Card className="flex flex-col items-center justify-center py-16 text-center">
@@ -202,15 +230,20 @@ function CreateAppForm({
 }) {
   const { activeOrgId, authedCall } = useAuth();
   const router = useRouter();
+  const [source, setSource] = useState<DeploySource>("git");
   const [name, setName] = useState("");
   const [gitRepository, setGitRepository] = useState("");
   const [gitBranch, setGitBranch] = useState("main");
   const [buildPack, setBuildPack] = useState<string>(BUILD_PACKS[0]);
+  // Prebuilt container image (when deploying from an image instead of a repo).
+  const [image, setImage] = useState("");
   // Requested resources; left blank to let the backend apply platform defaults.
   const [cpu, setCpu] = useState("");
   const [memoryMb, setMemoryMb] = useState("");
   const [pending, setPending] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+
+  const fromImage = source === "image";
 
   async function onSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -220,12 +253,27 @@ function CreateAppForm({
       setNotice("Create unavailable — no active organization.");
       return;
     }
-    const input: CreateAppInput = {
-      name: trimmed,
-      gitRepository: gitRepository.trim(),
-      gitBranch: gitBranch.trim() || "main",
-      buildPack: buildPack.trim() || BUILD_PACKS[0],
-    };
+    const trimmedImage = image.trim();
+    if (fromImage && !trimmedImage) {
+      setNotice("Enter a container image to deploy.");
+      return;
+    }
+    const input: CreateAppInput = fromImage
+      ? {
+          name: trimmed,
+          // The backend builds from source or runs an image; when deploying an
+          // image we leave the git fields empty and send the image reference.
+          gitRepository: "",
+          gitBranch: "",
+          buildPack: "",
+          image: trimmedImage,
+        }
+      : {
+          name: trimmed,
+          gitRepository: gitRepository.trim(),
+          gitBranch: gitBranch.trim() || "main",
+          buildPack: buildPack.trim() || BUILD_PACKS[0],
+        };
     // Only send resources the user actually specified; blank => platform default.
     const cpuValue = Number(cpu);
     if (cpu.trim() && Number.isFinite(cpuValue) && cpuValue > 0) {
@@ -238,8 +286,8 @@ function CreateAppForm({
     setPending(true);
     setNotice(null);
     try {
-      const app = await authedCall((token, on) =>
-        api.createApp(activeOrgId, input, token, on),
+      const app = await authedCall((token, on, signal) =>
+        api.createApp(activeOrgId, input, token, on, { signal }),
       );
       onCreated();
       router.push(`/dashboard/apps/${app.id}`);
@@ -266,6 +314,44 @@ function CreateAppForm({
       <CardContent className="space-y-4">
         {notice && <Notice variant="error">{notice}</Notice>}
         <form onSubmit={onSubmit} className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="app-source">Deploy from</Label>
+            <div
+              id="app-source"
+              role="radiogroup"
+              aria-label="Deploy from"
+              className="inline-flex rounded-md border border-border p-0.5"
+            >
+              <button
+                type="button"
+                role="radio"
+                aria-checked={!fromImage}
+                onClick={() => setSource("git")}
+                className={`inline-flex items-center gap-1.5 rounded px-3 py-1.5 text-sm font-medium transition-colors ${
+                  !fromImage
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <GitBranch className="h-3.5 w-3.5" />
+                Git repo
+              </button>
+              <button
+                type="button"
+                role="radio"
+                aria-checked={fromImage}
+                onClick={() => setSource("image")}
+                className={`inline-flex items-center gap-1.5 rounded px-3 py-1.5 text-sm font-medium transition-colors ${
+                  fromImage
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <Package className="h-3.5 w-3.5" />
+                Container image
+              </button>
+            </div>
+          </div>
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-2">
               <Label htmlFor="app-name">Name</Label>
@@ -278,40 +364,56 @@ function CreateAppForm({
                 required
               />
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="app-repo">Git repository</Label>
-              <Input
-                id="app-repo"
-                className="font-mono"
-                placeholder="github.com/acme/marketing"
-                value={gitRepository}
-                onChange={(e) => setGitRepository(e.target.value)}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="app-branch">Branch</Label>
-              <Input
-                id="app-branch"
-                className="font-mono"
-                placeholder="main"
-                value={gitBranch}
-                onChange={(e) => setGitBranch(e.target.value)}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="app-buildpack">Build pack</Label>
-              <Select
-                id="app-buildpack"
-                value={buildPack}
-                onChange={(e) => setBuildPack(e.target.value)}
-              >
-                {BUILD_PACKS.map((bp) => (
-                  <option key={bp} value={bp}>
-                    {bp}
-                  </option>
-                ))}
-              </Select>
-            </div>
+            {fromImage ? (
+              <div className="space-y-2">
+                <Label htmlFor="app-image">Container image</Label>
+                <Input
+                  id="app-image"
+                  className="font-mono"
+                  placeholder="ghcr.io/acme/marketing:latest"
+                  value={image}
+                  onChange={(e) => setImage(e.target.value)}
+                  required
+                />
+              </div>
+            ) : (
+              <>
+                <div className="space-y-2">
+                  <Label htmlFor="app-repo">Git repository</Label>
+                  <Input
+                    id="app-repo"
+                    className="font-mono"
+                    placeholder="github.com/acme/marketing"
+                    value={gitRepository}
+                    onChange={(e) => setGitRepository(e.target.value)}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="app-branch">Branch</Label>
+                  <Input
+                    id="app-branch"
+                    className="font-mono"
+                    placeholder="main"
+                    value={gitBranch}
+                    onChange={(e) => setGitBranch(e.target.value)}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="app-buildpack">Build pack</Label>
+                  <Select
+                    id="app-buildpack"
+                    value={buildPack}
+                    onChange={(e) => setBuildPack(e.target.value)}
+                  >
+                    {BUILD_PACKS.map((bp) => (
+                      <option key={bp} value={bp}>
+                        {bp}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+              </>
+            )}
             <div className="space-y-2">
               <Label htmlFor="app-cpu">CPU (vCPU)</Label>
               <Input

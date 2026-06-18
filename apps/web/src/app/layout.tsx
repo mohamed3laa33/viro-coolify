@@ -15,10 +15,35 @@ const jetbrainsMono = JetBrains_Mono({
   display: "swap",
 });
 
+// Public site origin used for absolute metadata URLs (OG/Twitter images,
+// canonical). Sourced from NEXT_PUBLIC_SITE_URL with a sensible default.
+const siteUrl = (
+  process.env.NEXT_PUBLIC_SITE_URL ?? "https://vortex.v60ai.com"
+).replace(/\/+$/, "");
+
+const title = "Vortex — Deploy apps close to your users";
+const description =
+  "Vortex is a global application platform. Ship containers to the edge, scale instantly, and run managed databases with zero-config TLS.";
+
 export const metadata: Metadata = {
-  title: "Vortex — Deploy apps close to your users",
-  description:
-    "Vortex is a global application platform. Ship containers to the edge, scale instantly, and run managed databases with zero-config TLS.",
+  metadataBase: new URL(siteUrl),
+  title,
+  description,
+  icons: {
+    icon: "/icon",
+  },
+  openGraph: {
+    type: "website",
+    siteName: "Vortex",
+    title,
+    description,
+    url: siteUrl,
+  },
+  twitter: {
+    card: "summary_large_image",
+    title,
+    description,
+  },
 };
 
 export const viewport: Viewport = {

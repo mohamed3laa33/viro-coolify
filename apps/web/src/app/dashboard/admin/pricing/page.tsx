@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState, type FormEvent } from "react";
-import { Pencil, Plus, Trash2, X } from "lucide-react";
+import { useState, type FormEvent } from "react";
+import { Pencil, Plus, Trash2 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import {
   api,
@@ -9,6 +9,7 @@ import {
   type PricingComponent,
   type PricingComponentInput,
 } from "@/lib/api";
+import { errorMessage } from "@/lib/errors";
 import { isDemoMode } from "@/lib/demo";
 import { useDemoData } from "@/lib/demo-data";
 import { useResource } from "@/lib/use-resource";
@@ -19,6 +20,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Notice } from "@/components/ui/notice";
 
 const EMPTY_COMPONENT: PricingComponentInput = {
@@ -54,6 +56,7 @@ export default function AdminPricingPage() {
   const [confirmDelete, setConfirmDelete] = useState<PricingComponent | null>(
     null,
   );
+  const [deleting, setDeleting] = useState(false);
 
   const editingComponent =
     editing && editing !== "new"
@@ -62,15 +65,17 @@ export default function AdminPricingPage() {
 
   async function onConfirmDelete() {
     const c = confirmDelete;
-    if (!c) return;
+    if (!c || deleting) return;
     setNotice(null);
+    setDeleting(true);
     try {
       await authedCall((token, on) => api.deletePricing(c.key, token, on));
       setConfirmDelete(null);
       refetch();
-    } catch {
-      setNotice("Delete failed (API unreachable — demo mode).");
-      setConfirmDelete(null);
+    } catch (err) {
+      setNotice(errorMessage(err, `Could not delete ${c.name}.`));
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -111,8 +116,10 @@ export default function AdminPricingPage() {
               );
               setEditing(null);
               refetch();
-            } catch {
-              setNotice("Create failed (API unreachable — demo mode).");
+            } catch (err) {
+              setNotice(
+                errorMessage(err, "Could not create pricing component."),
+              );
             }
           }}
         />
@@ -204,22 +211,30 @@ export default function AdminPricingPage() {
               );
               setEditing(null);
               refetch();
-            } catch {
-              setNotice("Update failed (API unreachable — demo mode).");
+            } catch (err) {
+              setNotice(
+                errorMessage(err, `Could not update ${editingComponent.name}.`),
+              );
             }
           }}
         />
       )}
 
-      {confirmDelete && (
-        <ConfirmDialog
-          title={`Delete ${confirmDelete.name}?`}
-          description="This removes the metered rate. Existing usage already billed is unaffected."
-          confirmLabel="Delete component"
-          onConfirm={onConfirmDelete}
-          onCancel={() => setConfirmDelete(null)}
-        />
-      )}
+      <ConfirmDialog
+        open={confirmDelete !== null}
+        title={
+          confirmDelete ? `Delete ${confirmDelete.name}?` : "Delete component?"
+        }
+        description="This removes the metered rate. Existing usage already billed is unaffected."
+        confirmLabel="Delete component"
+        destructive
+        loading={deleting}
+        onConfirm={onConfirmDelete}
+        onCancel={() => {
+          if (deleting) return;
+          setConfirmDelete(null);
+        }}
+      />
     </div>
   );
 }
@@ -361,6 +376,8 @@ function Toggle({
   return (
     <button
       type="button"
+      role="switch"
+      aria-checked={checked}
       onClick={() => onChange(!checked)}
       className="inline-flex h-10 items-center gap-2 text-sm font-medium pointer-coarse:min-h-11"
     >
@@ -379,76 +396,5 @@ function Toggle({
       </span>
       {label}
     </button>
-  );
-}
-
-// Accessible delete confirmation (role="alertdialog", focus the safe action,
-// Escape to cancel). Inline to avoid window.confirm.
-function ConfirmDialog({
-  title,
-  description,
-  confirmLabel,
-  onConfirm,
-  onCancel,
-}: {
-  title: string;
-  description: string;
-  confirmLabel: string;
-  onConfirm: () => void;
-  onCancel: () => void;
-}) {
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") onCancel();
-    }
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onCancel]);
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
-      onClick={onCancel}
-    >
-      <div
-        role="alertdialog"
-        aria-modal="true"
-        aria-labelledby="pricing-confirm-title"
-        aria-describedby="pricing-confirm-desc"
-        className="w-full max-w-md rounded-lg border border-border bg-card p-6 shadow-lg"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-start justify-between">
-          <h2
-            id="pricing-confirm-title"
-            className="text-lg font-semibold text-destructive"
-          >
-            {title}
-          </h2>
-          <button
-            type="button"
-            onClick={onCancel}
-            aria-label="Close"
-            className="rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-        <p
-          id="pricing-confirm-desc"
-          className="mt-2 text-sm text-muted-foreground"
-        >
-          {description}
-        </p>
-        <div className="mt-6 flex justify-end gap-2">
-          <Button variant="ghost" onClick={onCancel}>
-            Cancel
-          </Button>
-          <Button variant="destructive" onClick={onConfirm}>
-            {confirmLabel}
-          </Button>
-        </div>
-      </div>
-    </div>
   );
 }

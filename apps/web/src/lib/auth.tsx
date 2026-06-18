@@ -179,41 +179,64 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [onUnauthorized],
   );
 
-  // Load the user's orgs and pick a default active org.
-  const loadOrgs = useCallback(async () => {
-    try {
-      const res = await api.listOrgs("", onUnauthorized);
-      setOrgs(res.data);
-      const stored = safeLocalStorage.get(ACTIVE_ORG_KEY);
-      const valid =
-        stored && res.data.some((o) => o.id === stored) ? stored : null;
-      const next = valid ?? res.data[0]?.id ?? null;
-      setActiveOrgIdState(next);
-      if (next) {
-        safeLocalStorage.set(ACTIVE_ORG_KEY, next);
-      }
-    } catch {
-      // Leave orgs empty; the UI falls back to mock data (demo mode only).
+  // Apply a freshly fetched org list: keep a stored active-org only if it is
+  // still present, otherwise fall back to the first org. Split out from fetching
+  // so the orgs can be loaded concurrently with the user (see below) and applied
+  // once both resolve.
+  const applyOrgs = useCallback((data: Org[]) => {
+    setOrgs(data);
+    const stored = safeLocalStorage.get(ACTIVE_ORG_KEY);
+    const valid = stored && data.some((o) => o.id === stored) ? stored : null;
+    const next = valid ?? data[0]?.id ?? null;
+    setActiveOrgIdState(next);
+    if (next) {
+      safeLocalStorage.set(ACTIVE_ORG_KEY, next);
     }
-  }, [onUnauthorized]);
+  }, []);
+
+  // Fetch the org list and pick a default active org. Never rejects: on failure
+  // it leaves orgs empty (the UI falls back to mock data in demo mode only).
+  // `unauthorized` is the refresh-on-401 hook; the mount path omits it so that
+  // its own explicit me->refresh->me flow stays the sole driver of session
+  // recovery (a 401 here just yields empty orgs, re-fetched after the refresh).
+  const fetchOrgs = useCallback(
+    async (unauthorized?: OnUnauthorized) => {
+      try {
+        const res = await api.listOrgs("", unauthorized);
+        applyOrgs(res.data);
+      } catch {
+        // Leave orgs empty.
+      }
+    },
+    [applyOrgs],
+  );
+
+  // Load the user's orgs and pick a default active org (carries refresh-on-401).
+  const loadOrgs = useCallback(
+    () => fetchOrgs(onUnauthorized),
+    [fetchOrgs, onUnauthorized],
+  );
 
   // Derive the session from the cookie on mount: try /v1/me; if it 401s, try a
-  // single cookie-based refresh and re-check before giving up.
+  // single cookie-based refresh and re-check before giving up. The org list is
+  // fetched concurrently with /v1/me to save a cold-load round-trip. fetchOrgs
+  // never rejects, so a slow/failed org fetch can't mask a valid session, and it
+  // is called WITHOUT the refresh hook so the explicit me->refresh->me flow
+  // below remains the sole driver of recovery (orgs are re-fetched after a
+  // successful refresh).
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
-        const user = await api.me("");
+        const [user] = await Promise.all([api.me(""), fetchOrgs()]);
         if (cancelled) return;
         applyUser(user);
-        await loadOrgs();
       } catch {
         try {
           await api.refresh();
-          const user = await api.me("");
+          const [user] = await Promise.all([api.me(""), fetchOrgs()]);
           if (cancelled) return;
           applyUser(user);
-          await loadOrgs();
         } catch {
           if (cancelled) return;
           setState({
@@ -231,6 +254,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // login/signup must run serially: the auth call sets the session cookie that
+  // listOrgs depends on, so they cannot be fired concurrently (a premature
+  // listOrgs would 401 and trip the refresh->logout path on a fresh session).
   const login = useCallback(
     async (input: LoginInput) => {
       const res = await api.login(input);

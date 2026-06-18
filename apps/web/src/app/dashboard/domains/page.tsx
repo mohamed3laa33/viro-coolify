@@ -1,9 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Globe, Plus, ShieldCheck, ShieldAlert } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { api, type App, type Domain } from "@/lib/api";
+import { isDemoMode } from "@/lib/demo";
+import { errorMessage } from "@/lib/errors";
 import { useDemoData } from "@/lib/demo-data";
 import { useResource } from "@/lib/use-resource";
 import { PageHeader } from "@/components/page-header";
@@ -11,7 +13,9 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Notice } from "@/components/ui/notice";
 
 // A custom domain joined to the app it routes to.
@@ -32,9 +36,18 @@ export default function DomainsPage() {
 
   // Load the org's apps, then fan out to each app's domains. Falls back to mock
   // data when the API is unreachable or no org is active.
-  const { data: appsData } = useResource(
+  const {
+    data: appsData,
+    error: appsError,
+    errorStatus: appsErrorStatus,
+  } = useResource(
     activeOrgId
-      ? () => authedCall((token, on) => api.listApps(activeOrgId, token, on))
+      ? (signal) =>
+          authedCall(
+            (token, on, s) =>
+              api.listApps(activeOrgId, token, on, { signal: s }),
+            signal,
+          )
       : null,
     { data: demoApps },
     [activeOrgId, demoApps],
@@ -42,10 +55,21 @@ export default function DomainsPage() {
   );
   const apps = appsData.data;
 
-  const { data: rows, refetch } = useResource<DomainRow[]>(
+  // Stable, deduped dependency for the fan-out: the set of app ids drives the
+  // aggregated domains fetch, so memoize the joined string so an unchanged app
+  // list doesn't re-trigger the N+1 on every render.
+  const appIdsKey = useMemo(() => apps.map((a) => a.id).join(","), [apps]);
+
+  const {
+    data: rows,
+    loading,
+    error: domainsError,
+    errorStatus: domainsErrorStatus,
+    refetch,
+  } = useResource<DomainRow[]>(
     activeOrgId
-      ? () =>
-          authedCall(async (token, on) => {
+      ? (signal) =>
+          authedCall(async (token, on, s) => {
             const lists = await Promise.all(
               apps.map(async (app: App) => {
                 try {
@@ -54,6 +78,7 @@ export default function DomainsPage() {
                     app.id,
                     token,
                     on,
+                    { signal: s },
                   );
                   return (res.data ?? []).map((d) => ({ ...d, app: app.name }));
                 } catch {
@@ -62,13 +87,19 @@ export default function DomainsPage() {
               }),
             );
             return lists.flat();
-          })
+          }, signal)
       : null,
     demoDomainRows,
-    [activeOrgId, apps.map((a) => a.id).join(","), demoDomainRows],
+    [activeOrgId, appIdsKey, demoDomainRows],
+    { cacheKey: activeOrgId ? `domains:${activeOrgId}` : undefined },
   );
 
   const domains = rows ?? [];
+
+  // Surface real outages instead of an empty state. Demo mode keeps the mock
+  // fallback (invariant #6: never fabricate success in prod).
+  const showError = (appsError || domainsError) && !isDemoMode();
+  const errorCode = appsError ? appsErrorStatus : domainsErrorStatus;
 
   // Inline "Add domain" form: the API scopes domains to an app, so the org-wide
   // add works by choosing the target app and posting to its domains endpoint.
@@ -104,9 +135,7 @@ export default function DomainsPage() {
       setFormOpen(false);
       refetch();
     } catch (err) {
-      setFormError(
-        err instanceof Error ? err.message : "Failed to add domain.",
-      );
+      setFormError(errorMessage(err, "Failed to add domain."));
     } finally {
       setSubmitting(false);
     }
@@ -137,19 +166,33 @@ export default function DomainsPage() {
         }
       />
 
+      {showError && (
+        <Notice variant="error">
+          <div className="flex items-center justify-between gap-3">
+            <span>
+              Couldn&apos;t load domains
+              {errorCode ? ` (HTTP ${errorCode})` : ""}. Check your connection
+              and try again.
+            </span>
+            <Button size="sm" variant="secondary" onClick={refetch}>
+              Retry
+            </Button>
+          </div>
+        </Notice>
+      )}
+
       {formOpen && canAdd && (
         <Card>
           <CardContent className="p-6">
             <form onSubmit={handleSubmit} className="space-y-4">
-              {formError && <Notice variant="error">{formError}</Notice>}
+              {formError && (
+                <Notice variant="error" id="domain-form-error">
+                  {formError}
+                </Notice>
+              )}
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-1.5">
-                  <label
-                    htmlFor="domain-app"
-                    className="text-sm font-medium text-foreground"
-                  >
-                    App
-                  </label>
+                  <Label htmlFor="domain-app">App</Label>
                   <Select
                     id="domain-app"
                     value={selectedAppId || apps[0]?.id || ""}
@@ -163,18 +206,16 @@ export default function DomainsPage() {
                   </Select>
                 </div>
                 <div className="space-y-1.5">
-                  <label
-                    htmlFor="domain-name"
-                    className="text-sm font-medium text-foreground"
-                  >
-                    Domain
-                  </label>
+                  <Label htmlFor="domain-name">Domain</Label>
                   <Input
                     id="domain-name"
                     placeholder="app.example.com"
                     value={domainInput}
                     onChange={(e) => setDomainInput(e.target.value)}
                     aria-invalid={formError ? true : undefined}
+                    aria-describedby={
+                      formError ? "domain-form-error" : undefined
+                    }
                     autoComplete="off"
                     spellCheck={false}
                   />
@@ -200,12 +241,32 @@ export default function DomainsPage() {
 
       <Card>
         <CardContent className="p-0">
-          {domains.length === 0 ? (
-            <p className="px-6 py-10 text-center text-sm text-muted-foreground">
-              No custom domains yet. Use{" "}
-              <span className="font-medium text-foreground">Add domain</span> to
-              attach one to an app.
-            </p>
+          {loading && domains.length === 0 ? (
+            <ul className="divide-y divide-border">
+              {[0, 1, 2].map((i) => (
+                <li
+                  key={i}
+                  className="flex items-center justify-between px-6 py-4"
+                >
+                  <div className="flex items-center gap-3">
+                    <Skeleton className="h-4 w-4 rounded-full" />
+                    <div className="space-y-1.5">
+                      <Skeleton className="h-4 w-48" />
+                      <Skeleton className="h-3 w-24" />
+                    </div>
+                  </div>
+                  <Skeleton className="h-5 w-16" />
+                </li>
+              ))}
+            </ul>
+          ) : domains.length === 0 ? (
+            !showError && (
+              <p className="px-6 py-10 text-center text-sm text-muted-foreground">
+                No custom domains yet. Use{" "}
+                <span className="font-medium text-foreground">Add domain</span>{" "}
+                to attach one to an app.
+              </p>
+            )
           ) : (
             <ul className="divide-y divide-border">
               {domains.map((d) => (
