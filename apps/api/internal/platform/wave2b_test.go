@@ -117,7 +117,7 @@ func TestUserStoppedMidBuildNotResurrected(t *testing.T) {
 		t.Fatalf("stopped-mid-build app must not be applied, got %d applies", len(kb.Applied))
 	}
 	// The build still recorded success with the produced image.
-	builds, _ := svc.ListBuilds(ctx, "org-1", app.ID)
+	builds, _ := svc.ListBuilds(ctx, "org-1", app.ID, store.Page{})
 	if len(builds) != 1 || builds[0].Status != "succeeded" {
 		t.Fatalf("expected one succeeded build, got %+v", builds)
 	}

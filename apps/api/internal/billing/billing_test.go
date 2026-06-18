@@ -16,17 +16,20 @@ import (
 func TestPlanByID(t *testing.T) {
 	svc := NewService(store.NewMemoryStore(), MockProvider{})
 	ctx := context.Background()
-	if _, ok := svc.PlanByID(ctx, "launch"); !ok {
-		t.Fatal("expected launch plan in catalog")
+	if _, ok, err := svc.PlanByID(ctx, "launch"); err != nil || !ok {
+		t.Fatalf("expected launch plan in catalog (ok=%v err=%v)", ok, err)
 	}
-	if _, ok := svc.PlanByID(ctx, "nope"); ok {
-		t.Fatal("did not expect unknown plan")
+	if _, ok, err := svc.PlanByID(ctx, "nope"); err != nil || ok {
+		t.Fatalf("did not expect unknown plan (ok=%v err=%v)", ok, err)
 	}
 }
 
 func TestCatalogActiveSorted(t *testing.T) {
 	svc := NewService(store.NewMemoryStore(), MockProvider{})
-	plans := svc.Catalog()
+	plans, err := svc.Catalog(context.Background())
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
 	if len(plans) != 3 {
 		t.Fatalf("expected 3 active plans, got %d", len(plans))
 	}
@@ -46,6 +49,44 @@ func TestPlanLimitsFallsBackToDefault(t *testing.T) {
 	// Unknown plan falls back to the default (hobby) plan's limits.
 	if lim := svc.PlanLimits(ctx, "nope"); lim.MaxCPU != 0.5 {
 		t.Fatalf("fallback limits = %+v", lim)
+	}
+}
+
+// catalogFailStore makes the catalog/pricing reads fail, so we can assert the
+// billing service PROPAGATES a transient store error instead of swallowing it as
+// an empty catalog / zero price (which would render the public endpoints a
+// misleading 200 {data:null}).
+type catalogFailStore struct {
+	store.Store
+	err error
+}
+
+func (s catalogFailStore) ListPlans(context.Context) ([]domain.Plan, error) {
+	return nil, s.err
+}
+func (s catalogFailStore) GetPlan(context.Context, string) (*domain.Plan, error) {
+	return nil, s.err
+}
+func (s catalogFailStore) ListPricingComponents(context.Context) ([]domain.PricingComponent, error) {
+	return nil, s.err
+}
+
+func TestCatalogPropagatesStoreError(t *testing.T) {
+	boom := errors.New("transient db failure")
+	svc := NewService(catalogFailStore{Store: store.NewMemoryStore(), err: boom}, MockProvider{})
+	ctx := context.Background()
+
+	if _, err := svc.Catalog(ctx); !errors.Is(err, boom) {
+		t.Fatalf("Catalog err = %v, want %v", err, boom)
+	}
+	if _, _, err := svc.PlanByID(ctx, "launch"); !errors.Is(err, boom) {
+		t.Fatalf("PlanByID err = %v, want %v", err, boom)
+	}
+	if _, err := svc.PricingComponents(ctx); !errors.Is(err, boom) {
+		t.Fatalf("PricingComponents err = %v, want %v", err, boom)
+	}
+	if _, err := svc.HourlyCost(ctx, 1, 1024); !errors.Is(err, boom) {
+		t.Fatalf("HourlyCost err = %v, want %v", err, boom)
 	}
 }
 

@@ -9,16 +9,20 @@ package billing
 
 import (
 	"context"
+	"errors"
 	"sort"
 
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/domain"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/store"
 )
 
-// Catalog returns the active plans, sorted by SortOrder, from the store.
-func (s *Service) Catalog() []domain.Plan {
-	plans, err := s.store.ListPlans(context.Background())
+// Catalog returns the active plans, sorted by SortOrder, from the store. A store
+// error is PROPAGATED (not swallowed as an empty catalog) so a transient DB
+// failure surfaces as a 5xx instead of a 200 with an empty/null plan list.
+func (s *Service) Catalog(ctx context.Context) ([]domain.Plan, error) {
+	plans, err := s.store.ListPlans(ctx)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	active := make([]domain.Plan, 0, len(plans))
 	for _, p := range plans {
@@ -27,16 +31,21 @@ func (s *Service) Catalog() []domain.Plan {
 		}
 	}
 	sort.Slice(active, func(i, j int) bool { return active[i].SortOrder < active[j].SortOrder })
-	return active
+	return active, nil
 }
 
-// PlanByID returns a plan from the store catalog by id.
-func (s *Service) PlanByID(ctx context.Context, id string) (domain.Plan, bool) {
+// PlanByID returns a plan from the store catalog by id. found=false with a nil
+// error means "no such plan"; a non-nil error is a real store failure and is
+// propagated rather than masked as not-found.
+func (s *Service) PlanByID(ctx context.Context, id string) (plan domain.Plan, found bool, err error) {
 	p, err := s.store.GetPlan(ctx, id)
-	if err != nil {
-		return domain.Plan{}, false
+	if errors.Is(err, store.ErrNotFound) {
+		return domain.Plan{}, false, nil
 	}
-	return *p, true
+	if err != nil {
+		return domain.Plan{}, false, err
+	}
+	return *p, true, nil
 }
 
 // defaultPlan returns the store's default plan (IsDefault), falling back to the

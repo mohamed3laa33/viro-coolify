@@ -16,14 +16,15 @@ import (
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/store"
 )
 
-// newTestServer builds a Server whose Coolify client points at the given upstream URL.
-func newTestServer(t *testing.T, coolifyURL string) *Server {
+// newTestServer builds a Server backed by the in-memory store and FakeBackend.
+// The legacy upstream-URL parameter is retained for call-site compatibility but
+// is now unused (the Coolify backend was removed).
+func newTestServer(t *testing.T, _ string) *Server {
 	t.Helper()
 	cfg, err := config.Load()
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	cfg.CoolifyBaseURL = coolifyURL
 	// Control-plane HTTP tests inject the in-memory FakeBackend (a real test
 	// double for kube.Backend) so resource creation is deterministic and never
 	// touches a real cluster.

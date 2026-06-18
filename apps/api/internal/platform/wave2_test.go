@@ -84,7 +84,7 @@ func TestGitAppCreateBuildsAndDeploys(t *testing.T) {
 	}
 
 	// A succeeded Build record exists with the produced image.
-	builds, err := svc.ListBuilds(ctx, "org-1", app.ID)
+	builds, err := svc.ListBuilds(ctx, "org-1", app.ID, store.Page{})
 	if err != nil {
 		t.Fatalf("list builds: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestGitAppBuildFailureMarksAppFailed(t *testing.T) {
 		t.Fatalf("failed build must not deploy, got %d applies", len(kbe.Applied))
 	}
 
-	builds, err := svc.ListBuilds(ctx, "org-1", app.ID)
+	builds, err := svc.ListBuilds(ctx, "org-1", app.ID, store.Page{})
 	if err != nil {
 		t.Fatalf("list builds: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestDeployGitAppRebuilds(t *testing.T) {
 	}
 	wg.Wait()
 
-	builds, err := svc.ListBuilds(ctx, "org-1", app.ID)
+	builds, err := svc.ListBuilds(ctx, "org-1", app.ID, store.Page{})
 	if err != nil {
 		t.Fatalf("list builds: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestGetBuildScopedToOrg(t *testing.T) {
 	}
 	wg.Wait()
 
-	builds, _ := svc.ListBuilds(ctx, "org-1", app.ID)
+	builds, _ := svc.ListBuilds(ctx, "org-1", app.ID, store.Page{})
 	if len(builds) != 1 {
 		t.Fatalf("builds = %d, want 1", len(builds))
 	}

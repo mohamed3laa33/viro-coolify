@@ -287,7 +287,7 @@ func TestMeterUsageIdempotentPerHour(t *testing.T) {
 	if _, err := svc.MeterUsage(context.Background()); err != nil {
 		t.Fatalf("meter 2: %v", err)
 	}
-	recs, _ := st.ListUsageByOrg(context.Background(), "o1")
+	recs, _ := st.ListUsageByOrg(context.Background(), "o1", store.Page{})
 	n := 0
 	for _, r := range recs {
 		if r.Metric == MeterMetric {
@@ -315,7 +315,7 @@ func TestMeterUsageCatchesUpMissedHours(t *testing.T) {
 	if _, err := svc.MeterUsage(ctx); err != nil {
 		t.Fatalf("meter @11: %v", err)
 	}
-	recs, _ := st.ListUsageByOrg(ctx, "o1")
+	recs, _ := st.ListUsageByOrg(ctx, "o1", store.Page{})
 	hours := map[string]bool{}
 	for _, r := range recs {
 		if r.Metric == MeterMetric {

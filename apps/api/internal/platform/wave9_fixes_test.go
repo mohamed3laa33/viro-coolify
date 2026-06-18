@@ -42,7 +42,7 @@ func TestRecordReleaseSequentialRevisionsAndConflict(t *testing.T) {
 	}
 
 	// rev1 must now be superseded; exactly one active release remains.
-	rels, err := st.ListReleasesByApp(ctx, app.ID)
+	rels, err := st.ListReleasesByApp(ctx, app.ID, store.Page{})
 	if err != nil {
 		t.Fatalf("list releases: %v", err)
 	}

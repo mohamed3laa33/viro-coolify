@@ -128,7 +128,13 @@ func (s *PostgresStore) WithTx(ctx context.Context, fn func(tx Store) error) (er
 	return nil
 }
 
-// mapErr converts pgx/pg errors into the store's sentinel errors.
+// mapErr converts pgx/pg errors into the store's sentinel errors so the HTTP
+// layer can map them to the right status code instead of leaking a raw 500:
+//   - no rows                -> ErrNotFound (404)
+//   - unique_violation 23505 -> ErrConflict (409)
+//   - foreign_key 23503, not_null 23502, check 23514 -> ErrInvalid (400/422)
+//
+// Everything else is returned unchanged (a genuine 500).
 func mapErr(err error) error {
 	if err == nil {
 		return nil
@@ -137,18 +143,107 @@ func mapErr(err error) error {
 		return ErrNotFound
 	}
 	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-		return ErrConflict
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case "23505": // unique_violation
+			return ErrConflict
+		case "23503", // foreign_key_violation
+			"23502", // not_null_violation
+			"23514": // check_violation
+			return ErrInvalid
+		}
 	}
 	return err
 }
 
+// appendPage appends LIMIT/OFFSET placeholders to sql (and the matching values to
+// args) when p is bounded (Limit > 0). An unbounded page leaves the query
+// untouched so internal callers can read the full set. OFFSET is emitted only
+// when positive to keep the common first-page query simple.
+func appendPage(sql string, args []any, p Page) (string, []any) {
+	if !p.Bounded() {
+		return sql, args
+	}
+	args = append(args, p.Limit)
+	sql += fmt.Sprintf(" LIMIT $%d", len(args))
+	if p.Offset > 0 {
+		args = append(args, p.Offset)
+		sql += fmt.Sprintf(" OFFSET $%d", len(args))
+	}
+	return sql, args
+}
+
 // ---- Migrations ----
 
+// migrationsAdvisoryLockKey is the constant key for the session-level advisory
+// lock Migrate holds for its whole run, so two replicas booting concurrently
+// serialize their migration runs (the loser blocks until the winner finishes and
+// then finds every version already applied). The value is arbitrary but must be
+// stable across replicas; it is namespaced to "vortex migrations".
+const migrationsAdvisoryLockKey int64 = 0x564f52_4d494752 // "VOR_MIGR"
+
+// migrateSession is the connection-scoped subset of operations Migrate needs.
+// Both *pgxpool.Conn (a single pooled connection) and the injected mock pool
+// satisfy it, so the session-level advisory lock and every per-migration
+// transaction run on ONE connection — required for pg_advisory_lock/unlock to
+// refer to the same session.
+type migrateSession interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	Begin(ctx context.Context) (pgx.Tx, error)
+}
+
+// acquireMigrateSession returns a single connection to run migrations on, plus a
+// release func. For a real pool it checks out one *pgxpool.Conn so the advisory
+// lock is session-stable; for an injected (mock) pool it returns the pool itself
+// (a single mock session) with a no-op release.
+func (s *PostgresStore) acquireMigrateSession(ctx context.Context) (migrateSession, func(), error) {
+	if p, ok := s.pool.(*pgxpool.Pool); ok {
+		conn, err := p.Acquire(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		return conn, conn.Release, nil
+	}
+	return s.pool, func() {}, nil
+}
+
 // Migrate applies all embedded SQL migrations, tracking applied versions in the
-// schema_migrations table. It is idempotent.
-func (s *PostgresStore) Migrate(ctx context.Context) error {
-	if _, err := s.pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+// schema_migrations table. It is idempotent and concurrency-safe:
+//
+//   - The whole run holds a SESSION-level advisory lock (pg_advisory_lock), so two
+//     replicas booting at once serialize instead of racing the same migration.
+//   - Each pending migration applies its BODY and records its version in a SINGLE
+//     transaction (Begin → Exec body → Exec insert → Commit, Rollback on any
+//     error). A failure therefore can never leave a half-applied schema recorded
+//     as un-applied — either both the body and the version land, or neither does.
+//
+// Migrations are applied in filename order; already-applied versions are skipped.
+func (s *PostgresStore) Migrate(ctx context.Context) (err error) {
+	sess, release, err := s.acquireMigrateSession(ctx)
+	if err != nil {
+		return fmt.Errorf("store: acquire migration session: %w", err)
+	}
+	defer release()
+
+	// Serialize concurrent replica boots for the whole run. The lock MUST be
+	// released explicitly: a session-level pg_advisory_lock persists for the life
+	// of the connection, and acquireMigrateSession returns a *pgxpool.Conn that
+	// Release() puts back into the pool ALIVE — so a leaked lock would block every
+	// later boot until the connection is reaped (up to MaxConnLifetime). The unlock
+	// therefore runs on a non-cancellable context so it always fires even when ctx
+	// was cancelled by a deploy timeout / SIGTERM during migration.
+	if _, err := sess.Exec(ctx, `SELECT pg_advisory_lock($1)`, migrationsAdvisoryLockKey); err != nil {
+		return fmt.Errorf("store: acquire migration lock: %w", err)
+	}
+	defer func() {
+		unlockCtx := context.WithoutCancel(ctx)
+		if _, uerr := sess.Exec(unlockCtx, `SELECT pg_advisory_unlock($1)`, migrationsAdvisoryLockKey); uerr != nil && err == nil {
+			err = fmt.Errorf("store: release migration lock: %w", uerr)
+		}
+	}()
+
+	if _, err := sess.Exec(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
 		version text PRIMARY KEY,
 		applied_at timestamptz NOT NULL DEFAULT now()
 	)`); err != nil {
@@ -169,7 +264,7 @@ func (s *PostgresStore) Migrate(ctx context.Context) error {
 
 	for _, name := range names {
 		var exists bool
-		if err := s.pool.QueryRow(ctx,
+		if err := sess.QueryRow(ctx,
 			`SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = $1)`, name,
 		).Scan(&exists); err != nil {
 			return fmt.Errorf("store: check migration %s: %w", name, err)
@@ -181,15 +276,39 @@ func (s *PostgresStore) Migrate(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("store: read migration %s: %w", name, err)
 		}
-		if _, err := s.pool.Exec(ctx, string(body)); err != nil {
-			return fmt.Errorf("store: apply migration %s: %w", name, err)
-		}
-		if _, err := s.pool.Exec(ctx,
-			`INSERT INTO schema_migrations (version) VALUES ($1)`, name,
-		); err != nil {
-			return fmt.Errorf("store: record migration %s: %w", name, err)
+		if err := applyMigration(ctx, sess, name, string(body)); err != nil {
+			return err
 		}
 	}
+	return nil
+}
+
+// applyMigration runs one migration's body and records its version inside a
+// single transaction, rolling back on any error so a partial apply is never
+// recorded as un-applied.
+func applyMigration(ctx context.Context, sess migrateSession, name, body string) error {
+	tx, err := sess.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("store: begin migration %s: %w", name, err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+	if _, err := tx.Exec(ctx, body); err != nil {
+		return fmt.Errorf("store: apply migration %s: %w", name, err)
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO schema_migrations (version) VALUES ($1)`, name,
+	); err != nil {
+		return fmt.Errorf("store: record migration %s: %w", name, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("store: commit migration %s: %w", name, err)
+	}
+	committed = true
 	return nil
 }
 
@@ -432,22 +551,22 @@ func (s *PostgresStore) RemoveMembership(ctx context.Context, orgID, userID stri
 
 func (s *PostgresStore) CreateApp(ctx context.Context, a *domain.App) error {
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO apps (id, org_id, project_id, coolify_uuid, name, git_repository, git_branch, build_pack, cpu, memory_mb, min_replicas, max_replicas, status, namespace, "release", host, image, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
-		a.ID, a.OrgID, a.ProjectID, a.CoolifyUUID, a.Name, a.GitRepository, a.GitBranch, a.BuildPack, a.CPU, a.MemoryMB, a.MinReplicas, a.MaxReplicas, a.Status, a.Namespace, a.Release, a.Host, a.Image, a.CreatedAt,
+		`INSERT INTO apps (id, org_id, project_id, name, git_repository, git_branch, build_pack, cpu, memory_mb, min_replicas, max_replicas, status, namespace, "release", host, image, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
+		a.ID, a.OrgID, a.ProjectID, a.Name, a.GitRepository, a.GitBranch, a.BuildPack, a.CPU, a.MemoryMB, a.MinReplicas, a.MaxReplicas, a.Status, a.Namespace, a.Release, a.Host, a.Image, a.CreatedAt,
 	)
 	return mapErr(err)
 }
 
 func (s *PostgresStore) GetApp(ctx context.Context, id string) (*domain.App, error) {
 	return s.scanApp(s.pool.QueryRow(ctx,
-		`SELECT id, org_id, project_id, coolify_uuid, name, git_repository, git_branch, build_pack, cpu, memory_mb, min_replicas, max_replicas, status, namespace, "release", host, image, created_at
+		`SELECT id, org_id, project_id, name, git_repository, git_branch, build_pack, cpu, memory_mb, min_replicas, max_replicas, status, namespace, "release", host, image, created_at
 		 FROM apps WHERE id = $1`, id))
 }
 
 func (s *PostgresStore) scanApp(row pgx.Row) (*domain.App, error) {
 	var a domain.App
-	if err := row.Scan(&a.ID, &a.OrgID, &a.ProjectID, &a.CoolifyUUID, &a.Name, &a.GitRepository, &a.GitBranch, &a.BuildPack, &a.CPU, &a.MemoryMB, &a.MinReplicas, &a.MaxReplicas, &a.Status, &a.Namespace, &a.Release, &a.Host, &a.Image, &a.CreatedAt); err != nil {
+	if err := row.Scan(&a.ID, &a.OrgID, &a.ProjectID, &a.Name, &a.GitRepository, &a.GitBranch, &a.BuildPack, &a.CPU, &a.MemoryMB, &a.MinReplicas, &a.MaxReplicas, &a.Status, &a.Namespace, &a.Release, &a.Host, &a.Image, &a.CreatedAt); err != nil {
 		return nil, mapErr(err)
 	}
 	return &a, nil
@@ -455,7 +574,7 @@ func (s *PostgresStore) scanApp(row pgx.Row) (*domain.App, error) {
 
 func (s *PostgresStore) ListAppsByOrg(ctx context.Context, orgID string) ([]domain.App, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, org_id, project_id, coolify_uuid, name, git_repository, git_branch, build_pack, cpu, memory_mb, min_replicas, max_replicas, status, namespace, "release", host, image, created_at
+		`SELECT id, org_id, project_id, name, git_repository, git_branch, build_pack, cpu, memory_mb, min_replicas, max_replicas, status, namespace, "release", host, image, created_at
 		 FROM apps WHERE org_id = $1`, orgID)
 	if err != nil {
 		return nil, mapErr(err)
@@ -464,7 +583,7 @@ func (s *PostgresStore) ListAppsByOrg(ctx context.Context, orgID string) ([]doma
 	out := make([]domain.App, 0)
 	for rows.Next() {
 		var a domain.App
-		if err := rows.Scan(&a.ID, &a.OrgID, &a.ProjectID, &a.CoolifyUUID, &a.Name, &a.GitRepository, &a.GitBranch, &a.BuildPack, &a.CPU, &a.MemoryMB, &a.MinReplicas, &a.MaxReplicas, &a.Status, &a.Namespace, &a.Release, &a.Host, &a.Image, &a.CreatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.OrgID, &a.ProjectID, &a.Name, &a.GitRepository, &a.GitBranch, &a.BuildPack, &a.CPU, &a.MemoryMB, &a.MinReplicas, &a.MaxReplicas, &a.Status, &a.Namespace, &a.Release, &a.Host, &a.Image, &a.CreatedAt); err != nil {
 			return nil, mapErr(err)
 		}
 		out = append(out, a)
@@ -474,11 +593,11 @@ func (s *PostgresStore) ListAppsByOrg(ctx context.Context, orgID string) ([]doma
 
 func (s *PostgresStore) UpdateApp(ctx context.Context, a *domain.App) error {
 	tag, err := s.pool.Exec(ctx,
-		`UPDATE apps SET org_id = $2, project_id = $3, coolify_uuid = $4, name = $5, git_repository = $6,
-		 git_branch = $7, build_pack = $8, cpu = $9, memory_mb = $10, min_replicas = $11, max_replicas = $12,
-		 status = $13, namespace = $14, "release" = $15, host = $16, image = $17, created_at = $18
+		`UPDATE apps SET org_id = $2, project_id = $3, name = $4, git_repository = $5,
+		 git_branch = $6, build_pack = $7, cpu = $8, memory_mb = $9, min_replicas = $10, max_replicas = $11,
+		 status = $12, namespace = $13, "release" = $14, host = $15, image = $16, created_at = $17
 		 WHERE id = $1`,
-		a.ID, a.OrgID, a.ProjectID, a.CoolifyUUID, a.Name, a.GitRepository, a.GitBranch, a.BuildPack, a.CPU, a.MemoryMB, a.MinReplicas, a.MaxReplicas, a.Status, a.Namespace, a.Release, a.Host, a.Image, a.CreatedAt,
+		a.ID, a.OrgID, a.ProjectID, a.Name, a.GitRepository, a.GitBranch, a.BuildPack, a.CPU, a.MemoryMB, a.MinReplicas, a.MaxReplicas, a.Status, a.Namespace, a.Release, a.Host, a.Image, a.CreatedAt,
 	)
 	if err != nil {
 		return mapErr(err)
@@ -527,10 +646,12 @@ func (s *PostgresStore) scanBuild(row pgx.Row) (*domain.Build, error) {
 	return &b, nil
 }
 
-func (s *PostgresStore) ListBuildsByApp(ctx context.Context, appID string) ([]domain.Build, error) {
-	rows, err := s.pool.Query(ctx,
-		`SELECT id, app_id, org_id, status, commit_ref, image, logs, created_at, finished_at
-		 FROM builds WHERE app_id = $1 ORDER BY created_at DESC`, appID)
+func (s *PostgresStore) ListBuildsByApp(ctx context.Context, appID string, p Page) ([]domain.Build, error) {
+	sql := `SELECT id, app_id, org_id, status, commit_ref, image, logs, created_at, finished_at
+		 FROM builds WHERE app_id = $1 ORDER BY created_at DESC, id DESC`
+	args := []any{appID}
+	sql, args = appendPage(sql, args, p)
+	rows, err := s.pool.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -593,10 +714,12 @@ func (s *PostgresStore) scanRelease(row pgx.Row) (*domain.Release, error) {
 	return &rel, nil
 }
 
-func (s *PostgresStore) ListReleasesByApp(ctx context.Context, appID string) ([]domain.Release, error) {
-	rows, err := s.pool.Query(ctx,
-		`SELECT id, app_id, org_id, revision, image, git_ref, config_hash, cpu, memory_mb, status, note, created_at
-		 FROM releases WHERE app_id = $1 ORDER BY revision DESC`, appID)
+func (s *PostgresStore) ListReleasesByApp(ctx context.Context, appID string, p Page) ([]domain.Release, error) {
+	sql := `SELECT id, app_id, org_id, revision, image, git_ref, config_hash, cpu, memory_mb, status, note, created_at
+		 FROM releases WHERE app_id = $1 ORDER BY revision DESC`
+	args := []any{appID}
+	sql, args = appendPage(sql, args, p)
+	rows, err := s.pool.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -636,16 +759,16 @@ func (s *PostgresStore) UpdateRelease(ctx context.Context, rel *domain.Release) 
 
 func (s *PostgresStore) CreateDatabase(ctx context.Context, d *domain.Database) error {
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO databases (id, org_id, project_id, coolify_uuid, name, engine, cpu, memory_mb, storage_gb, db_user, db_password, db_name, status, namespace, "release", host, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
-		d.ID, d.OrgID, d.ProjectID, d.CoolifyUUID, d.Name, d.Engine, d.CPU, d.MemoryMB, d.StorageGB, d.Username, d.Password, d.DatabaseName, d.Status, d.Namespace, d.Release, d.Host, d.CreatedAt,
+		`INSERT INTO databases (id, org_id, project_id, name, engine, cpu, memory_mb, storage_gb, db_user, db_password, db_name, status, namespace, "release", host, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
+		d.ID, d.OrgID, d.ProjectID, d.Name, d.Engine, d.CPU, d.MemoryMB, d.StorageGB, d.Username, d.Password, d.DatabaseName, d.Status, d.Namespace, d.Release, d.Host, d.CreatedAt,
 	)
 	return mapErr(err)
 }
 
 func (s *PostgresStore) scanDatabase(row pgx.Row) (*domain.Database, error) {
 	var d domain.Database
-	if err := row.Scan(&d.ID, &d.OrgID, &d.ProjectID, &d.CoolifyUUID, &d.Name, &d.Engine, &d.CPU, &d.MemoryMB, &d.StorageGB, &d.Username, &d.Password, &d.DatabaseName, &d.Status, &d.Namespace, &d.Release, &d.Host, &d.CreatedAt); err != nil {
+	if err := row.Scan(&d.ID, &d.OrgID, &d.ProjectID, &d.Name, &d.Engine, &d.CPU, &d.MemoryMB, &d.StorageGB, &d.Username, &d.Password, &d.DatabaseName, &d.Status, &d.Namespace, &d.Release, &d.Host, &d.CreatedAt); err != nil {
 		return nil, mapErr(err)
 	}
 	return &d, nil
@@ -653,13 +776,13 @@ func (s *PostgresStore) scanDatabase(row pgx.Row) (*domain.Database, error) {
 
 func (s *PostgresStore) GetDatabase(ctx context.Context, id string) (*domain.Database, error) {
 	return s.scanDatabase(s.pool.QueryRow(ctx,
-		`SELECT id, org_id, project_id, coolify_uuid, name, engine, cpu, memory_mb, storage_gb, db_user, db_password, db_name, status, namespace, "release", host, created_at
+		`SELECT id, org_id, project_id, name, engine, cpu, memory_mb, storage_gb, db_user, db_password, db_name, status, namespace, "release", host, created_at
 		 FROM databases WHERE id = $1`, id))
 }
 
 func (s *PostgresStore) ListDatabasesByOrg(ctx context.Context, orgID string) ([]domain.Database, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, org_id, project_id, coolify_uuid, name, engine, cpu, memory_mb, storage_gb, db_user, db_password, db_name, status, namespace, "release", host, created_at
+		`SELECT id, org_id, project_id, name, engine, cpu, memory_mb, storage_gb, db_user, db_password, db_name, status, namespace, "release", host, created_at
 		 FROM databases WHERE org_id = $1`, orgID)
 	if err != nil {
 		return nil, mapErr(err)
@@ -678,10 +801,10 @@ func (s *PostgresStore) ListDatabasesByOrg(ctx context.Context, orgID string) ([
 
 func (s *PostgresStore) UpdateDatabase(ctx context.Context, d *domain.Database) error {
 	tag, err := s.pool.Exec(ctx,
-		`UPDATE databases SET org_id = $2, project_id = $3, coolify_uuid = $4, name = $5, engine = $6,
-		 cpu = $7, memory_mb = $8, storage_gb = $9, db_user = $10, db_password = $11, db_name = $12,
-		 status = $13, namespace = $14, "release" = $15, host = $16, created_at = $17 WHERE id = $1`,
-		d.ID, d.OrgID, d.ProjectID, d.CoolifyUUID, d.Name, d.Engine, d.CPU, d.MemoryMB, d.StorageGB, d.Username, d.Password, d.DatabaseName, d.Status, d.Namespace, d.Release, d.Host, d.CreatedAt,
+		`UPDATE databases SET org_id = $2, project_id = $3, name = $4, engine = $5,
+		 cpu = $6, memory_mb = $7, storage_gb = $8, db_user = $9, db_password = $10, db_name = $11,
+		 status = $12, namespace = $13, "release" = $14, host = $15, created_at = $16 WHERE id = $1`,
+		d.ID, d.OrgID, d.ProjectID, d.Name, d.Engine, d.CPU, d.MemoryMB, d.StorageGB, d.Username, d.Password, d.DatabaseName, d.Status, d.Namespace, d.Release, d.Host, d.CreatedAt,
 	)
 	if err != nil {
 		return mapErr(err)
@@ -707,9 +830,9 @@ func (s *PostgresStore) DeleteDatabase(ctx context.Context, id string) error {
 
 func (s *PostgresStore) CreateService(ctx context.Context, svc *domain.Service) error {
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO services (id, org_id, project_id, template, name, coolify_uuid, cpu, memory_mb, status, namespace, "release", host, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
-		svc.ID, svc.OrgID, svc.ProjectID, svc.Template, svc.Name, svc.CoolifyUUID, svc.CPU, svc.MemoryMB, svc.Status, svc.Namespace, svc.Release, svc.Host, svc.CreatedAt,
+		`INSERT INTO services (id, org_id, project_id, template, name, cpu, memory_mb, status, namespace, "release", host, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		svc.ID, svc.OrgID, svc.ProjectID, svc.Template, svc.Name, svc.CPU, svc.MemoryMB, svc.Status, svc.Namespace, svc.Release, svc.Host, svc.CreatedAt,
 	)
 	return mapErr(err)
 }
@@ -717,9 +840,9 @@ func (s *PostgresStore) CreateService(ctx context.Context, svc *domain.Service) 
 func (s *PostgresStore) GetService(ctx context.Context, id string) (*domain.Service, error) {
 	var svc domain.Service
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, org_id, project_id, template, name, coolify_uuid, cpu, memory_mb, status, namespace, "release", host, created_at
+		`SELECT id, org_id, project_id, template, name, cpu, memory_mb, status, namespace, "release", host, created_at
 		 FROM services WHERE id = $1`, id,
-	).Scan(&svc.ID, &svc.OrgID, &svc.ProjectID, &svc.Template, &svc.Name, &svc.CoolifyUUID, &svc.CPU, &svc.MemoryMB, &svc.Status, &svc.Namespace, &svc.Release, &svc.Host, &svc.CreatedAt)
+	).Scan(&svc.ID, &svc.OrgID, &svc.ProjectID, &svc.Template, &svc.Name, &svc.CPU, &svc.MemoryMB, &svc.Status, &svc.Namespace, &svc.Release, &svc.Host, &svc.CreatedAt)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -728,7 +851,7 @@ func (s *PostgresStore) GetService(ctx context.Context, id string) (*domain.Serv
 
 func (s *PostgresStore) ListServicesByOrg(ctx context.Context, orgID string) ([]domain.Service, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, org_id, project_id, template, name, coolify_uuid, cpu, memory_mb, status, namespace, "release", host, created_at
+		`SELECT id, org_id, project_id, template, name, cpu, memory_mb, status, namespace, "release", host, created_at
 		 FROM services WHERE org_id = $1`, orgID)
 	if err != nil {
 		return nil, mapErr(err)
@@ -737,7 +860,7 @@ func (s *PostgresStore) ListServicesByOrg(ctx context.Context, orgID string) ([]
 	out := make([]domain.Service, 0)
 	for rows.Next() {
 		var svc domain.Service
-		if err := rows.Scan(&svc.ID, &svc.OrgID, &svc.ProjectID, &svc.Template, &svc.Name, &svc.CoolifyUUID, &svc.CPU, &svc.MemoryMB, &svc.Status, &svc.Namespace, &svc.Release, &svc.Host, &svc.CreatedAt); err != nil {
+		if err := rows.Scan(&svc.ID, &svc.OrgID, &svc.ProjectID, &svc.Template, &svc.Name, &svc.CPU, &svc.MemoryMB, &svc.Status, &svc.Namespace, &svc.Release, &svc.Host, &svc.CreatedAt); err != nil {
 			return nil, mapErr(err)
 		}
 		out = append(out, svc)
@@ -747,9 +870,9 @@ func (s *PostgresStore) ListServicesByOrg(ctx context.Context, orgID string) ([]
 
 func (s *PostgresStore) UpdateService(ctx context.Context, svc *domain.Service) error {
 	tag, err := s.pool.Exec(ctx,
-		`UPDATE services SET org_id = $2, project_id = $3, template = $4, name = $5, coolify_uuid = $6,
-		 cpu = $7, memory_mb = $8, status = $9, namespace = $10, "release" = $11, host = $12, created_at = $13 WHERE id = $1`,
-		svc.ID, svc.OrgID, svc.ProjectID, svc.Template, svc.Name, svc.CoolifyUUID, svc.CPU, svc.MemoryMB, svc.Status, svc.Namespace, svc.Release, svc.Host, svc.CreatedAt,
+		`UPDATE services SET org_id = $2, project_id = $3, template = $4, name = $5,
+		 cpu = $6, memory_mb = $7, status = $8, namespace = $9, "release" = $10, host = $11, created_at = $12 WHERE id = $1`,
+		svc.ID, svc.OrgID, svc.ProjectID, svc.Template, svc.Name, svc.CPU, svc.MemoryMB, svc.Status, svc.Namespace, svc.Release, svc.Host, svc.CreatedAt,
 	)
 	if err != nil {
 		return mapErr(err)
@@ -836,11 +959,18 @@ func (s *PostgresStore) CreateAuditEvent(ctx context.Context, e *domain.AuditEve
 func (s *PostgresStore) ListAuditEvents(ctx context.Context, f domain.AuditFilter) ([]domain.AuditEvent, error) {
 	limit := f.Limit
 	if limit <= 0 {
-		limit = 100
+		limit = DefaultPageLimit
+	}
+	if limit > MaxPageLimit {
+		limit = MaxPageLimit
+	}
+	offset := f.Offset
+	if offset < 0 {
+		offset = 0
 	}
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, org_id, actor_user_id, actor_email, action, target_type, target_id, metadata, at
-		   FROM audit_events WHERE org_id = $1 ORDER BY at DESC, id DESC LIMIT $2`, f.OrgID, limit)
+		   FROM audit_events WHERE org_id = $1 ORDER BY at DESC, id DESC LIMIT $2 OFFSET $3`, f.OrgID, limit, offset)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -855,6 +985,17 @@ func (s *PostgresStore) ListAuditEvents(ctx context.Context, f domain.AuditFilte
 		out = append(out, e)
 	}
 	return out, mapErr(rows.Err())
+}
+
+// CountAuditEvents returns the total number of events matching the filter's scope
+// (OrgID), ignoring Limit/Offset, so the list endpoint can report has-more.
+func (s *PostgresStore) CountAuditEvents(ctx context.Context, f domain.AuditFilter) (int, error) {
+	var n int
+	if err := s.pool.QueryRow(ctx,
+		`SELECT count(*) FROM audit_events WHERE org_id = $1`, f.OrgID).Scan(&n); err != nil {
+		return 0, mapErr(err)
+	}
+	return n, nil
 }
 
 // ---- Domains ----
@@ -1422,9 +1563,11 @@ func (s *PostgresStore) AddUsageIfAbsent(ctx context.Context, u *domain.UsageRec
 	return tag.RowsAffected() == 1, nil
 }
 
-func (s *PostgresStore) ListUsageByOrg(ctx context.Context, orgID string) ([]domain.UsageRecord, error) {
-	rows, err := s.pool.Query(ctx,
-		`SELECT id, org_id, metric, quantity, at FROM usage_records WHERE org_id = $1`, orgID)
+func (s *PostgresStore) ListUsageByOrg(ctx context.Context, orgID string, p Page) ([]domain.UsageRecord, error) {
+	sql := `SELECT id, org_id, metric, quantity, at FROM usage_records WHERE org_id = $1 ORDER BY at DESC, id DESC`
+	args := []any{orgID}
+	sql, args = appendPage(sql, args, p)
+	rows, err := s.pool.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -1440,9 +1583,11 @@ func (s *PostgresStore) ListUsageByOrg(ctx context.Context, orgID string) ([]dom
 	return out, mapErr(rows.Err())
 }
 
-func (s *PostgresStore) ListUsageByOrgSince(ctx context.Context, orgID string, since time.Time) ([]domain.UsageRecord, error) {
-	rows, err := s.pool.Query(ctx,
-		`SELECT id, org_id, metric, quantity, at FROM usage_records WHERE org_id = $1 AND at >= $2`, orgID, since)
+func (s *PostgresStore) ListUsageByOrgSince(ctx context.Context, orgID string, since time.Time, p Page) ([]domain.UsageRecord, error) {
+	sql := `SELECT id, org_id, metric, quantity, at FROM usage_records WHERE org_id = $1 AND at >= $2 ORDER BY at DESC, id DESC`
+	args := []any{orgID, since}
+	sql, args = appendPage(sql, args, p)
+	rows, err := s.pool.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -1865,8 +2010,12 @@ func (s *PostgresStore) SumUsageByMetric(ctx context.Context) (map[string]int64,
 	return out, mapErr(rows.Err())
 }
 
+// ListAllUsage returns recent usage records platform-wide, newest first, hard-capped
+// at MaxPageLimit so it can never trigger an unbounded full-table scan. Admin
+// aggregates go through SumUsageByMetric (SQL-side), not this method.
 func (s *PostgresStore) ListAllUsage(ctx context.Context) ([]domain.UsageRecord, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id, org_id, metric, quantity, at FROM usage_records`)
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, org_id, metric, quantity, at FROM usage_records ORDER BY at DESC, id DESC LIMIT $1`, MaxPageLimit)
 	if err != nil {
 		return nil, mapErr(err)
 	}

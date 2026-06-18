@@ -11,6 +11,7 @@ import (
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/identity"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/kube"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/platform"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/store"
 )
 
 // orgAuthz returns middleware that requires the caller to be a member of the
@@ -38,11 +39,17 @@ func (s *Server) orgAuthz(min domain.Role) func(http.Handler) http.Handler {
 	}
 }
 
-// writePlatformError maps platform/coolify errors to HTTP codes.
+// writePlatformError maps platform/store errors to HTTP codes.
 func (s *Server) writePlatformError(w http.ResponseWriter, action string, err error) {
 	switch {
 	case errors.Is(err, platform.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not found")
+	case errors.Is(err, store.ErrInvalid):
+		// A referential/shape violation the DB rejected (FK/not-null/check) — a
+		// client/data error, not a backend fault.
+		writeError(w, http.StatusUnprocessableEntity, "invalid reference or value")
+	case errors.Is(err, store.ErrConflict):
+		writeError(w, http.StatusConflict, "conflict")
 	case errors.Is(err, platform.ErrPaymentRequired):
 		writeError(w, http.StatusPaymentRequired, err.Error())
 	case errors.Is(err, platform.ErrQuotaExceeded):
@@ -74,8 +81,6 @@ type createAppRequest struct {
 	BuildPack     string  `json:"buildPack"`
 	CPU           float64 `json:"cpu"`
 	MemoryMB      int     `json:"memoryMb"`
-	ProjectUUID   string  `json:"projectUuid"`
-	ServerUUID    string  `json:"serverUuid"`
 }
 
 func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
@@ -133,8 +138,6 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		BuildPack:     req.BuildPack,
 		CPU:           req.CPU,
 		MemoryMB:      req.MemoryMB,
-		ProjectUUID:   req.ProjectUUID,
-		ServerUUID:    req.ServerUUID,
 	})
 	if err != nil {
 		s.writePlatformError(w, "create app", err)
@@ -218,12 +221,16 @@ func (s *Server) handleScaleApp(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListReleases(w http.ResponseWriter, r *http.Request) {
-	rels, err := s.platform.ListReleases(r.Context(), chi.URLParam(r, "orgID"), chi.URLParam(r, "appID"))
+	page := parsePage(r)
+	rels, err := s.platform.ListReleases(r.Context(), chi.URLParam(r, "orgID"), chi.URLParam(r, "appID"), page)
 	if err != nil {
 		s.writePlatformError(w, "list releases", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": rels})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"data": rels,
+		"page": pageMeta(page, len(rels), -1),
+	})
 }
 
 type rollbackRequest struct {
@@ -390,12 +397,16 @@ func indexByte(b []byte, c byte) int {
 }
 
 func (s *Server) handleListBuilds(w http.ResponseWriter, r *http.Request) {
-	builds, err := s.platform.ListBuilds(r.Context(), chi.URLParam(r, "orgID"), chi.URLParam(r, "appID"))
+	page := parsePage(r)
+	builds, err := s.platform.ListBuilds(r.Context(), chi.URLParam(r, "orgID"), chi.URLParam(r, "appID"), page)
 	if err != nil {
 		s.writePlatformError(w, "list builds", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": builds})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"data": builds,
+		"page": pageMeta(page, len(builds), -1),
+	})
 }
 
 func (s *Server) handleGetBuild(w http.ResponseWriter, r *http.Request) {

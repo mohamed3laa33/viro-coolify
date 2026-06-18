@@ -9,7 +9,13 @@ import (
 
 // handleServiceCatalog returns the one-click catalog. Public endpoint.
 func (s *Server) handleServiceCatalog(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"data": s.platform.ListCatalog(r.Context())})
+	catalog, err := s.platform.ListCatalog(r.Context())
+	if err != nil {
+		s.logger.Error("list catalog", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to load catalog")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": catalog})
 }
 
 func (s *Server) handleListServices(w http.ResponseWriter, r *http.Request) {
@@ -47,8 +53,6 @@ type createServiceRequest struct {
 	Image       string  `json:"image"`
 	CPU         float64 `json:"cpu"`
 	MemoryMB    int     `json:"memoryMb"`
-	ProjectUUID string  `json:"projectUuid"`
-	ServerUUID  string  `json:"serverUuid"`
 }
 
 func (s *Server) handleCreateService(w http.ResponseWriter, r *http.Request) {
@@ -66,8 +70,6 @@ func (s *Server) handleCreateService(w http.ResponseWriter, r *http.Request) {
 		Image:       req.Image,
 		CPU:         req.CPU,
 		MemoryMB:    req.MemoryMB,
-		ProjectUUID: req.ProjectUUID,
-		ServerUUID:  req.ServerUUID,
 	})
 	if err != nil {
 		s.writePlatformError(w, "create service", err)

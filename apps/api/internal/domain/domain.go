@@ -66,8 +66,8 @@ type Membership struct {
 	Role   Role   `json:"role"`
 }
 
-// Project groups apps and databases within an organization (Org → Project → App),
-// mirroring Coolify's project concept. Every org has at least a "default" project.
+// Project groups apps and databases within an organization (Org → Project → App).
+// Every org has at least a "default" project.
 type Project struct {
 	ID        string    `json:"id"`
 	OrgID     string    `json:"orgId"`
@@ -113,13 +113,12 @@ type Invitation struct {
 }
 
 // App is a Viro application owned by an organization and grouped under a project.
-// It mirrors a Coolify application (CoolifyUUID) but is the tenant-scoped record
-// Viro authorizes against.
+// It is the tenant-scoped record Viro authorizes against and deploys onto the
+// Kubernetes backend.
 type App struct {
 	ID            string  `json:"id"`
 	OrgID         string  `json:"orgId"`
 	ProjectID     string  `json:"projectId"`
-	CoolifyUUID   string  `json:"coolifyUuid,omitempty"`
 	Name          string  `json:"name"`
 	Image         string  `json:"image,omitempty"` // container image; when set the app deploys directly (no build)
 	GitRepository string  `json:"gitRepository,omitempty"`
@@ -188,18 +187,17 @@ type Release struct {
 }
 
 // Service is a one-click catalog instance (WordPress, a database, etc.) owned by
-// an organization and grouped under a project. Provisioned via Coolify when
-// configured; managed as a store record in demo mode.
+// an organization and grouped under a project, deployed as a Helm release onto
+// the Kubernetes backend.
 type Service struct {
-	ID          string  `json:"id"`
-	OrgID       string  `json:"orgId"`
-	ProjectID   string  `json:"projectId"`
-	Template    string  `json:"template"` // catalog template key
-	Name        string  `json:"name"`
-	CoolifyUUID string  `json:"coolifyUuid,omitempty"`
-	CPU         float64 `json:"cpu"`
-	MemoryMB    int     `json:"memoryMb"`
-	Status      string  `json:"status"`
+	ID        string  `json:"id"`
+	OrgID     string  `json:"orgId"`
+	ProjectID string  `json:"projectId"`
+	Template  string  `json:"template"` // catalog template key
+	Name      string  `json:"name"`
+	CPU       float64 `json:"cpu"`
+	MemoryMB  int     `json:"memoryMb"`
+	Status    string  `json:"status"`
 	// Kubernetes placement returned by the deploy backend (kube.Backend).
 	Namespace string    `json:"namespace,omitempty"` // per-org-project namespace
 	Release   string    `json:"release,omitempty"`   // Helm release name
@@ -276,16 +274,15 @@ func (d Domain) IsVerified() bool {
 // Database is a Vortex managed database owned by an organization. It is deployed
 // as a StatefulSet (one-click engine image) into the org's tenant namespace.
 type Database struct {
-	ID          string  `json:"id"`
-	OrgID       string  `json:"orgId"`
-	ProjectID   string  `json:"projectId,omitempty"`
-	CoolifyUUID string  `json:"coolifyUuid,omitempty"`
-	Name        string  `json:"name"`
-	Engine      string  `json:"engine"`
-	CPU         float64 `json:"cpu"`      // requested vCPU
-	MemoryMB    int     `json:"memoryMb"` // requested memory in MB
-	StorageGB   int     `json:"storageGb"`
-	Status      string  `json:"status"`
+	ID        string  `json:"id"`
+	OrgID     string  `json:"orgId"`
+	ProjectID string  `json:"projectId,omitempty"`
+	Name      string  `json:"name"`
+	Engine    string  `json:"engine"`
+	CPU       float64 `json:"cpu"`      // requested vCPU
+	MemoryMB  int     `json:"memoryMb"` // requested memory in MB
+	StorageGB int     `json:"storageGb"`
+	Status    string  `json:"status"`
 	// Generated connection credentials. The engine container initializes itself
 	// with these on first boot. These are NEVER serialized on the bare model
 	// (json:"-") so a bulk listing can't leak every database's plaintext
@@ -496,10 +493,12 @@ type AuditEvent struct {
 
 // AuditFilter scopes an audit-log listing. An empty OrgID lists platform-level
 // (super-admin) events; a set OrgID lists that org's events. Limit caps the
-// number of (most-recent-first) rows; <=0 falls back to a default.
+// number of (most-recent-first) rows; <=0 falls back to a default. Offset skips
+// that many leading rows for keyset-free pagination.
 type AuditFilter struct {
-	OrgID string
-	Limit int
+	OrgID  string
+	Limit  int
+	Offset int
 }
 
 // AppEnvEntry is a single app environment variable / secret with its at-rest

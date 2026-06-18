@@ -227,7 +227,7 @@ func TestReconcileFailedMarksCurrentReleaseFailed(t *testing.T) {
 	if cur != nil && cur.Status == domain.ReleaseActive {
 		t.Fatalf("current release still active after failed reconcile")
 	}
-	rels, _ := st.ListReleasesByApp(ctx, app.ID)
+	rels, _ := st.ListReleasesByApp(ctx, app.ID, store.Page{})
 	var sawFailed bool
 	for _, r := range rels {
 		if r.Status == domain.ReleaseFailed {

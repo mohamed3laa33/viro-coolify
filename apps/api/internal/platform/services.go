@@ -13,11 +13,12 @@ import (
 )
 
 // ListCatalog returns the active one-click templates, sorted by SortOrder, from
-// the store.
-func (s *Service) ListCatalog(ctx context.Context) []domain.ServiceTemplate {
+// the store. A store error is PROPAGATED so the public catalog endpoint returns a
+// 5xx instead of a 200 with an empty/null template list.
+func (s *Service) ListCatalog(ctx context.Context) ([]domain.ServiceTemplate, error) {
 	tmpls, err := s.store.ListServiceTemplates(ctx)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	active := make([]domain.ServiceTemplate, 0, len(tmpls))
 	for _, t := range tmpls {
@@ -26,16 +27,21 @@ func (s *Service) ListCatalog(ctx context.Context) []domain.ServiceTemplate {
 		}
 	}
 	sort.Slice(active, func(i, j int) bool { return active[i].SortOrder < active[j].SortOrder })
-	return active
+	return active, nil
 }
 
-// templateByKey looks up a stored template by key.
-func (s *Service) templateByKey(ctx context.Context, key string) (domain.ServiceTemplate, bool) {
+// templateByKey looks up a stored template by key. found=false with a nil error
+// means "no such template"; a non-nil error is a real store failure and is
+// propagated rather than masked as not-found.
+func (s *Service) templateByKey(ctx context.Context, key string) (tmpl domain.ServiceTemplate, found bool, err error) {
 	t, err := s.store.GetServiceTemplate(ctx, key)
-	if err != nil {
-		return domain.ServiceTemplate{}, false
+	if errors.Is(err, store.ErrNotFound) {
+		return domain.ServiceTemplate{}, false, nil
 	}
-	return *t, true
+	if err != nil {
+		return domain.ServiceTemplate{}, false, err
+	}
+	return *t, true, nil
 }
 
 // CreateServiceInput describes a new one-click service.
@@ -45,8 +51,6 @@ type CreateServiceInput struct {
 	Image       string // overrides the template image (e.g. for the docker-image app template)
 	CPU         float64
 	MemoryMB    int
-	ProjectUUID string // Coolify project placement (optional)
-	ServerUUID  string
 }
 
 // CreateService provisions a one-click catalog instance for the org, validating
@@ -58,7 +62,10 @@ func (s *Service) CreateService(ctx context.Context, orgID, projectID string, in
 	if err := s.ensureActive(ctx, orgID); err != nil {
 		return nil, err
 	}
-	tmpl, ok := s.templateByKey(ctx, in.TemplateKey)
+	tmpl, ok, err := s.templateByKey(ctx, in.TemplateKey)
+	if err != nil {
+		return nil, err
+	}
 	if !ok {
 		return nil, ErrInvalidTemplate
 	}
@@ -185,7 +192,10 @@ func (s *Service) serviceAction(ctx context.Context, orgID, serviceID, status st
 // template (image/port/kind) and resolved resources, so a redeploy re-applies
 // the same chart values via helm upgrade.
 func (s *Service) serviceWorkload(ctx context.Context, svc *domain.Service, orgSlug, projSlug string) (kube.Workload, error) {
-	tmpl, ok := s.templateByKey(ctx, svc.Template)
+	tmpl, ok, err := s.templateByKey(ctx, svc.Template)
+	if err != nil {
+		return kube.Workload{}, err
+	}
 	if !ok {
 		return kube.Workload{}, ErrInvalidTemplate
 	}

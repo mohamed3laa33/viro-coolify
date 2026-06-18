@@ -47,7 +47,7 @@ func TestMeterUsageContinuesOnError(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("metered orgs = %d, want 1 (the good org despite the bad one)", n)
 	}
-	recs, _ := mem.ListUsageByOrg(ctx, "good")
+	recs, _ := mem.ListUsageByOrg(ctx, "good", store.Page{})
 	if len(recs) == 0 {
 		t.Fatal("expected the good org to be metered despite the bad org failing")
 	}
@@ -73,7 +73,7 @@ func TestMeterUsageConcurrentNoDoubleCount(t *testing.T) {
 	}
 	wg.Wait()
 
-	recs, _ := st.ListUsageByOrg(context.Background(), "o1")
+	recs, _ := st.ListUsageByOrg(context.Background(), "o1", store.Page{})
 	n := 0
 	for _, r := range recs {
 		if r.Metric == MeterMetric {
@@ -145,7 +145,7 @@ func TestMeterUsageWatermarkStopsAtFailedHour(t *testing.T) {
 	if _, err := svc2.MeterUsage(ctx); err != nil {
 		t.Fatalf("retry meter: %v", err)
 	}
-	recs, _ := mem.ListUsageByOrg(ctx, "o1")
+	recs, _ := mem.ListUsageByOrg(ctx, "o1", store.Page{})
 	hours := map[int]int{}
 	for _, r := range recs {
 		if r.Metric == MeterMetric {

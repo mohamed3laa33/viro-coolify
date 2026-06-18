@@ -12,17 +12,29 @@ import (
 )
 
 // handlePlans returns the public plan catalog.
-func (s *Server) handlePlans(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handlePlans(w http.ResponseWriter, r *http.Request) {
+	plans, err := s.billing.Catalog(r.Context())
+	if err != nil {
+		s.logger.Error("list plans", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to load plans")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"data":     s.billing.Catalog(),
+		"data":     plans,
 		"provider": s.billing.ProviderName(),
 	})
 }
 
 // handlePricing returns the public hourly price list (active components).
 func (s *Server) handlePricing(w http.ResponseWriter, r *http.Request) {
+	comps, err := s.billing.PricingComponents(r.Context())
+	if err != nil {
+		s.logger.Error("list pricing", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to load pricing")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"data": s.billing.PricingComponents(r.Context()),
+		"data": comps,
 	})
 }
 

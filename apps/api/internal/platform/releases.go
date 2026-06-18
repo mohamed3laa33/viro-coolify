@@ -100,7 +100,7 @@ func (s *Service) recordRelease(ctx context.Context, app *domain.App, w kube.Wor
 // atomic. A duplicate revision surfaces as store.ErrConflict for the caller's
 // retry loop.
 func (s *Service) allocateAndInsertRelease(ctx context.Context, tx store.Store, app *domain.App, w kube.Workload, note string, supersededStatus domain.ReleaseStatus) (*domain.Release, error) {
-	existing, err := tx.ListReleasesByApp(ctx, app.ID)
+	existing, err := tx.ListReleasesByApp(ctx, app.ID, store.Page{})
 	if err != nil {
 		return nil, err
 	}
@@ -137,18 +137,19 @@ func (s *Service) allocateAndInsertRelease(ctx context.Context, tx store.Store, 
 	return rel, nil
 }
 
-// ListReleases returns the org app's release history, newest revision first.
-func (s *Service) ListReleases(ctx context.Context, orgID, appID string) ([]domain.Release, error) {
+// ListReleases returns a bounded page of the org app's release history, newest
+// revision first.
+func (s *Service) ListReleases(ctx context.Context, orgID, appID string, p store.Page) ([]domain.Release, error) {
 	if _, err := s.ownedApp(ctx, orgID, appID); err != nil {
 		return nil, err
 	}
-	return s.store.ListReleasesByApp(ctx, appID)
+	return s.store.ListReleasesByApp(ctx, appID, p)
 }
 
 // CurrentRelease returns the app's currently-active release (the highest-revision
 // release whose status is active/deploying), or nil when the app has none yet.
 func (s *Service) CurrentRelease(ctx context.Context, appID string) (*domain.Release, error) {
-	rels, err := s.store.ListReleasesByApp(ctx, appID)
+	rels, err := s.store.ListReleasesByApp(ctx, appID, store.Page{})
 	if err != nil {
 		return nil, err
 	}
@@ -214,7 +215,7 @@ func (s *Service) RollbackApp(ctx context.Context, orgID, appID string, revision
 	if err := s.ensureActive(ctx, orgID); err != nil {
 		return nil, err
 	}
-	rels, err := s.store.ListReleasesByApp(ctx, appID) // newest revision first
+	rels, err := s.store.ListReleasesByApp(ctx, appID, store.Page{}) // newest revision first
 	if err != nil {
 		return nil, err
 	}

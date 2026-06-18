@@ -178,7 +178,7 @@ func TestAsyncBuildDeployReGatedWhenCanceled(t *testing.T) {
 		t.Fatalf("re-gated build must not Apply to the backend, got %d applies", len(kb.Applied))
 	}
 	// The build itself still succeeded.
-	builds, _ := svc.ListBuilds(ctx, "org-1", app.ID)
+	builds, _ := svc.ListBuilds(ctx, "org-1", app.ID, store.Page{})
 	if len(builds) != 1 || builds[0].Status != "succeeded" {
 		t.Fatalf("expected one succeeded build, got %+v", builds)
 	}

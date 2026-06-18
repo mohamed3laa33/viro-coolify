@@ -79,13 +79,17 @@ func (s *Service) CurrentInvoice(ctx context.Context, orgID string) (Invoice, er
 	var plan *domain.Plan
 	if got, err := s.store.GetSubscription(ctx, orgID); err == nil {
 		sub = got
-		if p, ok := s.PlanByID(ctx, got.PlanID); ok {
+		p, ok, perr := s.PlanByID(ctx, got.PlanID)
+		if perr != nil {
+			return Invoice{}, perr
+		}
+		if ok {
 			plan = &p
 		}
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return Invoice{}, err
 	}
-	records, err := s.store.ListUsageByOrgSince(ctx, orgID, s.periodStart(sub))
+	records, err := s.store.ListUsageByOrgSince(ctx, orgID, s.periodStart(sub), store.Page{})
 	if err != nil {
 		return Invoice{}, err
 	}
@@ -202,7 +206,7 @@ func (s *Service) ReportUsage(ctx context.Context, orgID string) error {
 	if sub.StripeSubscriptionItemID == "" {
 		return nil
 	}
-	records, err := s.store.ListUsageByOrgSince(ctx, orgID, s.periodStart(sub))
+	records, err := s.store.ListUsageByOrgSince(ctx, orgID, s.periodStart(sub), store.Page{})
 	if err != nil {
 		return err
 	}

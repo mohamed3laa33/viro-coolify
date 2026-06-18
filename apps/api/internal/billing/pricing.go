@@ -19,11 +19,13 @@ const MeterMetric = "compute_cost_microcents"
 const hoursPerMonth = 730.0
 
 // PricingComponents returns the active, admin-managed pricing components sorted by
-// SortOrder. Prices are always read live from the store — never hardcoded.
-func (s *Service) PricingComponents(ctx context.Context) []domain.PricingComponent {
+// SortOrder. Prices are always read live from the store — never hardcoded. A store
+// error is PROPAGATED so the public pricing endpoint returns a 5xx instead of a
+// 200 with an empty/null price list (and metering never silently reads zero prices).
+func (s *Service) PricingComponents(ctx context.Context) ([]domain.PricingComponent, error) {
 	comps, err := s.store.ListPricingComponents(ctx)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	active := make([]domain.PricingComponent, 0, len(comps))
 	for _, c := range comps {
@@ -32,41 +34,57 @@ func (s *Service) PricingComponents(ctx context.Context) []domain.PricingCompone
 		}
 	}
 	sort.Slice(active, func(i, j int) bool { return active[i].SortOrder < active[j].SortOrder })
-	return active
+	return active, nil
 }
 
 // priceMap returns component-key -> price-per-hour for active components.
-func (s *Service) priceMap(ctx context.Context) map[string]float64 {
+func (s *Service) priceMap(ctx context.Context) (map[string]float64, error) {
+	comps, err := s.PricingComponents(ctx)
+	if err != nil {
+		return nil, err
+	}
 	m := map[string]float64{}
-	for _, c := range s.PricingComponents(ctx) {
+	for _, c := range comps {
 		m[c.Key] = c.PricePerHour
 	}
-	return m
+	return m, nil
 }
 
-// pricingCurrency returns the currency of the price list (from the cpu component,
-// falling back to usd).
-func (s *Service) pricingCurrency(ctx context.Context) string {
-	for _, c := range s.PricingComponents(ctx) {
+// pricingCurrency returns the currency of the price list (from the first component
+// carrying one, falling back to usd). A store error is propagated.
+func (s *Service) pricingCurrency(ctx context.Context) (string, error) {
+	comps, err := s.PricingComponents(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, c := range comps {
 		if c.Currency != "" {
-			return c.Currency
+			return c.Currency, nil
 		}
 	}
-	return "usd"
+	return "usd", nil
 }
 
 // HourlyCost returns the per-hour cost (in the price-list currency, e.g. dollars)
 // of a workload of the given size, from the live admin price list. cpu is in
-// vCPU, memMB in megabytes.
-func (s *Service) HourlyCost(ctx context.Context, cpu float64, memMB int) float64 {
-	p := s.priceMap(ctx)
-	return cpu*p["cpu"] + (float64(memMB)/1024.0)*p["memory"]
+// vCPU, memMB in megabytes. A store error is propagated rather than masked as a
+// zero (free) cost.
+func (s *Service) HourlyCost(ctx context.Context, cpu float64, memMB int) (float64, error) {
+	p, err := s.priceMap(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return cpu*p["cpu"] + (float64(memMB)/1024.0)*p["memory"], nil
 }
 
 // MonthlyCostCents returns the estimated monthly cost (rounded to whole cents) of
 // a single workload of the given size at current prices.
-func (s *Service) MonthlyCostCents(ctx context.Context, cpu float64, memMB int) int64 {
-	return int64(math.Round(s.HourlyCost(ctx, cpu, memMB) * hoursPerMonth * 100.0))
+func (s *Service) MonthlyCostCents(ctx context.Context, cpu float64, memMB int) (int64, error) {
+	hourly, err := s.HourlyCost(ctx, cpu, memMB)
+	if err != nil {
+		return 0, err
+	}
+	return int64(math.Round(hourly * hoursPerMonth * 100.0)), nil
 }
 
 // billable reports whether a workload of the given (release, status) currently
@@ -78,6 +96,15 @@ func billable(release, status string) bool {
 // orgHourlyCost sums the hourly cost of an org's currently-running workloads
 // (apps + services + databases) at the live price list.
 func (s *Service) orgHourlyCost(ctx context.Context, orgID string) (float64, error) {
+	// Resolve the price list once so a transient store error surfaces here instead
+	// of being masked into a zero per-workload cost.
+	prices, err := s.priceMap(ctx)
+	if err != nil {
+		return 0, err
+	}
+	hourly := func(cpu float64, memMB int) float64 {
+		return cpu*prices["cpu"] + (float64(memMB)/1024.0)*prices["memory"]
+	}
 	total := 0.0
 	apps, err := s.store.ListAppsByOrg(ctx, orgID)
 	if err != nil {
@@ -85,7 +112,7 @@ func (s *Service) orgHourlyCost(ctx context.Context, orgID string) (float64, err
 	}
 	for _, a := range apps {
 		if billable(a.Release, a.Status) {
-			total += s.HourlyCost(ctx, a.CPU, a.MemoryMB)
+			total += hourly(a.CPU, a.MemoryMB)
 		}
 	}
 	svcs, err := s.store.ListServicesByOrg(ctx, orgID)
@@ -94,7 +121,7 @@ func (s *Service) orgHourlyCost(ctx context.Context, orgID string) (float64, err
 	}
 	for _, sv := range svcs {
 		if billable(sv.Release, sv.Status) {
-			total += s.HourlyCost(ctx, sv.CPU, sv.MemoryMB)
+			total += hourly(sv.CPU, sv.MemoryMB)
 		}
 	}
 	dbs, err := s.store.ListDatabasesByOrg(ctx, orgID)
@@ -103,7 +130,7 @@ func (s *Service) orgHourlyCost(ctx context.Context, orgID string) (float64, err
 	}
 	for _, d := range dbs {
 		if billable(d.Release, d.Status) {
-			total += s.HourlyCost(ctx, d.CPU, d.MemoryMB)
+			total += hourly(d.CPU, d.MemoryMB)
 		}
 	}
 	return total, nil

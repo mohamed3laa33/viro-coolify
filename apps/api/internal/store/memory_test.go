@@ -224,7 +224,7 @@ func TestMemoryStoreBuilds(t *testing.T) {
 	}
 
 	// List newest-first.
-	list, err := s.ListBuildsByApp(ctx, "a1")
+	list, err := s.ListBuildsByApp(ctx, "a1", Page{})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}

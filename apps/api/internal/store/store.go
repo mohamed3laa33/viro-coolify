@@ -14,7 +14,54 @@ import (
 var (
 	ErrNotFound = errors.New("store: not found")
 	ErrConflict = errors.New("store: already exists")
+	// ErrInvalid signals that a write violated a referential/shape constraint the
+	// store enforces (a foreign-key reference to a missing row, a NULL in a
+	// NOT-NULL column, or a CHECK violation). The HTTP layer maps it to 400/422
+	// rather than a raw 500 — it is a client/data error, not a server fault.
+	ErrInvalid = errors.New("store: invalid reference or value")
 )
+
+// Pagination defaults for the growth-prone list reads.
+const (
+	// DefaultPageLimit is applied when a caller requests a bounded page without a
+	// positive limit.
+	DefaultPageLimit = 50
+	// MaxPageLimit caps a single page so a hostile/large ?limit= can never force a
+	// huge scan.
+	MaxPageLimit = 200
+)
+
+// Page bounds a list read. A non-positive Limit on a HTTP-facing read normalises
+// to DefaultPageLimit (capped at MaxPageLimit) via Normalize; the store layer
+// treats Limit <= 0 as "unbounded" so internal callers that must read the full
+// set (e.g. billing summation over a period) can pass the zero value.
+type Page struct {
+	Limit  int
+	Offset int
+}
+
+// Normalize returns a Page bounded for a public/list endpoint: a non-positive
+// Limit becomes DefaultPageLimit, anything above MaxPageLimit is clamped, and a
+// negative Offset becomes 0. Use it in the HTTP layer before handing a Page to
+// the store so user input can never request an unbounded or huge scan.
+func (p Page) Normalize() Page {
+	out := p
+	if out.Limit <= 0 {
+		out.Limit = DefaultPageLimit
+	}
+	if out.Limit > MaxPageLimit {
+		out.Limit = MaxPageLimit
+	}
+	if out.Offset < 0 {
+		out.Offset = 0
+	}
+	return out
+}
+
+// Bounded reports whether the page applies a LIMIT (Limit > 0). The store uses
+// it to decide whether to append LIMIT/OFFSET; an unbounded (zero) page reads
+// the full set for internal aggregation callers.
+func (p Page) Bounded() bool { return p.Limit > 0 }
 
 // Store is the aggregate persistence interface for the control-plane.
 type Store interface {
@@ -59,16 +106,20 @@ type Store interface {
 	// Builds (git-source image builds, tenant-scoped via the owning app/org).
 	CreateBuild(ctx context.Context, b *domain.Build) error
 	GetBuild(ctx context.Context, id string) (*domain.Build, error)
-	ListBuildsByApp(ctx context.Context, appID string) ([]domain.Build, error)
+	// ListBuildsByApp returns the app's builds newest-first. A bounded Page applies
+	// LIMIT/OFFSET; the zero Page reads all builds.
+	ListBuildsByApp(ctx context.Context, appID string, p Page) ([]domain.Build, error)
 	UpdateBuild(ctx context.Context, b *domain.Build) error
 
 	// Releases (immutable per-deploy revisions of an app, tenant-scoped via the
 	// owning app/org). CreateRelease records one revision; GetRelease fetches by id;
 	// ListReleasesByApp returns the app's revisions newest-first (revision desc);
 	// UpdateRelease persists a status/note change (e.g. superseded -> active).
+	// A bounded Page applies LIMIT/OFFSET; the zero Page reads all revisions (the
+	// revision-allocation/rollback paths need the full history).
 	CreateRelease(ctx context.Context, rel *domain.Release) error
 	GetRelease(ctx context.Context, id string) (*domain.Release, error)
-	ListReleasesByApp(ctx context.Context, appID string) ([]domain.Release, error)
+	ListReleasesByApp(ctx context.Context, appID string, p Page) ([]domain.Release, error)
 	UpdateRelease(ctx context.Context, rel *domain.Release) error
 
 	// Databases (tenant-scoped).
@@ -100,6 +151,9 @@ type Store interface {
 	// platform-level when OrgID is empty).
 	CreateAuditEvent(ctx context.Context, e *domain.AuditEvent) error
 	ListAuditEvents(ctx context.Context, f domain.AuditFilter) ([]domain.AuditEvent, error)
+	// CountAuditEvents returns the total number of audit events matching the filter
+	// (ignoring Limit/Offset), so the list endpoint can report has-more/total.
+	CountAuditEvents(ctx context.Context, f domain.AuditFilter) (int, error)
 
 	// App domains.
 	CreateDomain(ctx context.Context, d *domain.Domain) error
@@ -201,10 +255,14 @@ type Store interface {
 	// the metering loop uses for per-(org,hour) idempotency — postgres does INSERT ...
 	// ON CONFLICT (id) DO NOTHING + RowsAffected; memory dedupes by id under its lock.
 	AddUsageIfAbsent(ctx context.Context, u *domain.UsageRecord) (inserted bool, err error)
-	ListUsageByOrg(ctx context.Context, orgID string) ([]domain.UsageRecord, error)
-	// ListUsageByOrgSince returns an org's usage records with At >= since, so the
-	// billing summary and invoice math can scope to the current billing period.
-	ListUsageByOrgSince(ctx context.Context, orgID string, since time.Time) ([]domain.UsageRecord, error)
+	// ListUsageByOrg returns an org's usage records newest-first. A bounded Page
+	// applies LIMIT/OFFSET; the zero Page reads all records.
+	ListUsageByOrg(ctx context.Context, orgID string, p Page) ([]domain.UsageRecord, error)
+	// ListUsageByOrgSince returns an org's usage records with At >= since, newest
+	// first, so the billing summary and invoice math can scope to the current
+	// billing period. A bounded Page applies LIMIT/OFFSET; the zero Page reads all
+	// matching records (billing summation needs the full period).
+	ListUsageByOrgSince(ctx context.Context, orgID string, since time.Time, p Page) ([]domain.UsageRecord, error)
 
 	// Stripe webhook idempotency. EventProcessed is a read-only peek reporting
 	// whether the event id has already been recorded, so the webhook can fast-path a

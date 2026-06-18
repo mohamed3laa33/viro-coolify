@@ -1,7 +1,8 @@
 // Package catalog defines the kind taxonomy for Viro's one-click services /
 // databases / apps catalog. The catalog entries themselves (templates) live in
 // the control-plane store and are managed via the super-admin API; this package
-// only holds the Kind classification the platform layer maps to Coolify calls.
+// only holds the Kind classification the platform layer maps to deploy-backend
+// (Kubernetes) provisioning.
 package catalog
 
 // Kind classifies a template so the platform layer knows how to provision it.

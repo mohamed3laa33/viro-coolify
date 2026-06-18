@@ -19,8 +19,6 @@ func newAdminTestServer(t *testing.T, adminEmails ...string) *Server {
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	cfg.CoolifyBaseURL = "http://unused"
-	cfg.CoolifyToken = ""
 	cfg.AdminEmails = adminEmails
 	return NewServer(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)),
 		store.NewMemoryStore(), WithBackend(kube.NewFakeBackend()))

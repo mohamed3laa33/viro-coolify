@@ -30,7 +30,7 @@ func TestDeployRecordsReleaseRevisions(t *testing.T) {
 		t.Fatalf("create app: %v", err)
 	}
 
-	rels, err := svc.ListReleases(ctx, "org-1", app.ID)
+	rels, err := svc.ListReleases(ctx, "org-1", app.ID, store.Page{})
 	if err != nil {
 		t.Fatalf("list releases: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestDeployRecordsReleaseRevisions(t *testing.T) {
 		t.Fatalf("deploy: %v", err)
 	}
 
-	rels, err = svc.ListReleases(ctx, "org-1", app.ID)
+	rels, err = svc.ListReleases(ctx, "org-1", app.ID, store.Page{})
 	if err != nil {
 		t.Fatalf("list releases: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestRollbackReAppliesTargetImage(t *testing.T) {
 		t.Fatalf("applied image = %q, want nginx:1", wl.Image)
 	}
 
-	rels, err := svc.ListReleases(ctx, "org-1", app.ID)
+	rels, err := svc.ListReleases(ctx, "org-1", app.ID, store.Page{})
 	if err != nil {
 		t.Fatalf("list releases: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestUpdateAppRechecksQuotaAndReApplies(t *testing.T) {
 	}
 
 	// A release was recorded for the successful update.
-	rels, _ := svc.ListReleases(ctx, "org-1", app.ID)
+	rels, _ := svc.ListReleases(ctx, "org-1", app.ID, store.Page{})
 	if len(rels) < 2 {
 		t.Fatalf("expected >=2 releases after update, got %d", len(rels))
 	}

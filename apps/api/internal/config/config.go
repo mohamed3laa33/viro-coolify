@@ -28,10 +28,6 @@ type Config struct {
 	JWTAccessTTL  int // minutes
 	JWTRefreshTTL int // hours
 
-	// Coolify orchestration backend (legacy/optional; Kubernetes backend is primary).
-	CoolifyBaseURL string
-	CoolifyToken   string
-
 	// Kubernetes deploy backend (primary runtime).
 	BaseDomain       string // platform apex, e.g. "vortex.v60ai.com"
 	Kubeconfig       string // path to a kubeconfig (empty => in-cluster / default rules)
@@ -137,8 +133,6 @@ func Load() (*Config, error) {
 		JWTSecret:        getenv("JWT_SECRET", defaultDevJWTSecret),
 		JWTAccessTTL:     getenvInt("JWT_ACCESS_TTL_MIN", 15),
 		JWTRefreshTTL:    getenvInt("JWT_REFRESH_TTL_HOURS", 24*30),
-		CoolifyBaseURL:   getenv("COOLIFY_BASE_URL", "http://localhost:8000"),
-		CoolifyToken:     getenv("COOLIFY_TOKEN", ""),
 		BaseDomain:       getenv("BASE_DOMAIN", "vortex.v60ai.com"),
 		Kubeconfig:       getenv("KUBECONFIG", ""),
 		KubeChartPath:    getenv("KUBE_CHART_PATH", "deploy/charts/common-chart"),

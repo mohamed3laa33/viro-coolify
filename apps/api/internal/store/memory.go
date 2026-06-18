@@ -10,6 +10,28 @@ import (
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/domain"
 )
 
+// applyPage slices an already-ordered result set per p: an unbounded page
+// (Limit <= 0) returns it unchanged; a bounded page returns the [Offset,
+// Offset+Limit) window (clamped to the slice). It mirrors the Postgres
+// LIMIT/OFFSET so the two stores paginate identically.
+func applyPage[T any](in []T, p Page) []T {
+	if !p.Bounded() {
+		return in
+	}
+	off := p.Offset
+	if off < 0 {
+		off = 0
+	}
+	if off >= len(in) {
+		return in[:0:0]
+	}
+	end := off + p.Limit
+	if end > len(in) {
+		end = len(in)
+	}
+	return in[off:end]
+}
+
 // txMutex is an RWMutex that can be put into a "held" mode by WithTx. While held,
 // the per-method Lock/Unlock/RLock/RUnlock calls become no-ops so the existing
 // store methods can run unchanged inside a transaction without self-deadlocking
@@ -479,7 +501,7 @@ func (s *MemoryStore) GetBuild(_ context.Context, id string) (*domain.Build, err
 	return &b, nil
 }
 
-func (s *MemoryStore) ListBuildsByApp(_ context.Context, appID string) ([]domain.Build, error) {
+func (s *MemoryStore) ListBuildsByApp(_ context.Context, appID string, p Page) ([]domain.Build, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]domain.Build, 0)
@@ -490,7 +512,7 @@ func (s *MemoryStore) ListBuildsByApp(_ context.Context, appID string) ([]domain
 	}
 	// Newest first, so the list endpoint shows the latest build at the top.
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
-	return out, nil
+	return applyPage(out, p), nil
 }
 
 func (s *MemoryStore) UpdateBuild(_ context.Context, b *domain.Build) error {
@@ -533,7 +555,7 @@ func (s *MemoryStore) GetRelease(_ context.Context, id string) (*domain.Release,
 	return &rel, nil
 }
 
-func (s *MemoryStore) ListReleasesByApp(_ context.Context, appID string) ([]domain.Release, error) {
+func (s *MemoryStore) ListReleasesByApp(_ context.Context, appID string, p Page) ([]domain.Release, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]domain.Release, 0)
@@ -545,7 +567,7 @@ func (s *MemoryStore) ListReleasesByApp(_ context.Context, appID string) ([]doma
 	// Newest revision first (revision desc), so the history endpoint shows the
 	// current release at the top.
 	sort.Slice(out, func(i, j int) bool { return out[i].Revision > out[j].Revision })
-	return out, nil
+	return applyPage(out, p), nil
 }
 
 func (s *MemoryStore) UpdateRelease(_ context.Context, rel *domain.Release) error {
@@ -1006,15 +1028,16 @@ func (s *MemoryStore) AddUsageIfAbsent(_ context.Context, u *domain.UsageRecord)
 	return true, nil
 }
 
-func (s *MemoryStore) ListUsageByOrg(_ context.Context, orgID string) ([]domain.UsageRecord, error) {
+func (s *MemoryStore) ListUsageByOrg(_ context.Context, orgID string, p Page) ([]domain.UsageRecord, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]domain.UsageRecord, len(s.usage[orgID]))
 	copy(out, s.usage[orgID])
-	return out, nil
+	sortUsageNewestFirst(out)
+	return applyPage(out, p), nil
 }
 
-func (s *MemoryStore) ListUsageByOrgSince(_ context.Context, orgID string, since time.Time) ([]domain.UsageRecord, error) {
+func (s *MemoryStore) ListUsageByOrgSince(_ context.Context, orgID string, since time.Time, p Page) ([]domain.UsageRecord, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]domain.UsageRecord, 0, len(s.usage[orgID]))
@@ -1023,7 +1046,20 @@ func (s *MemoryStore) ListUsageByOrgSince(_ context.Context, orgID string, since
 			out = append(out, r)
 		}
 	}
-	return out, nil
+	sortUsageNewestFirst(out)
+	return applyPage(out, p), nil
+}
+
+// sortUsageNewestFirst orders usage records by At descending (id as a stable
+// tiebreak) so a bounded page returns the most-recent records, matching the
+// Postgres `ORDER BY at DESC, id DESC` paths.
+func sortUsageNewestFirst(recs []domain.UsageRecord) {
+	sort.Slice(recs, func(i, j int) bool {
+		if recs[i].At.Equal(recs[j].At) {
+			return recs[i].ID > recs[j].ID
+		}
+		return recs[i].At.After(recs[j].At)
+	})
 }
 
 func (s *MemoryStore) GetSubscriptionByStripeID(_ context.Context, stripeSubID string) (*domain.Subscription, error) {
@@ -1201,12 +1237,24 @@ func (s *MemoryStore) ListAuditEvents(_ context.Context, f domain.AuditFilter) (
 	defer s.mu.RUnlock()
 	limit := f.Limit
 	if limit <= 0 {
-		limit = 100
+		limit = DefaultPageLimit
+	}
+	if limit > MaxPageLimit {
+		limit = MaxPageLimit
+	}
+	offset := f.Offset
+	if offset < 0 {
+		offset = 0
 	}
 	out := make([]domain.AuditEvent, 0, limit)
+	skipped := 0
 	// Most-recent-first: iterate the append-only slice in reverse.
 	for i := len(s.auditEvents) - 1; i >= 0; i-- {
 		if s.auditEvents[i].OrgID != f.OrgID {
+			continue
+		}
+		if skipped < offset {
+			skipped++
 			continue
 		}
 		out = append(out, s.auditEvents[i])
@@ -1215,6 +1263,19 @@ func (s *MemoryStore) ListAuditEvents(_ context.Context, f domain.AuditFilter) (
 		}
 	}
 	return out, nil
+}
+
+// CountAuditEvents returns the total number of events matching the filter's scope.
+func (s *MemoryStore) CountAuditEvents(_ context.Context, f domain.AuditFilter) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	n := 0
+	for i := range s.auditEvents {
+		if s.auditEvents[i].OrgID == f.OrgID {
+			n++
+		}
+	}
+	return n, nil
 }
 
 func (s *MemoryStore) CreateDomain(_ context.Context, d *domain.Domain) error {

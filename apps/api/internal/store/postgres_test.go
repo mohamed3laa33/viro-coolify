@@ -249,7 +249,7 @@ func TestCreateAppAndListByOrg(t *testing.T) {
 	now := time.Now()
 	a := &domain.App{ID: "a1", OrgID: "o1", ProjectID: "p1", Name: "web", CPU: 0.5, MemoryMB: 256, Status: "running", CreatedAt: now}
 	mock.ExpectExec("INSERT INTO apps").
-		WithArgs("a1", "o1", "p1", "", "web", "", "", "", 0.5, 256, 0, 0, "running", "", "", "", "", now).
+		WithArgs("a1", "o1", "p1", "web", "", "", "", 0.5, 256, 0, 0, "running", "", "", "", "", now).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 	if err := s.CreateApp(context.Background(), a); err != nil {
@@ -257,11 +257,11 @@ func TestCreateAppAndListByOrg(t *testing.T) {
 	}
 
 	rows := pgxmock.NewRows([]string{
-		"id", "org_id", "project_id", "coolify_uuid", "name", "git_repository", "git_branch",
+		"id", "org_id", "project_id", "name", "git_repository", "git_branch",
 		"build_pack", "cpu", "memory_mb", "min_replicas", "max_replicas", "status", "namespace", "release", "host", "image", "created_at",
-	}).AddRow("a1", "o1", "p1", "", "web", "", "", "", 0.5, 256, 0, 0, "running", "", "", "", "", now)
+	}).AddRow("a1", "o1", "p1", "web", "", "", "", 0.5, 256, 0, 0, "running", "", "", "", "", now)
 
-	mock.ExpectQuery("SELECT id, org_id, project_id, coolify_uuid, name, git_repository").
+	mock.ExpectQuery("SELECT id, org_id, project_id, name, git_repository").
 		WithArgs("o1").
 		WillReturnRows(rows)
 
@@ -301,7 +301,7 @@ func TestBuildCRUD_Postgres(t *testing.T) {
 	mock.ExpectQuery("SELECT id, app_id, org_id, status, commit_ref, image, logs, created_at, finished_at\\s+FROM builds WHERE app_id").
 		WithArgs("a1").
 		WillReturnRows(rows)
-	got, err := s.ListBuildsByApp(context.Background(), "a1")
+	got, err := s.ListBuildsByApp(context.Background(), "a1", Page{})
 	if err != nil {
 		t.Fatalf("ListBuildsByApp: %v", err)
 	}
@@ -423,7 +423,7 @@ func TestPostgresCreateAndListAuditEvents(t *testing.T) {
 	rows := pgxmock.NewRows([]string{"id", "org_id", "actor_user_id", "actor_email", "action", "target_type", "target_id", "metadata", "at"}).
 		AddRow("e1", "org1", "u1", "a@b.com", "secret.set", "app_env", "app1/API_KEY", "", at)
 	mock.ExpectQuery("SELECT id, org_id, actor_user_id, actor_email, action, target_type, target_id, metadata, at\\s+FROM audit_events WHERE org_id = \\$1").
-		WithArgs("org1", 100).
+		WithArgs("org1", DefaultPageLimit, 0).
 		WillReturnRows(rows)
 	got, err := s.ListAuditEvents(context.Background(), domain.AuditFilter{OrgID: "org1"})
 	if err != nil {

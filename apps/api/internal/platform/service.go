@@ -355,8 +355,6 @@ type CreateAppInput struct {
 	BuildPack     string
 	CPU           float64 // requested vCPU (defaulted when 0)
 	MemoryMB      int     // requested memory in MB (defaulted when 0)
-	ProjectUUID   string  // Coolify project placement (optional)
-	ServerUUID    string
 }
 
 // overcommitFactors returns the live CPU/memory overcommit factors from platform
@@ -856,12 +854,14 @@ func (s *Service) finishBuildFailure(ctx context.Context, appID, buildID, logs s
 	}
 }
 
-// ListBuilds returns the org's builds for one of its apps (newest first).
-func (s *Service) ListBuilds(ctx context.Context, orgID, appID string) ([]domain.Build, error) {
+// ListBuilds returns a bounded page of the org's builds for one of its apps
+// (newest first). The Page bounds the read so a busy app's build history can
+// never be returned unbounded.
+func (s *Service) ListBuilds(ctx context.Context, orgID, appID string, p store.Page) ([]domain.Build, error) {
 	if _, err := s.ownedApp(ctx, orgID, appID); err != nil {
 		return nil, err
 	}
-	return s.store.ListBuildsByApp(ctx, appID)
+	return s.store.ListBuildsByApp(ctx, appID, p)
 }
 
 // GetBuild returns one build (incl. logs), ensuring it belongs to the org's app.
@@ -1143,7 +1143,10 @@ func (s *Service) dbStorage(req int) int {
 // chart values via helm upgrade). The stored credentials make the env injection
 // deterministic across deploys.
 func (s *Service) dbWorkload(ctx context.Context, db *domain.Database, orgSlug, projSlug string) (kube.Workload, error) {
-	tmpl, ok := s.templateByKey(ctx, db.Engine)
+	tmpl, ok, err := s.templateByKey(ctx, db.Engine)
+	if err != nil {
+		return kube.Workload{}, err
+	}
 	if !ok || catalog.Kind(tmpl.Kind) != catalog.KindDatabase {
 		return kube.Workload{}, fmt.Errorf("%w: %q", ErrInvalidTemplate, db.Engine)
 	}
@@ -1184,7 +1187,10 @@ func (s *Service) CreateDatabase(ctx context.Context, orgID string, in CreateDat
 	if engine == "" {
 		engine = "postgresql"
 	}
-	tmpl, ok := s.templateByKey(ctx, engine)
+	tmpl, ok, err := s.templateByKey(ctx, engine)
+	if err != nil {
+		return nil, err
+	}
 	if !ok || catalog.Kind(tmpl.Kind) != catalog.KindDatabase {
 		return nil, fmt.Errorf("%w: %q", ErrInvalidTemplate, engine)
 	}

@@ -69,7 +69,11 @@ func (s *Service) GetBilling(ctx context.Context, orgID string) (*Summary, error
 	case err == nil:
 		sub = got
 		out.Subscription = got
-		if p, ok := s.PlanByID(ctx, got.PlanID); ok {
+		p, ok, perr := s.PlanByID(ctx, got.PlanID)
+		if perr != nil {
+			return nil, perr
+		}
+		if ok {
 			out.Plan = &p
 		}
 	case errors.Is(err, store.ErrNotFound):
@@ -81,7 +85,7 @@ func (s *Service) GetBilling(ctx context.Context, orgID string) (*Summary, error
 	periodStart := s.periodStart(sub)
 	out.PeriodStart = periodStart
 
-	records, err := s.store.ListUsageByOrgSince(ctx, orgID, periodStart)
+	records, err := s.store.ListUsageByOrgSince(ctx, orgID, periodStart, store.Page{})
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +107,11 @@ func (s *Service) GetBilling(ctx context.Context, orgID string) (*Summary, error
 	out.OverageCents = inv.OverageCents
 	out.UsageSoFarCents = inv.UsageSoFarCents
 	out.ChargeCents = inv.ChargeCents
-	out.Currency = s.pricingCurrency(ctx)
+	cur, err := s.pricingCurrency(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out.Currency = cur
 	return out, nil
 }
 
@@ -125,7 +133,10 @@ type SubscribeResult struct {
 
 // Subscribe subscribes an org to a plan via the payment provider.
 func (s *Service) Subscribe(ctx context.Context, orgID, planID, email string) (*SubscribeResult, error) {
-	plan, ok := s.PlanByID(ctx, planID)
+	plan, ok, err := s.PlanByID(ctx, planID)
+	if err != nil {
+		return nil, err
+	}
 	if !ok {
 		return nil, ErrUnknownPlan
 	}

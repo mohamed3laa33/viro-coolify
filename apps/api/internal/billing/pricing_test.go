@@ -25,10 +25,13 @@ func TestSeededPricesAreZero(t *testing.T) {
 	svc := NewService(store.NewMemoryStore(), nil)
 	// The platform never invents prices: seeded components exist but cost nothing
 	// until an admin sets a price.
-	if got := svc.HourlyCost(context.Background(), 4, 8192); got != 0 {
-		t.Fatalf("expected zero cost before admin sets prices, got %v", got)
+	if got, err := svc.HourlyCost(context.Background(), 4, 8192); err != nil || got != 0 {
+		t.Fatalf("expected zero cost before admin sets prices, got %v (err=%v)", got, err)
 	}
-	comps := svc.PricingComponents(context.Background())
+	comps, err := svc.PricingComponents(context.Background())
+	if err != nil {
+		t.Fatalf("PricingComponents: %v", err)
+	}
 	if len(comps) == 0 {
 		t.Fatal("expected seeded pricing components (cpu/memory/storage)")
 	}
@@ -41,12 +44,20 @@ func TestHourlyAndMonthlyCost(t *testing.T) {
 	ctx := context.Background()
 
 	// 1 vCPU + 1024MB (1 GB) -> 0.01 + 0.001 = 0.011 / hour.
-	if got := svc.HourlyCost(ctx, 1, 1024); math.Abs(got-0.011) > 1e-9 {
+	got, err := svc.HourlyCost(ctx, 1, 1024)
+	if err != nil {
+		t.Fatalf("HourlyCost: %v", err)
+	}
+	if math.Abs(got-0.011) > 1e-9 {
 		t.Fatalf("hourly cost = %v, want 0.011", got)
 	}
 	// Monthly = 0.011 * 730 * 100 = 803 cents.
-	if got := svc.MonthlyCostCents(ctx, 1, 1024); got != 803 {
-		t.Fatalf("monthly cents = %d, want 803", got)
+	gotM, err := svc.MonthlyCostCents(ctx, 1, 1024)
+	if err != nil {
+		t.Fatalf("MonthlyCostCents: %v", err)
+	}
+	if gotM != 803 {
+		t.Fatalf("monthly cents = %d, want 803", gotM)
 	}
 }
 
@@ -81,7 +92,7 @@ func TestOrgEstimateAndMetering(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("metered orgs = %d, want 1", n)
 	}
-	recs, _ := st.ListUsageByOrg(ctx, "o1")
+	recs, _ := st.ListUsageByOrg(ctx, "o1", store.Page{})
 	var micro int64
 	for _, r := range recs {
 		if r.Metric == MeterMetric {
