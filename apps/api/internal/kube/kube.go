@@ -1358,6 +1358,173 @@ func (b *KubeBackend) RemoveGatewayListener(ctx context.Context, host string) er
 	})
 }
 
+// ---------------------------------------------------------------------------
+// Per-org wildcard TLS (cert-manager Certificate + shared-Gateway HTTPS listeners)
+// ---------------------------------------------------------------------------
+
+// EnsureOrgWildcard provisions (idempotently) the per-org wildcard certificate
+// and matching shared-Gateway HTTPS listeners that terminate TLS and route the
+// generated tenant host <app>.<project>.<org>.<baseDomain>.
+//
+// The bootstrap wildcard (*.<baseDomain>) covers only ONE label, so it matches
+// neither the project-level host (<project>.<org>.<baseDomain>) nor the app host
+// (<app>.<project>.<org>.<baseDomain>). This issues ONE Certificate whose dnsNames
+// cover the org subtree — *.<org>.<baseDomain> for project-level hosts and
+// *.<project>.<org>.<baseDomain> for each supplied project (a wildcard matches
+// exactly one label, so the deeper app host needs a wildcard at the project
+// label) — into a TLS Secret in the shared Gateway namespace, then adds an HTTPS
+// listener per wildcard to the shared Gateway.
+//
+// With no ClusterIssuer or no dynamic client configured (local/dev) it no-ops so
+// non-cluster flows keep working.
+func (b *KubeBackend) EnsureOrgWildcard(ctx context.Context, orgSlug string, projectSlugs []string) error {
+	orgSlug = sanitize(orgSlug)
+	if orgSlug == "" {
+		return fmt.Errorf("kube: empty org slug for wildcard provisioning")
+	}
+	if b.dynamic == nil || b.cfg.ClusterIssuer == "" {
+		return nil
+	}
+	base := b.cfg.BaseDomain
+	if base == "" {
+		return fmt.Errorf("kube: empty base domain for org %q wildcard", orgSlug)
+	}
+
+	// dnsNames: the org wildcard (project-level hosts) plus a project wildcard per
+	// known project (app-level hosts). De-duplicated, deterministically ordered.
+	orgWild := orgWildcardHost(orgSlug, base)
+	dnsNames := []string{orgWild}
+	listeners := []listenerSpec{{name: orgListenerName(orgSlug), hostname: orgWild}}
+	seen := map[string]bool{orgWild: true}
+	projSlugs := make([]string, 0, len(projectSlugs))
+	for _, p := range projectSlugs {
+		ps := sanitize(p)
+		if ps == "" {
+			continue
+		}
+		projSlugs = append(projSlugs, ps)
+	}
+	sort.Strings(projSlugs)
+	for _, ps := range projSlugs {
+		pw := projectWildcardHost(ps, orgSlug, base)
+		if seen[pw] {
+			continue
+		}
+		seen[pw] = true
+		dnsNames = append(dnsNames, pw)
+		listeners = append(listeners, listenerSpec{name: projectListenerName(orgSlug, ps), hostname: pw})
+	}
+
+	secretName := OrgCertSecret(orgSlug)
+	if err := b.ensureWildcardCertificate(ctx, orgCertName(orgSlug), secretName, dnsNames); err != nil {
+		return err
+	}
+	return b.ensureGatewayListeners(ctx, listeners, secretName)
+}
+
+// ensureWildcardCertificate upserts a cert-manager Certificate named "name" in the
+// shared Gateway namespace, signed by the configured ClusterIssuer, materialized
+// into TLS Secret "secretName" and covering all dnsNames.
+func (b *KubeBackend) ensureWildcardCertificate(ctx context.Context, name, secretName string, dnsNames []string) error {
+	ns := b.cfg.GatewayNamespace
+	names := make([]any, 0, len(dnsNames))
+	for _, d := range dnsNames {
+		names = append(names, d)
+	}
+	cert := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "cert-manager.io/v1",
+		"kind":       "Certificate",
+		"metadata": map[string]any{
+			"name":      name,
+			"namespace": ns,
+			"labels":    map[string]any{"app.kubernetes.io/managed-by": "vortex"},
+		},
+		"spec": map[string]any{
+			"secretName": secretName,
+			"dnsNames":   names,
+			"issuerRef": map[string]any{
+				"name": b.cfg.ClusterIssuer,
+				"kind": "ClusterIssuer",
+			},
+		},
+	}}
+	cert.SetGroupVersionKind(certificateGVR.GroupVersion().WithKind("Certificate"))
+
+	return upsert(ctx,
+		func() error {
+			_, err := b.dynamic.Resource(certificateGVR).Namespace(ns).Create(ctx, cert, metav1.CreateOptions{})
+			return err
+		},
+		func() error {
+			cur, err := b.dynamic.Resource(certificateGVR).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+			if err := unstructured.SetNestedMap(cur.Object, cert.Object["spec"].(map[string]any), "spec"); err != nil {
+				return err
+			}
+			_, err = b.dynamic.Resource(certificateGVR).Namespace(ns).Update(ctx, cur, metav1.UpdateOptions{})
+			return err
+		},
+	)
+}
+
+// listenerSpec names one HTTPS listener (name + hostname) to merge onto the shared
+// Gateway, all referencing the same per-org cert Secret.
+type listenerSpec struct {
+	name     string
+	hostname string
+}
+
+// ensureGatewayListeners merges the given HTTPS listeners onto the SHARED Gateway
+// in a single RetryOnConflict-guarded read-modify-write, so several per-org
+// wildcard listeners are added atomically without clobbering other tenants'
+// listeners (or the bootstrap wildcard). Listeners already present (by name) are
+// left untouched (idempotent). It refuses to exceed the Gateway API 64-listener
+// limit rather than producing an invalid Gateway the controller would reject.
+func (b *KubeBackend) ensureGatewayListeners(ctx context.Context, specs []listenerSpec, certSecret string) error {
+	if len(specs) == 0 {
+		return nil
+	}
+	ns := b.cfg.GatewayNamespace
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		gw, err := b.dynamic.Resource(gatewayGVR).Namespace(ns).Get(ctx, b.cfg.GatewayName, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("kube: get gateway %s/%s: %w", ns, b.cfg.GatewayName, err)
+		}
+		listeners, _, _ := unstructured.NestedSlice(gw.Object, "spec", "listeners")
+		existing := make(map[string]bool, len(listeners))
+		for _, l := range listeners {
+			if m, ok := l.(map[string]any); ok {
+				if n, _ := m["name"].(string); n != "" {
+					existing[n] = true
+				}
+			}
+		}
+		added := false
+		for _, spec := range specs {
+			if existing[spec.name] {
+				continue // idempotent: this listener is already present
+			}
+			if len(listeners) >= maxGatewayListeners {
+				return fmt.Errorf("kube: shared gateway %s/%s at the %d-listener limit; cannot attach %s (move tenant to a dedicated Gateway)",
+					ns, b.cfg.GatewayName, maxGatewayListeners, spec.hostname)
+			}
+			listeners = append(listeners, domainListener(spec.name, spec.hostname, certSecret))
+			existing[spec.name] = true
+			added = true
+		}
+		if !added {
+			return nil
+		}
+		if err := unstructured.SetNestedSlice(gw.Object, listeners, "spec", "listeners"); err != nil {
+			return err
+		}
+		_, err = b.dynamic.Resource(gatewayGVR).Namespace(ns).Update(ctx, gw, metav1.UpdateOptions{})
+		return err
+	})
+}
+
 // domainListener renders one Gateway API HTTPS listener (Terminate TLS with the
 // per-domain cert Secret) for the exact host, accepting routes from all
 // namespaces so the tenant's per-app HTTPRoute (in its own namespace) attaches.

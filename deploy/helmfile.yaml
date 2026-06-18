@@ -14,6 +14,13 @@
 # control plane (api + web) wired to Postgres. Envoy Gateway's chart bundles the
 # Gateway API CRDs, so there is nothing to apply by hand.
 #
+# CANONICAL NAMESPACE = "vortex". The control plane, the in-cluster Postgres and
+# the shared Gateway all live here; the control-plane HTTPRoute's gatewayNamespace
+# and deploy/k8s manifests, the CD workflow and deploy/scripts all agree on it.
+# (Platform prerequisites keep their upstream conventional namespaces:
+# cert-manager, envoy-gateway-system, keda, kube-system.) The Envoy data-plane
+# namespace used by the NetworkPolicy is a separate concept (envoy-gateway-system).
+#
 # Config via env vars (see defaults below).
 
 repositories:
@@ -52,10 +59,16 @@ environments:
 
 releases:
   # ---- Platform prerequisites (all current, non-deprecated) ----
+  # Label `tier: platform` marks everything the CD workflow stands up before it
+  # upgrades the control-plane chart (see .github/workflows/deploy.yml). The
+  # control-plane release below is labelled `tier: controlplane` and is excluded
+  # there so CD can drive its image tag / pull-secret explicitly.
   - name: cert-manager
     namespace: cert-manager
     chart: jetstack/cert-manager
     version: v1.16.3
+    labels:
+      tier: platform
     set:
       - name: crds.enabled
         value: true
@@ -64,15 +77,21 @@ releases:
     namespace: envoy-gateway-system
     chart: oci://docker.io/envoyproxy/gateway-helm
     version: v1.2.4
+    labels:
+      tier: platform
 
   - name: keda
     namespace: keda
     chart: kedacore/keda
     version: 2.16.0
+    labels:
+      tier: platform
 
   - name: metrics-server
     namespace: kube-system
     chart: metrics-server/metrics-server
+    labels:
+      tier: platform
     values:
       - args:
           - --kubelet-insecure-tls
@@ -82,6 +101,8 @@ releases:
     namespace: vortex
     createNamespace: true
     chart: ./charts/vortex-bootstrap
+    labels:
+      tier: platform
     needs:
       - cert-manager/cert-manager
       - envoy-gateway-system/envoy-gateway
@@ -97,6 +118,8 @@ releases:
     namespace: vortex
     createNamespace: true
     chart: ./helm/viro
+    labels:
+      tier: controlplane
     needs:
       - vortex/vortex-bootstrap
     values:

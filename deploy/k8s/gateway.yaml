@@ -5,10 +5,14 @@
 # Replaces the retired ingress-nginx with the Gateway API + Envoy Gateway.
 # Edit the domain + DigitalOcean token secret, then: kubectl apply -f deploy/k8s/gateway.yaml
 ---
+# CANONICAL NAMESPACE = "vortex" — the same namespace the helmfile / vortex-bootstrap
+# chart install the shared Gateway, Postgres and control plane into. This standalone
+# manifest is the manual alternative to the bootstrap chart; keep its namespace in
+# sync so the control-plane HTTPRoute's gatewayNamespace (also "vortex") resolves.
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: vortex-system
+  name: vortex
 ---
 # GatewayClass backed by Envoy Gateway (installed by 01-provision-doks.sh).
 apiVersion: gateway.networking.k8s.io/v1
@@ -20,7 +24,7 @@ spec:
 ---
 # cert-manager DNS-01 issuer using DigitalOcean DNS (required for WILDCARD certs).
 # Create the token secret first:
-#   kubectl -n vortex-system create secret generic do-dns \
+#   kubectl -n vortex create secret generic do-dns \
 #     --from-literal=access-token=dop_v1_xxxxxxxx
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
@@ -44,7 +48,7 @@ apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
   name: vortex-wildcard
-  namespace: vortex-system
+  namespace: vortex
 spec:
   secretName: vortex-wildcard-tls
   issuerRef:
@@ -64,7 +68,7 @@ apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
   name: vortex
-  namespace: vortex-system
+  namespace: vortex
 spec:
   gatewayClassName: vortex
   listeners:

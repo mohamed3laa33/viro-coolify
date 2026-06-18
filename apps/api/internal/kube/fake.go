@@ -46,6 +46,12 @@ type FakeBackend struct {
 	// cert Secret name so tests can assert the listener references the right cert.
 	GatewayListeners map[string]string
 
+	// OrgWildcards records each org slug an EnsureOrgWildcard was provisioned for,
+	// mapping org slug -> the project slugs included, so org-TLS tests can assert a
+	// new org got its per-org wildcard cert + listeners (and which projects were
+	// covered).
+	OrgWildcards map[string][]string
+
 	// PhaseOverride, when set for a "<namespace>/<release>" key, forces Status to
 	// report that Phase verbatim (e.g. "Failed") instead of deriving it from the
 	// replica count. It lets tests drive the reconciler down the failed/pending
@@ -75,6 +81,7 @@ func NewFakeBackend() *FakeBackend {
 		AppSecrets:       map[string]map[string]string{},
 		DomainCerts:      map[string]bool{},
 		GatewayListeners: map[string]string{},
+		OrgWildcards:     map[string][]string{},
 		PhaseOverride:    map[string]string{},
 		LogLines:         "fake log line\n",
 		// Deterministic test values: a deployed workload reports a fixed live usage
@@ -265,6 +272,31 @@ func (f *FakeBackend) RemoveGatewayListener(_ context.Context, host string) erro
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.GatewayListeners, strings.ToLower(strings.TrimSpace(host)))
+	return nil
+}
+
+// EnsureOrgWildcard records that a per-org wildcard cert + listeners were
+// provisioned for orgSlug (with the supplied project slugs). It is idempotent and
+// MERGES projects across calls so re-provisioning with more projects accumulates
+// coverage, mirroring the real backend re-issuing the cert with added SANs.
+func (f *FakeBackend) EnsureOrgWildcard(_ context.Context, orgSlug string, projectSlugs []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	orgSlug = strings.ToLower(strings.TrimSpace(orgSlug))
+	if orgSlug == "" {
+		return nil
+	}
+	seen := map[string]bool{}
+	merged := make([]string, 0, len(f.OrgWildcards[orgSlug])+len(projectSlugs))
+	for _, p := range append(append([]string{}, f.OrgWildcards[orgSlug]...), projectSlugs...) {
+		p = strings.ToLower(strings.TrimSpace(p))
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		merged = append(merged, p)
+	}
+	f.OrgWildcards[orgSlug] = merged
 	return nil
 }
 

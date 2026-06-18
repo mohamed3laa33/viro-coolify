@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -108,9 +109,11 @@ func NewServer(cfg *config.Config, logger *slog.Logger, st store.Store, opts ...
 	// record helm exec counters into it.
 	reg := newRegistry()
 	// Kubernetes deploy backend. Build the real KubeBackend from in-cluster
-	// config / kubeconfig; on failure (e.g. local dev with no cluster) fall back
-	// to the in-memory FakeBackend so the API still boots. The fake is a real
-	// test double — NOT a demo success path that pretends deploys happened.
+	// config / kubeconfig; on failure in dev (e.g. local with no cluster) fall
+	// back to the in-memory FakeBackend so the API still boots. In production the
+	// same failure is FATAL (see newKubeBackend) — the fake never silently stands
+	// in for a real cluster. The fake is a real test double, NOT a demo success
+	// path that pretends deploys happened.
 	backend := so.backend
 	if backend == nil {
 		backend = newKubeBackend(cfg, logger, reg)
@@ -167,6 +170,11 @@ func NewServer(cfg *config.Config, logger *slog.Logger, st store.Store, opts ...
 			identity.WithMailer(mailer),
 			identity.WithLogger(logger),
 			identity.WithBaseDomain(cfg.BaseDomain),
+			// Wire the deploy backend as the per-org wildcard TLS/Gateway
+			// provisioner so a new org's tenant hosts terminate TLS on first use.
+			// kube.Backend implements OrgProvisioner; with no cluster the backend
+			// is the FakeBackend (dev) which records the call honestly.
+			identity.WithOrgProvisioner(backend),
 			identity.WithRefreshTTL(time.Duration(cfg.JWTRefreshTTL)*time.Hour),
 			identity.WithInvitationTTL(time.Duration(cfg.InvitationTTLHours)*time.Hour),
 			identity.WithPasswordResetTTL(time.Duration(cfg.PasswordResetTTLMin)*time.Minute),
@@ -257,9 +265,15 @@ func newBuilder(cfg *config.Config, logger *slog.Logger) build.Builder {
 	}, cs)
 }
 
-// newKubeBackend builds the Kubernetes deploy backend from config. When the
-// cluster is unreachable (no in-cluster config and no usable kubeconfig), it
-// logs a warning and returns an in-memory FakeBackend so local/dev still boots.
+// newKubeBackend builds the Kubernetes deploy backend from config.
+//
+// Fallback is environment-gated: in PRODUCTION a kube-client init failure is
+// FATAL — we log the error and exit rather than silently serving the in-memory
+// FakeBackend, which would report imaginary deploys as successful (invariant #6:
+// no "pretend it worked" paths in prod). In non-prod/dev the cluster is often
+// unreachable (no in-cluster config and no usable kubeconfig); there we log a
+// warning and return the FakeBackend so local/dev still boots. The fake remains
+// an honest test double — its prod use is gated, never removed.
 func newKubeBackend(cfg *config.Config, logger *slog.Logger, reg *registry) kube.Backend {
 	// Overcommit factors are admin/DB-configurable platform settings; seed the
 	// backend with the seeded defaults here. Per-call sites pass the live quota
@@ -287,7 +301,15 @@ func newKubeBackend(cfg *config.Config, logger *slog.Logger, reg *registry) kube
 	})
 	be, err := kube.New(kc, cfg.Kubeconfig, helm)
 	if err != nil {
-		logger.Warn("kube backend unavailable; falling back to in-memory FakeBackend",
+		if cfg.IsProduction() {
+			// FATAL in production: silently serving the FakeBackend would report
+			// imaginary deploys as successful. Fail the boot loudly so the
+			// misconfiguration is fixed instead of masked.
+			logger.Error("kube backend unavailable in production; refusing to fall back to the in-memory FakeBackend",
+				"err", err)
+			os.Exit(1)
+		}
+		logger.Warn("kube backend unavailable; falling back to in-memory FakeBackend (dev only)",
 			"err", err)
 		fb := kube.NewFakeBackend()
 		fb.BaseDomain = cfg.BaseDomain

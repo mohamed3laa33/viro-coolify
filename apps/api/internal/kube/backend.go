@@ -215,4 +215,23 @@ type Backend interface {
 	// RemoveGatewayListener removes the per-domain listener from the shared Gateway,
 	// preserving all others. Idempotent; called on domain delete.
 	RemoveGatewayListener(ctx context.Context, host string) error
+
+	// EnsureOrgWildcard provisions (idempotently) a per-org wildcard so the
+	// platform-generated tenant host <app>.<project>.<org>.<baseDomain> terminates
+	// TLS and routes through the SHARED Gateway. The base bootstrap wildcard only
+	// covers ONE label (*.<baseDomain>), so without this an org's tenant apps would
+	// have no matching certificate or listener and HTTPS would fail on first use.
+	//
+	// It issues a single cert-manager Certificate covering the org subtree
+	// (*.<org>.<baseDomain> for project-level hosts, plus *.<project>.<org>.<baseDomain>
+	// for every supplied project so the 3-label app host is genuinely covered — a
+	// DNS/TLS wildcard matches exactly one label, so the org wildcard alone stops at
+	// the project label) and adds a matching HTTPS listener to the shared Gateway for
+	// each wildcard, merging without clobbering other tenants' listeners.
+	//
+	// projectSlugs are the org's known projects at call time (the default project
+	// always exists at org creation); passing more later re-issues the cert with the
+	// added SANs and adds the new listeners. With no ClusterIssuer/dynamic client
+	// configured (local/dev) it no-ops so non-cluster flows keep working.
+	EnsureOrgWildcard(ctx context.Context, orgSlug string, projectSlugs []string) error
 }

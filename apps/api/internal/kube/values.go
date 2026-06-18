@@ -38,6 +38,41 @@ func host(name, projSlug, orgSlug, baseDomain string) string {
 		sanitize(name), sanitize(projSlug), sanitize(orgSlug), baseDomain)
 }
 
+// orgWildcardHost is the per-org wildcard suffix that covers the PROJECT-level
+// host <proj>.<org>.<BaseDomain> (one label below <org>.<BaseDomain>):
+// "*.<org>.<BaseDomain>".
+func orgWildcardHost(orgSlug, baseDomain string) string {
+	return fmt.Sprintf("*.%s.%s", sanitize(orgSlug), baseDomain)
+}
+
+// projectWildcardHost is the per-project wildcard that covers the APP-level
+// tenant host <app>.<proj>.<org>.<BaseDomain>: "*.<proj>.<org>.<BaseDomain>".
+// A DNS/TLS wildcard matches exactly ONE label, so the 3-label tenant app host
+// is only covered by a wildcard at the project level — not by the org wildcard
+// alone (which stops at the project label). The per-org Certificate therefore
+// lists a project wildcard SAN per known project (the default project always
+// exists at org creation).
+func projectWildcardHost(projSlug, orgSlug, baseDomain string) string {
+	return fmt.Sprintf("*.%s.%s.%s", sanitize(projSlug), sanitize(orgSlug), baseDomain)
+}
+
+// orgCertName is the cert-manager Certificate object name for an org's wildcard.
+func orgCertName(orgSlug string) string { return "vortex-org-" + sanitize(orgSlug) }
+
+// OrgCertSecret is the TLS Secret name cert-manager writes for an org's wildcard
+// (referenced by both the Certificate and the per-org Gateway listeners).
+func OrgCertSecret(orgSlug string) string { return "vortex-org-tls-" + sanitize(orgSlug) }
+
+// orgListenerName is the shared-Gateway HTTPS listener name for the org-level
+// wildcard ("*.<org>.<base>"). Gateway listener names are DNS-1123 labels.
+func orgListenerName(orgSlug string) string { return "o-" + sanitize(orgSlug) }
+
+// projectListenerName is the shared-Gateway HTTPS listener name for a project
+// wildcard ("*.<proj>.<org>.<base>"), kept distinct per org+project.
+func projectListenerName(orgSlug, projSlug string) string {
+	return "o-" + sanitize(orgSlug) + "-p-" + sanitize(projSlug)
+}
+
 // domainSlug derives a DNS-1123-safe, deterministic, collision-resistant slug
 // from an arbitrary custom hostname so it can name a Certificate / Secret /
 // Gateway listener. It combines a sanitized, length-capped prefix of the host

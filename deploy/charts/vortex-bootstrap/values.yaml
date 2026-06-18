@@ -13,8 +13,18 @@ gateway:
   name: vortex
   className: vortex
   controllerName: gateway.envoyproxy.io/gatewayclass-controller
+  # Optional statically-pinned per-org HTTPS listeners. The control plane normally
+  # adds these imperatively at org creation (EnsureOrgWildcard); this list lets an
+  # operator pre-seed known orgs. Each entry: { name, hostname, certSecret }.
+  # hostname is "*.<org>.<baseDomain>" or "*.<project>.<org>.<baseDomain>".
+  extraOrgWildcards: []
 
 tls:
   enabled: true
   # DigitalOcean API token for cert-manager DNS-01 wildcard issuance.
   digitalOceanToken: ""
+  # Optional statically-pinned per-org wildcard certificates (mirrors
+  # gateway.extraOrgWildcards). Each entry: { name, secretName, dnsNames: [...] }.
+  # dnsNames should cover "*.<org>.<baseDomain>" and each
+  # "*.<project>.<org>.<baseDomain>" so the 3-label tenant app host terminates TLS.
+  extraOrgWildcards: []

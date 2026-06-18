@@ -7,6 +7,20 @@ metadata:
 spec:
   controllerName: {{ .Values.gateway.controllerName }}
 ---
+# The shared Gateway carries the BASE listeners (the platform wildcard + plain
+# HTTP) below. PER-ORG HTTPS listeners — one per org wildcard "*.<org>.<base>"
+# and per known project wildcard "*.<project>.<org>.<base>" — are NOT rendered
+# here: the control plane adds them imperatively at org creation (kube.Backend
+# EnsureOrgWildcard) by merging into spec.listeners. This is required because the
+# tenant host <app>.<project>.<org>.<base> is THREE labels deep, and a DNS/TLS
+# wildcard matches exactly ONE label, so the base "*.<base>" listener below
+# covers neither the project-level nor the app-level host.
+#
+# IMPORTANT: do NOT `helm upgrade` this chart with a server-side-apply / replace
+# strategy that prunes spec.listeners — that would wipe the control-plane-managed
+# per-org listeners. A standard `helm upgrade` 3-way merge preserves array
+# additions the chart does not declare; the control plane also re-runs
+# EnsureOrgWildcard idempotently on the next app deploy, so a clobber self-heals.
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
@@ -15,6 +29,7 @@ metadata:
 spec:
   gatewayClassName: {{ .Values.gateway.className }}
   listeners:
+    # Platform wildcard: api., app. and <org>.<base> (one label below the apex).
     - name: https
       protocol: HTTPS
       port: 443
@@ -33,3 +48,20 @@ spec:
       allowedRoutes:
         namespaces:
           from: All
+{{- range .Values.gateway.extraOrgWildcards }}
+    # Optional statically-pinned per-org wildcard listeners (covering
+    # "*.<org>.<base>" and "*.<project>.<org>.<base>"). The control plane normally
+    # manages these imperatively; this list lets an operator pre-seed known orgs.
+    - name: {{ .name }}
+      protocol: HTTPS
+      port: 443
+      hostname: {{ .hostname | quote }}
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: {{ .certSecret }}
+      allowedRoutes:
+        namespaces:
+          from: All
+{{- end }}
