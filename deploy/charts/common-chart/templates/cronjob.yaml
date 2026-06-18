@@ -55,6 +55,10 @@ spec:
           {{- end }}
           containers:
           - name: {{ $name }}
+            {{- $containerSecurityContext := $job.containerSecurityContext | default $.Values.cronjob.containerSecurityContext }}
+            {{- with $containerSecurityContext }}
+            securityContext: {{ toYaml . | nindent 14 }}
+            {{- end }}
             {{- $image := required (print "Undefined image repo for container '" $name "'") $job.image.repository }}
             {{- with $job.image.tag    }} {{- $image = print $image ":" . }} {{- end }}
             {{- with $job.image.digest }} {{- $image = print $image "@" . }} {{- end }}
@@ -103,7 +107,8 @@ spec:
           {{- with $job.topologySpreadConstraints }}
           topologySpreadConstraints: {{ toYaml . | nindent 12 }}
           {{- end }}
-          {{- with $job.securityContext }}
+          {{- $podSecurityContext := $job.securityContext | default $.Values.cronjob.podSecurityContext }}
+          {{- with $podSecurityContext }}
           securityContext: {{ toYaml . | nindent 12 }}
           {{- end }}
           {{- if $job.restartPolicy}}

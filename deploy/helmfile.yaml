@@ -15,6 +15,40 @@
 # Gateway API CRDs, so there is nothing to apply by hand.
 #
 # Config via env vars (see defaults below).
+#
+# -----------------------------------------------------------------------------
+# Pod Security Admission (PSA) policy
+# -----------------------------------------------------------------------------
+# Tenant runtime is hardened in two layers:
+#
+#   1. Workload-level: the tenant common-chart (deploy/charts/common-chart) ships
+#      a hardened default pod/container securityContext — runAsNonRoot, non-zero
+#      UID/GID, allowPrivilegeEscalation=false, all capabilities dropped, and the
+#      RuntimeDefault seccomp profile — i.e. the fields the PSA `restricted`
+#      profile requires. (readOnlyRootFilesystem is opt-in per workload since
+#      tenant images are arbitrary; it is not part of the `restricted` profile.)
+#
+#   2. Namespace-level: every TENANT namespace (one per org-project, created by
+#      the control-plane API in kube.EnsureTenant — NOT declared here, because
+#      they are provisioned dynamically at deploy time) MUST carry these labels
+#      so the API server rejects any pod that escapes the chart defaults:
+#
+#        pod-security.kubernetes.io/enforce: restricted
+#        pod-security.kubernetes.io/enforce-version: latest
+#        pod-security.kubernetes.io/warn: restricted
+#        pod-security.kubernetes.io/audit: restricted
+#
+#      Keep that label set in sync with the chart's securityContext defaults.
+#
+# Control-plane / platform-prerequisite namespaces (vortex, cert-manager,
+# envoy-gateway-system, keda, kube-system) are intentionally NOT enforced as
+# `restricted` here: the bootstrap Postgres and several upstream prerequisite
+# charts (Envoy Gateway, metrics-server with --kubelet-insecure-tls, etc.) do
+# not yet satisfy the full `restricted` profile, and forcing it would break the
+# control plane. Those workloads are hardened individually in their own charts.
+# Do NOT add `enforce: restricted` to the control-plane namespaces below until
+# every control-plane pod (incl. bootstrap Postgres) sets seccompProfile.
+# -----------------------------------------------------------------------------
 
 repositories:
   - name: jetstack
