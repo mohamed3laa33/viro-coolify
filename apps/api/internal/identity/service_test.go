@@ -113,13 +113,19 @@ func TestRefreshRotationRevokesOldToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
-	// Reusing the original refresh token after rotation must fail.
+	// The freshly issued token works BEFORE any reuse of the old one.
+	rotated2, err := svc.Refresh(ctx, rotated.Refresh)
+	if err != nil {
+		t.Fatalf("rotated refresh token should work: %v", err)
+	}
+	// Reusing the ORIGINAL (already-rotated) refresh token is a replay: it must be
+	// rejected AND it kills the whole family (see TestRefreshReplayKillsFamily).
 	if _, err := svc.Refresh(ctx, res.Refresh); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("expected reused refresh token to be rejected, got %v", err)
 	}
-	// The newly issued refresh token works.
-	if _, err := svc.Refresh(ctx, rotated.Refresh); err != nil {
-		t.Fatalf("rotated refresh token should work: %v", err)
+	// After the replay, even the latest token in the family is dead.
+	if _, err := svc.Refresh(ctx, rotated2.Refresh); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("expected family revocation after replay, got %v", err)
 	}
 }
 

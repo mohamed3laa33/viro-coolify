@@ -56,6 +56,9 @@ func main() {
 	// Reconcile stored workload status against the live deploy backend.
 	srv.StartReconciler(ctx, time.Duration(cfg.ReconcileSec)*time.Second, &bg)
 
+	// GC expired/revoked refresh tokens so the table does not grow without bound.
+	srv.StartTokenCleanup(ctx, time.Hour, &bg)
+
 	go func() {
 		logger.Info("vortex-api starting",
 			"addr", cfg.HTTPAddr, "env", cfg.Env, "version", version.Version)

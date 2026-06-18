@@ -10,32 +10,72 @@ import (
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/domain"
 )
 
+// txMutex is an RWMutex that can be put into a "held" mode by WithTx. While held,
+// the per-method Lock/Unlock/RLock/RUnlock calls become no-ops so the existing
+// store methods can run unchanged inside a transaction without self-deadlocking
+// (the WithTx caller already holds the real write lock for the whole closure).
+// It is NOT a general-purpose reentrant lock: only WithTx flips held, and only
+// while it owns the underlying write lock on a single goroutine.
+type txMutex struct {
+	rw   sync.RWMutex
+	held bool // true only between WithTx's Lock and Unlock, on the tx goroutine
+}
+
+func (m *txMutex) Lock() {
+	if m.held {
+		return
+	}
+	m.rw.Lock()
+}
+
+func (m *txMutex) Unlock() {
+	if m.held {
+		return
+	}
+	m.rw.Unlock()
+}
+
+func (m *txMutex) RLock() {
+	if m.held {
+		return
+	}
+	m.rw.RLock()
+}
+
+func (m *txMutex) RUnlock() {
+	if m.held {
+		return
+	}
+	m.rw.RUnlock()
+}
+
 // MemoryStore is a thread-safe, in-memory Store for local development and tests.
 type MemoryStore struct {
-	mu             sync.RWMutex
+	mu             txMutex
 	users          map[string]domain.User // by id
 	usersByEmail   map[string]string      // email -> id
 	organizations  map[string]domain.Organization
-	memberships    map[string]domain.Membership        // key: orgID + "\x00" + userID
-	apps           map[string]domain.App               // by id
-	builds         map[string]domain.Build             // by id
-	databases      map[string]domain.Database          // by id
-	subscriptions  map[string]domain.Subscription      // by orgID
-	usage          map[string][]domain.UsageRecord     // by orgID
-	projects       map[string]domain.Project           // by id
-	projectMembers map[string]domain.ProjectMembership // key: projectID + "\x00" + userID
-	invitations    map[string]domain.Invitation        // by id
-	services       map[string]domain.Service           // by id
-	appEnv         map[string]map[string]envEntry      // appID -> key -> entry
-	auditEvents    []domain.AuditEvent                 // append-only audit log
-	domains        map[string]domain.Domain            // by id
-	plans          map[string]domain.Plan              // by id
-	templates      map[string]domain.ServiceTemplate   // by key
-	pricing        map[string]domain.PricingComponent  // by key
-	refreshTokens  map[string]domain.RefreshToken      // by jti
-	settings       domain.PlatformSettings             // singleton
-	processedEvts  map[string]struct{}                 // stripe event id dedupe
-	meterState     *domain.MeterState                  // metering progress (singleton)
+	memberships    map[string]domain.Membership         // key: orgID + "\x00" + userID
+	apps           map[string]domain.App                // by id
+	builds         map[string]domain.Build              // by id
+	databases      map[string]domain.Database           // by id
+	subscriptions  map[string]domain.Subscription       // by orgID
+	usage          map[string][]domain.UsageRecord      // by orgID
+	projects       map[string]domain.Project            // by id
+	projectMembers map[string]domain.ProjectMembership  // key: projectID + "\x00" + userID
+	invitations    map[string]domain.Invitation         // by id
+	services       map[string]domain.Service            // by id
+	appEnv         map[string]map[string]envEntry       // appID -> key -> entry
+	auditEvents    []domain.AuditEvent                  // append-only audit log
+	domains        map[string]domain.Domain             // by id
+	plans          map[string]domain.Plan               // by id
+	templates      map[string]domain.ServiceTemplate    // by key
+	pricing        map[string]domain.PricingComponent   // by key
+	refreshTokens  map[string]domain.RefreshToken       // by jti
+	resetTokens    map[string]domain.PasswordResetToken // by id
+	settings       domain.PlatformSettings              // singleton
+	processedEvts  map[string]struct{}                  // stripe event id dedupe
+	meterState     *domain.MeterState                   // metering progress (singleton)
 }
 
 // NewMemoryStore returns an in-memory store seeded with the default business
@@ -61,6 +101,7 @@ func NewMemoryStore() *MemoryStore {
 		templates:      make(map[string]domain.ServiceTemplate),
 		pricing:        make(map[string]domain.PricingComponent),
 		refreshTokens:  make(map[string]domain.RefreshToken),
+		resetTokens:    make(map[string]domain.PasswordResetToken),
 		processedEvts:  make(map[string]struct{}),
 	}
 	s.seed()
@@ -168,6 +209,25 @@ func defaultSettings() domain.PlatformSettings {
 }
 
 var _ Store = (*MemoryStore)(nil)
+
+// WithTx runs fn under the write lock for serialization. The in-memory store has
+// NO real transaction: a mid-fn failure does NOT roll back writes already applied
+// by fn. It exists so call sites can share one code path with the Postgres store
+// (which is truly atomic) and so concurrent multi-write sequences are serialized.
+// The Store passed to fn is the same store with its lock marked held, so nested
+// method calls do not self-deadlock.
+func (s *MemoryStore) WithTx(ctx context.Context, fn func(tx Store) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.rw.Lock()
+	s.mu.held = true
+	defer func() {
+		s.mu.held = false
+		s.mu.rw.Unlock()
+	}()
+	return fn(s)
+}
 
 func membershipKey(orgID, userID string) string { return orgID + "\x00" + userID }
 
@@ -652,6 +712,25 @@ func (s *MemoryStore) RevokeRefreshToken(_ context.Context, id string) error {
 	return nil
 }
 
+// RevokeRefreshTokenIfActive atomically (under the write lock) revokes the token
+// only if it is currently active, mirroring the postgres conditional UPDATE.
+// revoked=false (no error) means the row was already revoked — a lost rotation
+// race or a replay of a rotated token.
+func (s *MemoryStore) RevokeRefreshTokenIfActive(_ context.Context, id string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rt, ok := s.refreshTokens[id]
+	if !ok {
+		return false, ErrNotFound
+	}
+	if rt.Revoked {
+		return false, nil // compare-and-set lost: already revoked
+	}
+	rt.Revoked = true
+	s.refreshTokens[id] = rt
+	return true, nil
+}
+
 func (s *MemoryStore) RevokeAllUserRefreshTokens(_ context.Context, userID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -662,6 +741,85 @@ func (s *MemoryStore) RevokeAllUserRefreshTokens(_ context.Context, userID strin
 		}
 	}
 	return nil
+}
+
+// DeleteExpiredRefreshTokens removes ONLY truly-expired rows (ExpiresAt before the
+// cutoff), returning the number deleted. It deliberately KEEPS revoked-but-unexpired
+// rows: a revoked row is the replay-detection tombstone a rotated token needs, so a
+// late replay still sees rec.Revoked == true and triggers family revocation. The
+// tombstone survives until its underlying JWT can no longer Verify (ExpiresAt passes).
+func (s *MemoryStore) DeleteExpiredRefreshTokens(_ context.Context, before time.Time) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var n int64
+	for id, rt := range s.refreshTokens {
+		expired := !rt.ExpiresAt.IsZero() && rt.ExpiresAt.Before(before)
+		if expired {
+			delete(s.refreshTokens, id)
+			n++
+		}
+	}
+	return n, nil
+}
+
+// ---- Password reset tokens (single-use, time-limited, hashed at rest) ----
+
+func (s *MemoryStore) CreatePasswordResetToken(_ context.Context, t *domain.PasswordResetToken) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.resetTokens[t.ID]; exists {
+		return ErrConflict
+	}
+	for _, existing := range s.resetTokens {
+		if existing.TokenHash == t.TokenHash {
+			return ErrConflict
+		}
+	}
+	s.resetTokens[t.ID] = *t
+	return nil
+}
+
+// InvalidateUserPasswordResetTokens marks all of a user's currently-unused reset
+// tokens used, so a newly issued token is the only live one for that user.
+func (s *MemoryStore) InvalidateUserPasswordResetTokens(_ context.Context, userID string, usedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, t := range s.resetTokens {
+		if t.UserID == userID && t.UsedAt.IsZero() {
+			t.UsedAt = usedAt
+			s.resetTokens[id] = t
+		}
+	}
+	return nil
+}
+
+func (s *MemoryStore) GetPasswordResetTokenByHash(_ context.Context, tokenHash string) (*domain.PasswordResetToken, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, t := range s.resetTokens {
+		if t.TokenHash == tokenHash {
+			cp := t
+			return &cp, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+// ConsumePasswordResetToken atomically marks the token used only if unused.
+// consumed=false (no error) means it was already used (replay).
+func (s *MemoryStore) ConsumePasswordResetToken(_ context.Context, id string, usedAt time.Time) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t, ok := s.resetTokens[id]
+	if !ok {
+		return false, ErrNotFound
+	}
+	if !t.UsedAt.IsZero() {
+		return false, nil // already consumed
+	}
+	t.UsedAt = usedAt
+	s.resetTokens[id] = t
+	return true, nil
 }
 
 func (s *MemoryStore) UpsertSubscription(_ context.Context, sub *domain.Subscription) error {

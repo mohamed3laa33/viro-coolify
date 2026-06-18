@@ -18,6 +18,15 @@ var (
 
 // Store is the aggregate persistence interface for the control-plane.
 type Store interface {
+	// WithTx runs fn inside a single transaction, passing a transaction-scoped
+	// Store. On a nil error the transaction commits; on a non-nil error (or a
+	// panic) it rolls back. Postgres provides true ACID rollback; the in-memory
+	// store runs fn under its write lock for serialization but CANNOT roll back a
+	// partial mutation (documented best-effort — callers must treat a returned
+	// error as "state may be partially applied" only for the memory store, never
+	// for Postgres). The passed Store MUST be used for all writes inside fn.
+	WithTx(ctx context.Context, fn func(tx Store) error) error
+
 	// Users.
 	CreateUser(ctx context.Context, u *domain.User) error
 	GetUserByID(ctx context.Context, id string) (*domain.User, error)
@@ -115,7 +124,35 @@ type Store interface {
 	CreateRefreshToken(ctx context.Context, rt *domain.RefreshToken) error
 	GetRefreshToken(ctx context.Context, id string) (*domain.RefreshToken, error)
 	RevokeRefreshToken(ctx context.Context, id string) error
+	// RevokeRefreshTokenIfActive atomically revokes the token only when it is
+	// currently active (not yet revoked). It reports revoked=true when this call
+	// performed the revocation and revoked=false when the row was already revoked
+	// (a lost rotation race or a replay). A missing row returns ErrNotFound. This
+	// is the compare-and-set primitive that makes refresh rotation race-free.
+	RevokeRefreshTokenIfActive(ctx context.Context, id string) (revoked bool, err error)
 	RevokeAllUserRefreshTokens(ctx context.Context, userID string) error
+	// DeleteExpiredRefreshTokens deletes ONLY truly-expired refresh-token rows
+	// (ExpiresAt < before), returning the number removed. It is the GC the cleanup
+	// ticker runs so the table does not grow without bound. It deliberately KEEPS
+	// revoked-but-unexpired rows: a revoked row is the replay-detection tombstone a
+	// rotated token needs, so a late replay still triggers family revocation. The
+	// tombstone survives until its underlying JWT can no longer Verify.
+	DeleteExpiredRefreshTokens(ctx context.Context, before time.Time) (int64, error)
+
+	// Password reset tokens (single-use, time-limited, hashed at rest).
+	CreatePasswordResetToken(ctx context.Context, t *domain.PasswordResetToken) error
+	// InvalidateUserPasswordResetTokens marks ALL of a user's currently-unused reset
+	// tokens as used (used_at = now), so issuing a fresh reset token first revokes any
+	// prior outstanding ones — only the most recent reset link is ever live.
+	InvalidateUserPasswordResetTokens(ctx context.Context, userID string, usedAt time.Time) error
+	// GetPasswordResetTokenByHash resolves a reset token by its SHA-256 hash.
+	// Returns ErrNotFound when no row matches.
+	GetPasswordResetTokenByHash(ctx context.Context, tokenHash string) (*domain.PasswordResetToken, error)
+	// ConsumePasswordResetToken atomically marks the token used at usedAt only when
+	// it is currently unused. It reports consumed=false (no error) when the row was
+	// already used (replay), so the reset flow can reject reuse. ErrNotFound when
+	// the row does not exist.
+	ConsumePasswordResetToken(ctx context.Context, id string, usedAt time.Time) (consumed bool, err error)
 
 	// Billing.
 	UpsertSubscription(ctx context.Context, s *domain.Subscription) error

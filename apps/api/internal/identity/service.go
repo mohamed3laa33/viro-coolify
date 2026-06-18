@@ -4,9 +4,12 @@ package identity
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -14,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/auth"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/domain"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/notify"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/store"
 )
 
@@ -38,16 +42,99 @@ type Service struct {
 	adminEmails map[string]bool
 	idgen       func() string
 	now         func() time.Time
+
+	// mailer delivers transactional email (invitations, welcome, password reset).
+	// Never nil after NewService (defaults to a NoopMailer).
+	mailer notify.Mailer
+	logger *slog.Logger
+	// baseDomain is the platform apex used to build accept/reset links.
+	baseDomain string
+	// refreshTTL bounds a stored refresh token's lifetime (mirrors the JWT exp);
+	// used to set expires_at on issue. Zero leaves expires_at unset.
+	refreshTTL time.Duration
+	// invitationTTL bounds how long an invitation can be accepted after creation.
+	invitationTTL time.Duration
+	// passwordResetTTL bounds how long a reset token is valid after issue.
+	passwordResetTTL time.Duration
+}
+
+// Option customizes Service construction (mailer, base domain, TTLs). Each is
+// optional; unset values fall back to safe defaults (NoopMailer, no expiry).
+type Option func(*Service)
+
+// WithMailer injects the email transport. A nil mailer is treated as a NoopMailer
+// so the service is always safe to call.
+func WithMailer(m notify.Mailer) Option {
+	return func(s *Service) {
+		if m != nil {
+			s.mailer = m
+		}
+	}
+}
+
+// WithLogger injects a logger for best-effort email failures.
+func WithLogger(l *slog.Logger) Option {
+	return func(s *Service) {
+		if l != nil {
+			s.logger = l
+		}
+	}
+}
+
+// WithBaseDomain sets the platform apex used to build accept/reset URLs.
+func WithBaseDomain(d string) Option {
+	return func(s *Service) { s.baseDomain = strings.TrimSpace(d) }
+}
+
+// WithRefreshTTL sets the stored refresh-token lifetime used to stamp expires_at.
+func WithRefreshTTL(d time.Duration) Option {
+	return func(s *Service) {
+		if d > 0 {
+			s.refreshTTL = d
+		}
+	}
+}
+
+// WithInvitationTTL sets how long an invitation can be accepted after creation.
+func WithInvitationTTL(d time.Duration) Option {
+	return func(s *Service) {
+		if d > 0 {
+			s.invitationTTL = d
+		}
+	}
+}
+
+// WithPasswordResetTTL sets how long a reset token is valid after issue.
+func WithPasswordResetTTL(d time.Duration) Option {
+	return func(s *Service) {
+		if d > 0 {
+			s.passwordResetTTL = d
+		}
+	}
 }
 
 // NewService builds an identity service backed by the given store and token
 // manager. adminEmails (normalized) are granted platform-wide super-admin.
-func NewService(s store.Store, tm *auth.TokenManager, adminEmails []string) *Service {
+func NewService(s store.Store, tm *auth.TokenManager, adminEmails []string, opts ...Option) *Service {
 	admins := make(map[string]bool, len(adminEmails))
 	for _, e := range adminEmails {
 		admins[normalizeEmail(e)] = true
 	}
-	return &Service{store: s, tokens: tm, adminEmails: admins, idgen: uuid.NewString, now: time.Now}
+	svc := &Service{
+		store:            s,
+		tokens:           tm,
+		adminEmails:      admins,
+		idgen:            uuid.NewString,
+		now:              time.Now,
+		mailer:           notify.NewNoopMailer(),
+		logger:           slog.Default(),
+		invitationTTL:    7 * 24 * time.Hour,
+		passwordResetTTL: time.Hour,
+	}
+	for _, opt := range opts {
+		opt(svc)
+	}
+	return svc
 }
 
 // isAdminEmail reports whether the normalized email is a configured super-admin.
@@ -61,6 +148,23 @@ type AuthResult struct {
 }
 
 var emailRe = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
+
+// decoyPasswordHash is a fixed, precomputed bcrypt hash of a dummy password. When
+// Login is given an unknown email we still run a bcrypt compare against this decoy
+// so the response time matches the known-email (real-hash) path, closing the timing
+// oracle that would otherwise let an attacker enumerate registered emails. It is
+// computed once at startup (bcrypt.DefaultCost) so the work mirrors a real compare.
+var decoyPasswordHash = mustDecoyHash()
+
+func mustDecoyHash() string {
+	h, err := auth.HashPassword("viro-login-timing-decoy-password")
+	if err != nil {
+		// HashPassword only fails on a broken crypto runtime; a panic at init is the
+		// right signal since the whole auth subsystem would be unusable anyway.
+		panic("identity: cannot precompute decoy password hash: " + err.Error())
+	}
+	return h
+}
 
 // Signup registers a new user, creates their personal organization (as owner),
 // and returns an authenticated session.
@@ -100,28 +204,37 @@ func (s *Service) Signup(ctx context.Context, email, name, password string) (*Au
 		IsAdmin:      s.isAdminEmail(email),
 		CreatedAt:    s.now(),
 	}
-	if err := s.store.CreateUser(ctx, user); err != nil {
-		if errors.Is(err, store.ErrConflict) {
-			return nil, ErrEmailTaken
-		}
-		return nil, err
-	}
-
 	org := &domain.Organization{
 		ID:        s.idgen(),
 		Name:      personalOrgName(name),
 		Slug:      slugify(name) + "-" + shortID(user.ID),
 		CreatedAt: s.now(),
 	}
-	if err := s.store.CreateOrganization(ctx, org); err != nil {
+
+	// Create the user, their personal org, owner membership and default project
+	// ATOMICALLY: a mid-sequence failure must not orphan a user with no org (or an
+	// org with no owner). Postgres rolls back; the memory store serializes.
+	if err := s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := tx.CreateUser(ctx, user); err != nil {
+			if errors.Is(err, store.ErrConflict) {
+				return ErrEmailTaken
+			}
+			return err
+		}
+		if err := tx.CreateOrganization(ctx, org); err != nil {
+			return err
+		}
+		if err := tx.AddMembership(ctx, domain.Membership{OrgID: org.ID, UserID: user.ID, Role: domain.RoleOwner}); err != nil {
+			return err
+		}
+		_, err := s.createDefaultProjectTx(ctx, tx, org.ID)
+		return err
+	}); err != nil {
 		return nil, err
 	}
-	if err := s.store.AddMembership(ctx, domain.Membership{OrgID: org.ID, UserID: user.ID, Role: domain.RoleOwner}); err != nil {
-		return nil, err
-	}
-	if _, err := s.createDefaultProject(ctx, org.ID); err != nil {
-		return nil, err
-	}
+
+	// Welcome email is best-effort: it must never fail signup.
+	s.sendBestEffort(ctx, user.Email, notify.WelcomeEmail(user.Name))
 
 	return s.issue(ctx, user)
 }
@@ -130,6 +243,11 @@ func (s *Service) Signup(ctx context.Context, email, name, password string) (*Au
 func (s *Service) Login(ctx context.Context, email, password string) (*AuthResult, error) {
 	user, err := s.store.GetUserByEmail(ctx, normalizeEmail(email))
 	if errors.Is(err, store.ErrNotFound) {
+		// Run bcrypt against a fixed decoy hash so an unknown email costs the same
+		// wall-clock time as a known one — without this, the fast no-hash path is a
+		// timing oracle for enumerating registered emails. The result is discarded;
+		// the outcome is always the uniform ErrInvalidCredentials.
+		_ = auth.CheckPassword(decoyPasswordHash, password)
 		return nil, ErrInvalidCredentials
 	}
 	if err != nil {
@@ -162,16 +280,42 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (*AuthResult
 		return nil, ErrInvalidCredentials
 	}
 	rec, err := s.store.GetRefreshToken(ctx, claims.ID)
-	if err != nil || rec.Revoked {
+	if err != nil {
+		return nil, ErrInvalidCredentials
+	}
+	// REUSE DETECTION: a verified token whose stored record is already revoked is a
+	// replay of a rotated token (the legitimate holder already rotated it away).
+	// Treat it as a stolen-token signal and kill the whole family so an attacker
+	// who captured one rotated token cannot keep any session alive.
+	if rec.Revoked {
+		_ = s.store.RevokeAllUserRefreshTokens(ctx, rec.UserID)
+		return nil, ErrInvalidCredentials
+	}
+	// Reject an expired stored token (the JWT exp is also checked by Verify, but the
+	// stored expiry is the authoritative server-side bound).
+	if !rec.ExpiresAt.IsZero() && !s.now().Before(rec.ExpiresAt) {
 		return nil, ErrInvalidCredentials
 	}
 	user, err := s.store.GetUserByID(ctx, claims.Subject)
 	if err != nil {
 		return nil, ErrInvalidCredentials
 	}
-	// Rotate: revoke the presented token before issuing the new pair.
-	if err := s.store.RevokeRefreshToken(ctx, claims.ID); err != nil {
+	// ATOMIC ROTATION: revoke the presented token only if it is still active. If
+	// the compare-and-set loses (revoked==false), a concurrent rotation already
+	// consumed this token; treat the lost race as invalid so exactly one new
+	// session is minted from a single presented token.
+	revoked, err := s.store.RevokeRefreshTokenIfActive(ctx, claims.ID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, ErrInvalidCredentials
+		}
 		return nil, err
+	}
+	if !revoked {
+		// Lost the race to a concurrent rotation, OR a replay slipped past the read
+		// above. Kill the family to be safe and reject.
+		_ = s.store.RevokeAllUserRefreshTokens(ctx, rec.UserID)
+		return nil, ErrInvalidCredentials
 	}
 	return s.issue(ctx, user)
 }
@@ -199,6 +343,133 @@ func (s *Service) GetUser(ctx context.Context, id string) (*domain.User, error) 
 	return s.store.GetUserByID(ctx, id)
 }
 
+// ForgotPassword starts the password-reset flow. It is ENUMERATION-SAFE: it always
+// returns nil regardless of whether the email exists, doing real work (creating a
+// single-use, time-limited, hashed-at-rest reset token and emailing the link) only
+// when a matching user exists. Email delivery is best-effort.
+func (s *Service) ForgotPassword(ctx context.Context, email string) error {
+	email = normalizeEmail(email)
+	if !emailRe.MatchString(email) {
+		// Don't leak validity via a 400 either — silently succeed.
+		return nil
+	}
+	user, err := s.store.GetUserByEmail(ctx, email)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil // no enumeration: same outcome as a real send
+	}
+	if err != nil {
+		return err
+	}
+
+	plaintext := newToken()
+	now := s.now()
+	rec := &domain.PasswordResetToken{
+		ID:        s.idgen(),
+		UserID:    user.ID,
+		TokenHash: hashToken(plaintext),
+		ExpiresAt: now.Add(s.passwordResetTTL),
+		CreatedAt: now,
+	}
+	// Invalidate any prior unused reset tokens and create the new one ATOMICALLY, so
+	// only the most-recently-issued reset link is ever live (a re-requested reset
+	// must not leave the previous link usable).
+	if err := s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := tx.InvalidateUserPasswordResetTokens(ctx, user.ID, now); err != nil {
+			return err
+		}
+		return tx.CreatePasswordResetToken(ctx, rec)
+	}); err != nil {
+		// Log but stay enumeration-safe: still return nil so the caller 204s.
+		s.logger.Error("identity: create password reset token", "err", err)
+		return nil
+	}
+
+	msg := notify.PasswordResetEmail(user.Name, s.resetURL(plaintext))
+	msg.To = user.Email
+	s.sendBestEffort(ctx, user.Email, msg)
+	return nil
+}
+
+// ResetPassword completes the reset flow: it validates the token (unexpired,
+// unused), sets the new bcrypt password hash, consumes the token (single-use), and
+// revokes ALL the user's refresh tokens so any session opened with the old
+// password is killed. An expired/used/unknown token yields ErrInvalidCredentials.
+func (s *Service) ResetPassword(ctx context.Context, token, newPassword string) error {
+	if len(newPassword) < 8 {
+		return fmt.Errorf("%w: password must be at least 8 characters", ErrValidation)
+	}
+	if len(newPassword) > 72 {
+		return fmt.Errorf("%w: password must be at most 72 bytes", ErrValidation)
+	}
+	rec, err := s.store.GetPasswordResetTokenByHash(ctx, hashToken(token))
+	if errors.Is(err, store.ErrNotFound) {
+		return ErrInvalidCredentials
+	}
+	if err != nil {
+		return err
+	}
+	if !rec.UsedAt.IsZero() {
+		return ErrInvalidCredentials // already consumed
+	}
+	if !s.now().Before(rec.ExpiresAt) {
+		return ErrInvalidCredentials // expired
+	}
+
+	user, err := s.store.GetUserByID(ctx, rec.UserID)
+	if err != nil {
+		return ErrInvalidCredentials
+	}
+	hash, err := auth.HashPassword(newPassword)
+	if err != nil {
+		return err
+	}
+
+	user.PasswordHash = hash
+	// Consume the token, set the new password and revoke all sessions ATOMICALLY: a
+	// crash between consume and update must not burn a single-use token without
+	// actually resetting the password (which would lock the user out of recovery).
+	// Consuming FIRST inside the tx still gives single-use semantics — a concurrent
+	// request that already consumed the token makes this one a no-op (consumed=false)
+	// and rolls back. Postgres rolls back on error; the memory store serializes.
+	var consumed bool
+	if err := s.store.WithTx(ctx, func(tx store.Store) error {
+		ok, cErr := tx.ConsumePasswordResetToken(ctx, rec.ID, s.now())
+		if cErr != nil {
+			return cErr
+		}
+		if !ok {
+			consumed = false
+			return nil // already consumed (replay): leave password unchanged
+		}
+		consumed = true
+		if uErr := tx.UpdateUser(ctx, user); uErr != nil {
+			return uErr
+		}
+		// Kill every existing session: a password reset implies the account may have
+		// been compromised, so all refresh tokens are revoked.
+		return tx.RevokeAllUserRefreshTokens(ctx, user.ID)
+	}); err != nil {
+		return err
+	}
+	if !consumed {
+		return ErrInvalidCredentials
+	}
+	return nil
+}
+
+// hashToken returns the lowercase hex SHA-256 of a token. Reset tokens are stored
+// hashed at rest so a database leak does not yield usable plaintext tokens.
+func hashToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+// CleanupExpiredRefreshTokens deletes expired/revoked refresh-token rows, returning
+// the number removed. It is invoked by the background cleanup ticker.
+func (s *Service) CleanupExpiredRefreshTokens(ctx context.Context) (int64, error) {
+	return s.store.DeleteExpiredRefreshTokens(ctx, s.now())
+}
+
 // ListOrganizations returns the organizations a user belongs to.
 func (s *Service) ListOrganizations(ctx context.Context, userID string) ([]domain.Organization, error) {
 	return s.store.ListOrganizationsForUser(ctx, userID)
@@ -216,13 +487,18 @@ func (s *Service) CreateOrganization(ctx context.Context, userID, name string) (
 		Slug:      slugify(name) + "-" + shortID(s.idgen()),
 		CreatedAt: s.now(),
 	}
-	if err := s.store.CreateOrganization(ctx, org); err != nil {
-		return nil, err
-	}
-	if err := s.store.AddMembership(ctx, domain.Membership{OrgID: org.ID, UserID: userID, Role: domain.RoleOwner}); err != nil {
-		return nil, err
-	}
-	if _, err := s.createDefaultProject(ctx, org.ID); err != nil {
+	// Org + owner membership + default project are created atomically so a failure
+	// can never leave an ownerless org.
+	if err := s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := tx.CreateOrganization(ctx, org); err != nil {
+			return err
+		}
+		if err := tx.AddMembership(ctx, domain.Membership{OrgID: org.ID, UserID: userID, Role: domain.RoleOwner}); err != nil {
+			return err
+		}
+		_, err := s.createDefaultProjectTx(ctx, tx, org.ID)
+		return err
+	}); err != nil {
 		return nil, err
 	}
 	return org, nil
@@ -372,7 +648,9 @@ func (s *Service) countOwners(ctx context.Context, orgID string) (int, error) {
 
 // ---- Projects (Org → Project → App) ----
 
-func (s *Service) createDefaultProject(ctx context.Context, orgID string) (*domain.Project, error) {
+// createDefaultProjectTx creates the org's default project against the given
+// store (the live store, or a transaction-scoped store inside WithTx).
+func (s *Service) createDefaultProjectTx(ctx context.Context, st store.Store, orgID string) (*domain.Project, error) {
 	p := &domain.Project{
 		ID:        s.idgen(),
 		OrgID:     orgID,
@@ -381,7 +659,7 @@ func (s *Service) createDefaultProject(ctx context.Context, orgID string) (*doma
 		IsDefault: true,
 		CreatedAt: s.now(),
 	}
-	if err := s.store.CreateProject(ctx, p); err != nil {
+	if err := st.CreateProject(ctx, p); err != nil {
 		return nil, err
 	}
 	return p, nil
@@ -547,6 +825,7 @@ func (s *Service) Invite(ctx context.Context, inviterID, orgID, projectID, email
 			return nil, fmt.Errorf("%w: project not in organization", ErrValidation)
 		}
 	}
+	now := s.now()
 	inv := &domain.Invitation{
 		ID:        s.idgen(),
 		OrgID:     orgID,
@@ -556,12 +835,77 @@ func (s *Service) Invite(ctx context.Context, inviterID, orgID, projectID, email
 		Token:     newToken(),
 		Status:    domain.InvitePending,
 		InvitedBy: inviterID,
-		CreatedAt: s.now(),
+		CreatedAt: now,
+	}
+	if s.invitationTTL > 0 {
+		inv.ExpiresAt = now.Add(s.invitationTTL)
 	}
 	if err := s.store.CreateInvitation(ctx, inv); err != nil {
 		return nil, err
 	}
+
+	// Email the invitee an accept link (best-effort — a mail failure must never
+	// fail the API or block the invitation, which is already persisted).
+	s.sendInvitationEmail(ctx, inviterID, inv)
+
 	return inv, nil
+}
+
+// sendInvitationEmail renders and sends the invitation email to the invitee. It
+// resolves the inviter's display name and the org/project names for the body, and
+// builds the accept URL from the configured base domain. Any failure is logged,
+// not returned.
+func (s *Service) sendInvitationEmail(ctx context.Context, inviterID string, inv *domain.Invitation) {
+	inviterName := "A teammate"
+	if u, err := s.store.GetUserByID(ctx, inviterID); err == nil && u != nil {
+		if n := strings.TrimSpace(u.Name); n != "" {
+			inviterName = n
+		} else if u.Email != "" {
+			inviterName = u.Email
+		}
+	}
+	orgName := ""
+	if o, err := s.store.GetOrganization(ctx, inv.OrgID); err == nil && o != nil {
+		orgName = o.Name
+	}
+	projectName := ""
+	if inv.ProjectID != "" {
+		if p, err := s.store.GetProject(ctx, inv.ProjectID); err == nil && p != nil {
+			projectName = p.Name
+		}
+	}
+	msg := notify.InvitationEmail(inviterName, orgName, projectName, s.acceptURL(inv.Token))
+	msg.To = inv.Email
+	s.sendBestEffort(ctx, inv.Email, msg)
+}
+
+// acceptURL builds the invitation accept link from the configured base domain.
+func (s *Service) acceptURL(token string) string {
+	base := s.baseDomain
+	if base == "" {
+		base = "vortex.v60ai.com"
+	}
+	return "https://" + base + "/invite?token=" + url.QueryEscape(token)
+}
+
+// resetURL builds the password-reset link from the configured base domain.
+func (s *Service) resetURL(token string) string {
+	base := s.baseDomain
+	if base == "" {
+		base = "vortex.v60ai.com"
+	}
+	return "https://" + base + "/reset-password?token=" + url.QueryEscape(token)
+}
+
+// sendBestEffort delivers msg to addr, logging (never returning) any failure so
+// email delivery can never fail or block the surrounding API call.
+func (s *Service) sendBestEffort(ctx context.Context, addr string, msg notify.Message) {
+	if msg.To == "" {
+		msg.To = addr
+	}
+	if err := s.mailer.Send(ctx, msg); err != nil {
+		s.logger.Warn("identity: email send failed", "to", addr, "subject", msg.Subject, "err", err)
+	}
 }
 
 // ListInvitations returns an org's invitations (caller must be org admin+).
@@ -603,32 +947,41 @@ func (s *Service) AcceptInvitation(ctx context.Context, userID, userEmail, token
 	if inv.Status != domain.InvitePending {
 		return nil, ErrInvitationInvalid
 	}
+	// Reject an expired invitation (zero ExpiresAt = never expires, back-compat).
+	if !inv.ExpiresAt.IsZero() && !s.now().Before(inv.ExpiresAt) {
+		return nil, ErrInvitationInvalid
+	}
 	if normalizeEmail(userEmail) != inv.Email {
 		return nil, ErrForbidden
 	}
 
-	// Ensure a baseline org membership exists.
-	if _, err := s.store.GetMembership(ctx, inv.OrgID, userID); errors.Is(err, store.ErrNotFound) {
-		role := domain.RoleMember
-		if inv.ProjectID == "" {
-			role = inv.Role // org-level invite carries the granted role
+	// Grant membership(s) and mark the invitation accepted ATOMICALLY so a failure
+	// mid-sequence cannot leave the user half-onboarded (e.g. a project membership
+	// without the org membership, or an "accepted" invite with no membership).
+	if err := s.store.WithTx(ctx, func(tx store.Store) error {
+		// Ensure a baseline org membership exists.
+		if _, err := tx.GetMembership(ctx, inv.OrgID, userID); errors.Is(err, store.ErrNotFound) {
+			role := domain.RoleMember
+			if inv.ProjectID == "" {
+				role = inv.Role // org-level invite carries the granted role
+			}
+			if err := tx.AddMembership(ctx, domain.Membership{OrgID: inv.OrgID, UserID: userID, Role: role}); err != nil {
+				return err
+			}
+		} else if err != nil {
+			return err
 		}
-		if err := s.store.AddMembership(ctx, domain.Membership{OrgID: inv.OrgID, UserID: userID, Role: role}); err != nil {
-			return nil, err
-		}
-	} else if err != nil {
-		return nil, err
-	}
 
-	if inv.ProjectID != "" {
-		err := s.store.AddProjectMembership(ctx, domain.ProjectMembership{ProjectID: inv.ProjectID, UserID: userID, Role: inv.Role})
-		if err != nil && !errors.Is(err, store.ErrConflict) {
-			return nil, err
+		if inv.ProjectID != "" {
+			err := tx.AddProjectMembership(ctx, domain.ProjectMembership{ProjectID: inv.ProjectID, UserID: userID, Role: inv.Role})
+			if err != nil && !errors.Is(err, store.ErrConflict) {
+				return err
+			}
 		}
-	}
 
-	inv.Status = domain.InviteAccepted
-	if err := s.store.UpdateInvitation(ctx, inv); err != nil {
+		inv.Status = domain.InviteAccepted
+		return tx.UpdateInvitation(ctx, inv)
+	}); err != nil {
 		return nil, err
 	}
 	return inv, nil
@@ -653,8 +1006,14 @@ func (s *Service) issue(ctx context.Context, user *domain.User) (*AuthResult, er
 		return nil, err
 	}
 	// Persist the refresh token's jti so it can be rotated/revoked. Without a
-	// matching, non-revoked record a refresh token is not honored.
-	rec := &domain.RefreshToken{ID: jti, UserID: user.ID, CreatedAt: s.now()}
+	// matching, non-revoked record a refresh token is not honored. ExpiresAt
+	// mirrors the JWT exp so the cleanup ticker can GC it and Refresh can reject an
+	// expired stored token.
+	now := s.now()
+	rec := &domain.RefreshToken{ID: jti, UserID: user.ID, CreatedAt: now}
+	if s.refreshTTL > 0 {
+		rec.ExpiresAt = now.Add(s.refreshTTL)
+	}
 	if err := s.store.CreateRefreshToken(ctx, rec); err != nil {
 		return nil, err
 	}

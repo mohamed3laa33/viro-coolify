@@ -24,6 +24,12 @@ type welcomeData struct {
 	Name string
 }
 
+// passwordResetData is the template payload for PasswordResetEmail.
+type passwordResetData struct {
+	Name     string
+	ResetURL string
+}
+
 // invitationHTML renders the HTML body of an invitation. All interpolated
 // values are auto-escaped by html/template.
 var invitationHTML = htmltemplate.Must(htmltemplate.New("invitation.html").Parse(
@@ -67,6 +73,29 @@ var welcomeText = texttemplate.Must(texttemplate.New("welcome.txt").Parse(
 Your Vortex account is ready. We're glad to have you on board.
 `))
 
+var passwordResetHTML = htmltemplate.Must(htmltemplate.New("reset.html").Parse(
+	`<!doctype html>
+<html>
+<body>
+  <p>Hi{{if .Name}} {{.Name}}{{end}},</p>
+  <p>We received a request to reset your Vortex password. Click the link below to
+  choose a new one. If you did not request this, you can safely ignore this email.</p>
+  <p><a href="{{.ResetURL}}">Reset your password</a></p>
+  <p>If the button does not work, copy and paste this link into your browser:<br>
+  {{.ResetURL}}</p>
+</body>
+</html>`))
+
+var passwordResetText = texttemplate.Must(texttemplate.New("reset.txt").Parse(
+	`Hi{{if .Name}} {{.Name}}{{end}},
+
+We received a request to reset your Vortex password. Open the link below to choose
+a new one. If you did not request this, you can safely ignore this email.
+
+Reset your password:
+{{.ResetURL}}
+`))
+
 // InvitationEmail builds the invitation Message. When projectName is empty the
 // wording is org-level; otherwise it references the specific project. All
 // dynamic values are HTML-escaped in the HTML body.
@@ -100,6 +129,17 @@ func WelcomeEmail(name string) Message {
 		Subject:  "Welcome to Vortex",
 		HTMLBody: render(welcomeHTML, data),
 		TextBody: render(welcomeText, data),
+	}
+}
+
+// PasswordResetEmail builds the password-reset Message carrying the reset link.
+func PasswordResetEmail(name, resetURL string) Message {
+	data := passwordResetData{Name: strings.TrimSpace(name), ResetURL: resetURL}
+	return Message{
+		To:       "",
+		Subject:  "Reset your Vortex password",
+		HTMLBody: render(passwordResetHTML, data),
+		TextBody: render(passwordResetText, data),
 	}
 }
 

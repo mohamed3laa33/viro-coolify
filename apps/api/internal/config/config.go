@@ -90,6 +90,23 @@ type Config struct {
 	// encrypt SECRET app env values at rest. Empty in dev falls back to no
 	// encryption (a logged warning) — never a panic.
 	SecretEncryptionKey string
+
+	// SMTP / email. When SMTPHost is empty the platform uses a NoopMailer so it
+	// runs without a mail server (invitations/welcome/reset emails are silently
+	// dropped in dev). Set these to enable real delivery via net/smtp.
+	SMTPHost     string
+	SMTPPort     int
+	SMTPUsername string
+	SMTPPassword string
+	SMTPFrom     string // envelope/From address, e.g. "Vortex <no-reply@…>"
+	SMTPStartTLS bool   // upgrade the connection with STARTTLS before auth
+
+	// InvitationTTLHours bounds how long an invitation can be accepted after it is
+	// created (default 7 days). Admin/DB-tunable via VORTEX_INVITATION_TTL_HOURS.
+	InvitationTTLHours int
+	// PasswordResetTTLMin bounds how long a password-reset token is valid after it
+	// is issued (default 60 minutes).
+	PasswordResetTTLMin int
 }
 
 // Load reads configuration from environment variables, applying development defaults.
@@ -131,6 +148,16 @@ func Load() (*Config, error) {
 		CORSAllowedOrigins:          splitAndTrim(getenv("CORS_ORIGINS", "http://localhost:3000,https://app.vortex.v60ai.com")),
 		AdminEmails:                 splitAndTrim(strings.ToLower(getenv("ADMIN_EMAILS", ""))),
 		SecretEncryptionKey:         getenv("SECRET_ENCRYPTION_KEY", ""),
+
+		SMTPHost:     getenv("SMTP_HOST", ""),
+		SMTPPort:     getenvInt("SMTP_PORT", 587),
+		SMTPUsername: getenv("SMTP_USERNAME", ""),
+		SMTPPassword: getenv("SMTP_PASSWORD", ""),
+		SMTPFrom:     getenv("SMTP_FROM", ""),
+		SMTPStartTLS: getenvBool("SMTP_STARTTLS", true),
+
+		InvitationTTLHours:  getenvInt("INVITATION_TTL_HOURS", 24*7),
+		PasswordResetTTLMin: getenvInt("PASSWORD_RESET_TTL_MIN", 60),
 	}
 	if cfg.IsProduction() && (cfg.JWTSecret == "" || cfg.JWTSecret == defaultDevJWTSecret) {
 		return nil, errors.New("VORTEX_JWT_SECRET must be set to a strong value in production")

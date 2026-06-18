@@ -106,6 +106,10 @@ type Invitation struct {
 	Status    InvitationStatus `json:"status"`
 	InvitedBy string           `json:"invitedBy"`
 	CreatedAt time.Time        `json:"createdAt"`
+	// ExpiresAt is the moment the invitation can no longer be accepted. A zero
+	// value means "never expires" (back-compat for rows created before expiry
+	// was introduced).
+	ExpiresAt time.Time `json:"expiresAt,omitempty"`
 }
 
 // App is a Viro application owned by an organization and grouped under a project.
@@ -402,5 +406,23 @@ type RefreshToken struct {
 	ID        string    `json:"id"` // jti embedded in the refresh JWT
 	UserID    string    `json:"userId"`
 	Revoked   bool      `json:"revoked"`
+	CreatedAt time.Time `json:"createdAt"`
+	// ExpiresAt is the moment the stored refresh token can no longer be used. A
+	// zero value means "no stored expiry" (back-compat for rows created before
+	// expiry tracking); such rows fall back to the JWT's own exp claim.
+	ExpiresAt time.Time `json:"expiresAt,omitempty"`
+}
+
+// PasswordResetToken is a persisted, single-use, time-limited credential backing
+// the password-reset flow. The plaintext token is emailed to the user and never
+// stored; only its SHA-256 hash (TokenHash) is persisted, so a database leak does
+// not yield usable reset tokens. A token is valid while it is unconsumed
+// (UsedAt zero) and unexpired (now < ExpiresAt).
+type PasswordResetToken struct {
+	ID        string    `json:"id"`
+	UserID    string    `json:"userId"`
+	TokenHash string    `json:"-"` // SHA-256 hex of the emailed token; never the plaintext
+	ExpiresAt time.Time `json:"expiresAt"`
+	UsedAt    time.Time `json:"usedAt,omitempty"` // zero until consumed
 	CreatedAt time.Time `json:"createdAt"`
 }

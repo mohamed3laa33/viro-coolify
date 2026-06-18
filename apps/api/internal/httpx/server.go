@@ -17,6 +17,7 @@ import (
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/domain"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/identity"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/kube"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/notify"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/platform"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/secrets"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/store"
@@ -48,6 +49,14 @@ type Option func(*serverOptions)
 type serverOptions struct {
 	backend kube.Backend
 	builder build.Builder
+	mailer  notify.Mailer
+}
+
+// WithMailer overrides the email transport (e.g. a notify.RecordingMailer in
+// tests). When unset, NewServer builds the mailer from SMTP config (NoopMailer
+// when SMTP is unconfigured).
+func WithMailer(m notify.Mailer) Option {
+	return func(o *serverOptions) { o.mailer = m }
 }
 
 // WithBackend overrides the Kubernetes deploy backend (e.g. kube.FakeBackend in
@@ -112,15 +121,37 @@ func NewServer(cfg *config.Config, logger *slog.Logger, st store.Store, opts ...
 	}
 
 	bill := billing.NewService(st, provider)
+
+	// Email transport: a RecordingMailer/NoopMailer injected by tests, otherwise an
+	// SMTPMailer when SMTP is configured (else NoopMailer). NewMailer is nil-safe.
+	mailer := so.mailer
+	if mailer == nil {
+		mailer = notify.NewMailer(notify.Config{
+			Host:     cfg.SMTPHost,
+			Port:     cfg.SMTPPort,
+			Username: cfg.SMTPUsername,
+			Password: cfg.SMTPPassword,
+			From:     cfg.SMTPFrom,
+			StartTLS: cfg.SMTPStartTLS,
+		})
+	}
+
 	s := &Server{
-		cfg:      cfg,
-		logger:   logger,
-		backend:  backend,
-		builder:  builder,
-		store:    st,
-		tokens:   tokens,
-		identity: identity.NewService(st, tokens, cfg.AdminEmails),
-		billing:  bill,
+		cfg:     cfg,
+		logger:  logger,
+		backend: backend,
+		builder: builder,
+		store:   st,
+		tokens:  tokens,
+		identity: identity.NewService(st, tokens, cfg.AdminEmails,
+			identity.WithMailer(mailer),
+			identity.WithLogger(logger),
+			identity.WithBaseDomain(cfg.BaseDomain),
+			identity.WithRefreshTTL(time.Duration(cfg.JWTRefreshTTL)*time.Hour),
+			identity.WithInvitationTTL(time.Duration(cfg.InvitationTTLHours)*time.Hour),
+			identity.WithPasswordResetTTL(time.Duration(cfg.PasswordResetTTLMin)*time.Minute),
+		),
+		billing: bill,
 	}
 	// Build the platform service with the git image builder wired in, threading
 	// the server's build WaitGroup so in-flight builds drain on shutdown. The
@@ -268,6 +299,53 @@ func (s *Server) meterOnce(ctx context.Context) {
 		s.logger.Error("metering tick", "err", err)
 	}
 	s.logger.Info("metered usage", "orgs", n)
+}
+
+// StartTokenCleanup launches a background ticker that deletes expired and revoked
+// refresh-token rows so the table does not grow without bound. It returns
+// immediately and stops when ctx is cancelled. interval<=0 defaults to one hour.
+// When wg is non-nil it is incremented before the loop starts and Done()'d when it
+// exits, so the caller can Wait() for the loop to drain before closing the store.
+func (s *Server) StartTokenCleanup(ctx context.Context, interval time.Duration, wg *sync.WaitGroup) {
+	if interval <= 0 {
+		interval = time.Hour
+	}
+	if wg != nil {
+		wg.Add(1)
+	}
+	go func() {
+		if wg != nil {
+			defer wg.Done()
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.cleanupTokensOnce(ctx)
+			}
+		}
+	}()
+}
+
+// cleanupTokensOnce runs a single refresh-token GC pass, recovering from panics so
+// a single bad tick can never crash the process or kill the cleanup goroutine.
+func (s *Server) cleanupTokensOnce(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Error("token cleanup panic recovered", "panic", r)
+		}
+	}()
+	n, err := s.identity.CleanupExpiredRefreshTokens(ctx)
+	if err != nil {
+		s.logger.Error("token cleanup tick", "err", err)
+		return
+	}
+	if n > 0 {
+		s.logger.Info("cleaned up refresh tokens", "deleted", n)
+	}
 }
 
 // StartReconciler launches a background ticker that reconciles the stored status
@@ -506,6 +584,9 @@ func (s *Server) routes() chi.Router {
 		r.With(authLimiter).Post("/auth/signup", s.handleSignup)
 		r.With(authLimiter).Post("/auth/login", s.handleLogin)
 		r.With(authLimiter).Post("/auth/refresh", s.handleRefresh)
+		// Password reset (enumeration-safe forgot + single-use token reset).
+		r.With(authLimiter).Post("/auth/password/forgot", s.handleForgotPassword)
+		r.With(authLimiter).Post("/auth/password/reset", s.handleResetPassword)
 
 		// Public billing: the plan catalog, hourly price list, and the Stripe
 		// webhook (signature-verified, rate-limited per IP).

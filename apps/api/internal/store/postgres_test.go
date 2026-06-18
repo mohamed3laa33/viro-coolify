@@ -64,8 +64,10 @@ func TestCreateRefreshToken_Postgres(t *testing.T) {
 	defer mock.Close()
 
 	rt := &domain.RefreshToken{ID: "jti-1", UserID: "u1", CreatedAt: time.Now()}
+	// expires_at is NULL when the record carries no stored expiry (zero time): the
+	// store maps a zero time.Time to a typed (*time.Time)(nil).
 	mock.ExpectExec("INSERT INTO refresh_tokens").
-		WithArgs("jti-1", "u1", false, rt.CreatedAt).
+		WithArgs("jti-1", "u1", false, rt.CreatedAt, (*time.Time)(nil)).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 	if err := s.CreateRefreshToken(context.Background(), rt); err != nil {
@@ -81,10 +83,10 @@ func TestGetRefreshToken_Postgres(t *testing.T) {
 	defer mock.Close()
 
 	created := time.Now()
-	mock.ExpectQuery("SELECT id, user_id, revoked, created_at FROM refresh_tokens").
+	mock.ExpectQuery("SELECT id, user_id, revoked, created_at, expires_at FROM refresh_tokens").
 		WithArgs("jti-1").
-		WillReturnRows(pgxmock.NewRows([]string{"id", "user_id", "revoked", "created_at"}).
-			AddRow("jti-1", "u1", true, created))
+		WillReturnRows(pgxmock.NewRows([]string{"id", "user_id", "revoked", "created_at", "expires_at"}).
+			AddRow("jti-1", "u1", true, created, nil))
 
 	got, err := s.GetRefreshToken(context.Background(), "jti-1")
 	if err != nil {
@@ -102,7 +104,7 @@ func TestGetRefreshToken_NotFound_Postgres(t *testing.T) {
 	s, mock := newMockStore(t)
 	defer mock.Close()
 
-	mock.ExpectQuery("SELECT id, user_id, revoked, created_at FROM refresh_tokens").
+	mock.ExpectQuery("SELECT id, user_id, revoked, created_at, expires_at FROM refresh_tokens").
 		WithArgs("missing").
 		WillReturnError(pgx.ErrNoRows)
 

@@ -98,6 +98,36 @@ func (s *PostgresStore) Close() {
 
 var _ Store = (*PostgresStore)(nil)
 
+// WithTx runs fn inside a single Postgres transaction. It begins a tx, builds a
+// transaction-scoped *PostgresStore backed by the pgx.Tx (which satisfies the
+// pgxPool abstraction), runs fn against it, and commits on success or rolls back
+// on any error or panic. This gives Signup/CreateOrganization/AcceptInvitation
+// true all-or-nothing multi-write semantics.
+func (s *PostgresStore) WithTx(ctx context.Context, fn func(tx Store) error) (err error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return mapErr(err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			// Roll back on error or panic. Ignore the rollback error when the tx is
+			// already closed (e.g. after a successful commit path) — Rollback on a
+			// committed tx returns pgx.ErrTxClosed which we don't want to surface.
+			_ = tx.Rollback(ctx)
+		}
+	}()
+	txStore := newPostgresStoreWithPool(tx)
+	if err := fn(txStore); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return mapErr(err)
+	}
+	committed = true
+	return nil
+}
+
 // mapErr converts pgx/pg errors into the store's sentinel errors.
 func mapErr(err error) error {
 	if err == nil {
@@ -916,33 +946,37 @@ func (s *PostgresStore) GetProjectMembership(ctx context.Context, projectID, use
 
 func (s *PostgresStore) CreateInvitation(ctx context.Context, inv *domain.Invitation) error {
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO invitations (id, org_id, project_id, email, role, token, status, invited_by, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		inv.ID, inv.OrgID, inv.ProjectID, inv.Email, string(inv.Role), inv.Token, string(inv.Status), inv.InvitedBy, inv.CreatedAt,
+		`INSERT INTO invitations (id, org_id, project_id, email, role, token, status, invited_by, created_at, expires_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		inv.ID, inv.OrgID, inv.ProjectID, inv.Email, string(inv.Role), inv.Token, string(inv.Status), inv.InvitedBy, inv.CreatedAt, nullTime(inv.ExpiresAt),
 	)
 	return mapErr(err)
 }
 
 func (s *PostgresStore) GetInvitationByToken(ctx context.Context, token string) (*domain.Invitation, error) {
 	return s.scanInvitation(s.pool.QueryRow(ctx,
-		`SELECT id, org_id, project_id, email, role, token, status, invited_by, created_at
+		`SELECT id, org_id, project_id, email, role, token, status, invited_by, created_at, expires_at
 		 FROM invitations WHERE token = $1`, token))
 }
 
 func (s *PostgresStore) scanInvitation(row pgx.Row) (*domain.Invitation, error) {
 	var inv domain.Invitation
 	var role, status string
-	if err := row.Scan(&inv.ID, &inv.OrgID, &inv.ProjectID, &inv.Email, &role, &inv.Token, &status, &inv.InvitedBy, &inv.CreatedAt); err != nil {
+	var expires *time.Time
+	if err := row.Scan(&inv.ID, &inv.OrgID, &inv.ProjectID, &inv.Email, &role, &inv.Token, &status, &inv.InvitedBy, &inv.CreatedAt, &expires); err != nil {
 		return nil, mapErr(err)
 	}
 	inv.Role = domain.Role(role)
 	inv.Status = domain.InvitationStatus(status)
+	if expires != nil {
+		inv.ExpiresAt = *expires
+	}
 	return &inv, nil
 }
 
 func (s *PostgresStore) ListInvitationsByOrg(ctx context.Context, orgID string) ([]domain.Invitation, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, org_id, project_id, email, role, token, status, invited_by, created_at
+		`SELECT id, org_id, project_id, email, role, token, status, invited_by, created_at, expires_at
 		 FROM invitations WHERE org_id = $1`, orgID)
 	if err != nil {
 		return nil, mapErr(err)
@@ -950,14 +984,11 @@ func (s *PostgresStore) ListInvitationsByOrg(ctx context.Context, orgID string) 
 	defer rows.Close()
 	out := make([]domain.Invitation, 0)
 	for rows.Next() {
-		var inv domain.Invitation
-		var role, status string
-		if err := rows.Scan(&inv.ID, &inv.OrgID, &inv.ProjectID, &inv.Email, &role, &inv.Token, &status, &inv.InvitedBy, &inv.CreatedAt); err != nil {
-			return nil, mapErr(err)
+		inv, err := s.scanInvitation(rows)
+		if err != nil {
+			return nil, err
 		}
-		inv.Role = domain.Role(role)
-		inv.Status = domain.InvitationStatus(status)
-		out = append(out, inv)
+		out = append(out, *inv)
 	}
 	return out, mapErr(rows.Err())
 }
@@ -965,8 +996,8 @@ func (s *PostgresStore) ListInvitationsByOrg(ctx context.Context, orgID string) 
 func (s *PostgresStore) UpdateInvitation(ctx context.Context, inv *domain.Invitation) error {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE invitations SET org_id = $2, project_id = $3, email = $4, role = $5, token = $6,
-		 status = $7, invited_by = $8, created_at = $9 WHERE id = $1`,
-		inv.ID, inv.OrgID, inv.ProjectID, inv.Email, string(inv.Role), inv.Token, string(inv.Status), inv.InvitedBy, inv.CreatedAt,
+		 status = $7, invited_by = $8, created_at = $9, expires_at = $10 WHERE id = $1`,
+		inv.ID, inv.OrgID, inv.ProjectID, inv.Email, string(inv.Role), inv.Token, string(inv.Status), inv.InvitedBy, inv.CreatedAt, nullTime(inv.ExpiresAt),
 	)
 	if err != nil {
 		return mapErr(err)
@@ -997,19 +1028,23 @@ func (s *PostgresStore) RevokeInvitation(ctx context.Context, orgID, inviteID st
 
 func (s *PostgresStore) CreateRefreshToken(ctx context.Context, rt *domain.RefreshToken) error {
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO refresh_tokens (id, user_id, revoked, created_at) VALUES ($1, $2, $3, $4)`,
-		rt.ID, rt.UserID, rt.Revoked, rt.CreatedAt,
+		`INSERT INTO refresh_tokens (id, user_id, revoked, created_at, expires_at) VALUES ($1, $2, $3, $4, $5)`,
+		rt.ID, rt.UserID, rt.Revoked, rt.CreatedAt, nullTime(rt.ExpiresAt),
 	)
 	return mapErr(err)
 }
 
 func (s *PostgresStore) GetRefreshToken(ctx context.Context, id string) (*domain.RefreshToken, error) {
 	var rt domain.RefreshToken
+	var expires *time.Time
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, user_id, revoked, created_at FROM refresh_tokens WHERE id = $1`, id,
-	).Scan(&rt.ID, &rt.UserID, &rt.Revoked, &rt.CreatedAt)
+		`SELECT id, user_id, revoked, created_at, expires_at FROM refresh_tokens WHERE id = $1`, id,
+	).Scan(&rt.ID, &rt.UserID, &rt.Revoked, &rt.CreatedAt, &expires)
 	if err != nil {
 		return nil, mapErr(err)
+	}
+	if expires != nil {
+		rt.ExpiresAt = *expires
 	}
 	return &rt, nil
 }
@@ -1025,10 +1060,123 @@ func (s *PostgresStore) RevokeRefreshToken(ctx context.Context, id string) error
 	return nil
 }
 
+// RevokeRefreshTokenIfActive performs the conditional UPDATE that makes rotation
+// race-free: it revokes the row only WHERE revoked = false. RowsAffected == 1
+// means this call won the rotation; 0 means the row was already revoked (a lost
+// race or a replay). It distinguishes "already revoked" from "missing" with a
+// follow-up existence check so the caller can treat a replay (exists+revoked)
+// differently from an unknown jti.
+func (s *PostgresStore) RevokeRefreshTokenIfActive(ctx context.Context, id string) (bool, error) {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE refresh_tokens SET revoked = true WHERE id = $1 AND revoked = false`, id)
+	if err != nil {
+		return false, mapErr(err)
+	}
+	if tag.RowsAffected() == 1 {
+		return true, nil
+	}
+	// 0 rows: either the row does not exist (ErrNotFound) or it was already revoked.
+	var exists bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM refresh_tokens WHERE id = $1)`, id,
+	).Scan(&exists); err != nil {
+		return false, mapErr(err)
+	}
+	if !exists {
+		return false, ErrNotFound
+	}
+	return false, nil // exists but already revoked
+}
+
 func (s *PostgresStore) RevokeAllUserRefreshTokens(ctx context.Context, userID string) error {
 	_, err := s.pool.Exec(ctx,
 		`UPDATE refresh_tokens SET revoked = true WHERE user_id = $1 AND revoked = false`, userID)
 	return mapErr(err)
+}
+
+// DeleteExpiredRefreshTokens removes ONLY truly-expired rows (expires_at < before),
+// returning the number deleted. It deliberately does NOT purge revoked-but-unexpired
+// rows: a revoked row is the replay-detection TOMBSTONE a rotated token needs. If a
+// stolen token is replayed after the next cleanup tick, Refresh must still find the
+// revoked record (rec.Revoked == true) so it can kill the whole family. A revoked
+// tombstone therefore survives until its underlying JWT can no longer Verify
+// (expires_at passes), at which point a replay can no longer reach this code anyway.
+func (s *PostgresStore) DeleteExpiredRefreshTokens(ctx context.Context, before time.Time) (int64, error) {
+	tag, err := s.pool.Exec(ctx,
+		`DELETE FROM refresh_tokens WHERE expires_at IS NOT NULL AND expires_at < $1`, before)
+	if err != nil {
+		return 0, mapErr(err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// ---- Password reset tokens (single-use, time-limited, hashed at rest) ----
+
+func (s *PostgresStore) CreatePasswordResetToken(ctx context.Context, t *domain.PasswordResetToken) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at, used_at, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		t.ID, t.UserID, t.TokenHash, t.ExpiresAt, nullTime(t.UsedAt), t.CreatedAt,
+	)
+	return mapErr(err)
+}
+
+// InvalidateUserPasswordResetTokens marks all of a user's currently-unused reset
+// tokens used, so a newly issued token is the only live one for that user.
+func (s *PostgresStore) InvalidateUserPasswordResetTokens(ctx context.Context, userID string, usedAt time.Time) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE password_reset_tokens SET used_at = $2 WHERE user_id = $1 AND used_at IS NULL`, userID, usedAt)
+	return mapErr(err)
+}
+
+func (s *PostgresStore) GetPasswordResetTokenByHash(ctx context.Context, tokenHash string) (*domain.PasswordResetToken, error) {
+	var t domain.PasswordResetToken
+	var usedAt *time.Time
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, user_id, token_hash, expires_at, used_at, created_at
+		 FROM password_reset_tokens WHERE token_hash = $1`, tokenHash,
+	).Scan(&t.ID, &t.UserID, &t.TokenHash, &t.ExpiresAt, &usedAt, &t.CreatedAt)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	if usedAt != nil {
+		t.UsedAt = *usedAt
+	}
+	return &t, nil
+}
+
+// ConsumePasswordResetToken atomically marks the token used WHERE used_at IS NULL.
+// RowsAffected == 1 means this call consumed it; 0 means it was already used (or
+// missing — distinguished with an existence check).
+func (s *PostgresStore) ConsumePasswordResetToken(ctx context.Context, id string, usedAt time.Time) (bool, error) {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE password_reset_tokens SET used_at = $2 WHERE id = $1 AND used_at IS NULL`, id, usedAt)
+	if err != nil {
+		return false, mapErr(err)
+	}
+	if tag.RowsAffected() == 1 {
+		return true, nil
+	}
+	var exists bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM password_reset_tokens WHERE id = $1)`, id,
+	).Scan(&exists); err != nil {
+		return false, mapErr(err)
+	}
+	if !exists {
+		return false, ErrNotFound
+	}
+	return false, nil // exists but already used
+}
+
+// nullTime maps a zero time.Time to NULL so optional timestamp columns store NULL
+// rather than the Go zero value (0001-01-01), which would otherwise read back as a
+// real, far-past instant.
+func nullTime(t time.Time) *time.Time {
+	if t.IsZero() {
+		return nil
+	}
+	return &t
 }
 
 // ---- Billing: subscriptions & usage ----

@@ -163,12 +163,26 @@ type authResponse struct {
 	RefreshToken string   `json:"refreshToken"`
 }
 
-func toAuthResponse(res *identity.AuthResult) authResponse {
-	return authResponse{
-		User:         toUserView(res.User),
-		AccessToken:  res.Access,
-		RefreshToken: res.Refresh,
+// toAuthResponse builds the auth JSON body. When the request is from a BROWSER
+// (an Origin header is present), the access/refresh tokens are OMITTED from the
+// body — the session travels in the HttpOnly cookies, so exposing the raw tokens
+// in a body an XSS could read would defeat HttpOnly. Non-browser callers (the CLI,
+// which sends no Origin) still receive the tokens in the body so header-based auth
+// keeps working.
+func toAuthResponse(r *http.Request, res *identity.AuthResult) authResponse {
+	resp := authResponse{User: toUserView(res.User)}
+	if !isBrowserRequest(r) {
+		resp.AccessToken = res.Access
+		resp.RefreshToken = res.Refresh
 	}
+	return resp
+}
+
+// isBrowserRequest reports whether the request originated from a browser, detected
+// by the presence of an Origin header (browsers attach it to fetch/XHR; the CLI
+// and server-to-server clients do not).
+func isBrowserRequest(r *http.Request) bool {
+	return strings.TrimSpace(r.Header.Get("Origin")) != ""
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
@@ -215,7 +229,7 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setAuthCookies(w, res.Access, res.Refresh, s.cfg)
-	writeJSON(w, http.StatusCreated, toAuthResponse(res))
+	writeJSON(w, http.StatusCreated, toAuthResponse(r, res))
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -235,7 +249,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	s.auditAs(r.Context(), res.User.ID, res.User.Email, "", "auth.login", "user", res.User.ID, "")
 	setAuthCookies(w, res.Access, res.Refresh, s.cfg)
-	writeJSON(w, http.StatusOK, toAuthResponse(res))
+	writeJSON(w, http.StatusOK, toAuthResponse(r, res))
 }
 
 // normalizeAuditEmail lowercases/trims an attempted email for an audit record.
@@ -258,7 +272,49 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	// Rotation issued a fresh pair; set the new cookies (old refresh is revoked).
 	setAuthCookies(w, res.Access, res.Refresh, s.cfg)
-	writeJSON(w, http.StatusOK, toAuthResponse(res))
+	writeJSON(w, http.StatusOK, toAuthResponse(r, res))
+}
+
+type forgotPasswordRequest struct {
+	Email string `json:"email"`
+}
+
+// handleForgotPassword starts the password-reset flow. It ALWAYS responds 204 (no
+// content) regardless of whether the email exists, so it cannot be used to
+// enumerate registered accounts. Real work (token + email) happens only for a
+// known user, inside the service.
+func (s *Server) handleForgotPassword(w http.ResponseWriter, r *http.Request) {
+	var req forgotPasswordRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if err := s.identity.ForgotPassword(r.Context(), req.Email); err != nil {
+		// A genuine server error (store failure) — surface it; the enumeration-safe
+		// "user not found" path returns nil from the service.
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type resetPasswordRequest struct {
+	Token    string `json:"token"`
+	Password string `json:"password"`
+}
+
+// handleResetPassword completes the reset flow: it validates a single-use,
+// unexpired token, sets the new password, consumes the token and revokes all the
+// user's sessions. An invalid/expired/used token is a 401.
+func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
+	var req resetPasswordRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if err := s.identity.ResetPassword(r.Context(), req.Token, req.Password); err != nil {
+		writeAuthError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleLogout revokes the caller's current refresh token (read from the

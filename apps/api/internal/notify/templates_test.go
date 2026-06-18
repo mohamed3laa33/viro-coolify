@@ -158,3 +158,30 @@ func TestWelcomeEmailEscapesHTML(t *testing.T) {
 		t.Fatalf("expected escaped name in HTML body:\n%s", msg.HTMLBody)
 	}
 }
+
+func TestPasswordResetEmail(t *testing.T) {
+	url := "https://vortex.example.com/reset-password?token=abc123"
+	msg := PasswordResetEmail("Frank", url)
+	if msg.Subject != "Reset your Vortex password" {
+		t.Fatalf("Subject = %q", msg.Subject)
+	}
+	if msg.HTMLBody == "" || msg.TextBody == "" {
+		t.Fatalf("expected both bodies")
+	}
+	for _, body := range []string{msg.HTMLBody, msg.TextBody} {
+		if !strings.Contains(body, url) {
+			t.Fatalf("reset URL missing from body:\n%s", body)
+		}
+		if !strings.Contains(body, "Frank") {
+			t.Fatalf("name missing from body:\n%s", body)
+		}
+	}
+}
+
+func TestPasswordResetEmailEscapesURL(t *testing.T) {
+	// The HTML body must auto-escape interpolated values (html/template).
+	msg := PasswordResetEmail("Grace", `https://x/?a=1&b=2`)
+	if !strings.Contains(msg.HTMLBody, "a=1&amp;b=2") {
+		t.Fatalf("expected escaped URL in HTML body:\n%s", msg.HTMLBody)
+	}
+}
