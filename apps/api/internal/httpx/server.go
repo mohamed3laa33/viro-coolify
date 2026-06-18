@@ -459,7 +459,12 @@ func mapPhase(st kube.Status) (string, bool) {
 func (s *Server) routes() chi.Router {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
+	// RealIP normalizes RemoteAddr from proxy headers so the per-IP rate limiter
+	// keys on the real client. It is only safe behind a trusted proxy that
+	// overwrites client-supplied X-Forwarded-For/X-Real-IP; Vortex always runs
+	// behind the platform's single shared ingress/LB, which does exactly that, so
+	// the spoofing concern in SA1019 does not apply here.
+	r.Use(middleware.RealIP) //nolint:staticcheck // SA1019: safe behind trusted ingress (see comment)
 	r.Use(requestLogger(s.logger))
 	r.Use(middleware.Recoverer)
 	r.Use(corsMiddleware(s.cfg.CORSAllowedOrigins))

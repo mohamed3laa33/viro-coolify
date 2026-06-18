@@ -5,31 +5,100 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5/middleware"
 )
 
-// corsMiddleware applies permissive-but-scoped CORS for the configured origins.
+// normalizeOrigin canonicalizes an origin for comparison: an origin has no path,
+// and its scheme+host are case-insensitive, so we lowercase and strip any
+// trailing slash. This means an allowlist entry like
+// "https://App.Vortex.v60ai.com/" still matches the browser's
+// "https://app.vortex.v60ai.com" — a common operator typo that would otherwise
+// silently break CORS.
+func normalizeOrigin(o string) string {
+	return strings.ToLower(strings.TrimRight(strings.TrimSpace(o), "/"))
+}
+
+// normalizeOrigins normalizes every entry in an allowlist (preserving "*").
+func normalizeOrigins(allowed []string) []string {
+	out := make([]string, len(allowed))
+	for i, a := range allowed {
+		if a == "*" {
+			out[i] = "*"
+			continue
+		}
+		out[i] = normalizeOrigin(a)
+	}
+	return out
+}
+
+// corsAllowMethods lists every method the API actually serves (the router uses
+// GET/POST/PATCH/PUT/DELETE), plus OPTIONS for preflight.
+const corsAllowMethods = "GET, POST, PATCH, PUT, DELETE, OPTIONS"
+
+// corsBaseAllowHeaders are the request headers the browser client is always
+// permitted to send. Any additional headers the browser requests via
+// Access-Control-Request-Headers are echoed back on top of these.
+const corsBaseAllowHeaders = "Content-Type, Authorization, X-Request-Id"
+
+// corsMaxAge is how long (seconds) a browser may cache a preflight result.
+const corsMaxAge = "600"
+
+// corsMiddleware applies scoped, credential-safe CORS for the configured origins.
+//
+// Because the web app authenticates with HttpOnly cookies and runs on a
+// different subdomain than the API in production, every browser call is a
+// cross-origin credentialed request. For those to work the response MUST:
+//   - echo the SPECIFIC request Origin in Access-Control-Allow-Origin (never "*"
+//     together with credentials — browsers reject that combination), and only
+//     when that Origin is in the allowlist; a non-allowlisted Origin gets no ACAO;
+//   - send Access-Control-Allow-Credentials: true;
+//   - send Vary: Origin so a shared cache never serves one origin's ACAO to
+//     another origin.
+//
+// A literal "*" in the allowlist is treated as "allow any origin" but, because it
+// is incompatible with credentials, it still reflects the specific Origin (not
+// "*") and omits Allow-Credentials — useful for token-only/public deployments
+// without silently breaking cookie auth.
 func corsMiddleware(allowed []string) func(http.Handler) http.Handler {
+	wildcard := slices.Contains(allowed, "*")
+	norm := normalizeOrigins(allowed)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			origin := r.Header.Get("Origin")
-			wildcard := slices.Contains(allowed, "*")
-			if origin != "" && (wildcard || slices.Contains(allowed, origin)) {
-				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-				w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
-				if wildcard {
-					// A wildcard cannot be combined with credentials per the CORS spec,
-					// and reflecting an arbitrary origin with credentials is unsafe.
-					w.Header().Set("Access-Control-Allow-Origin", "*")
-				} else {
-					w.Header().Set("Access-Control-Allow-Origin", origin)
-					w.Header().Set("Vary", "Origin")
+			// The response always varies by Origin (the ACAO we emit depends on
+			// it), so set Vary unconditionally — even for disallowed/absent
+			// origins — to keep caches from cross-serving headers. Add (not Set)
+			// preserves any Vary a downstream handler may add.
+			w.Header().Add("Vary", "Origin")
+
+			allow := origin != "" && (wildcard || slices.Contains(norm, normalizeOrigin(origin)))
+			if allow {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				if !wildcard {
+					// Credentials are only safe with a specific, allowlisted
+					// origin — never with the wildcard mode.
 					w.Header().Set("Access-Control-Allow-Credentials", "true")
 				}
 			}
+
 			if r.Method == http.MethodOptions {
+				// Preflight: advertise the supported methods/headers. Only emit
+				// these for an allowed origin; a disallowed origin still gets a
+				// 204 but no CORS grant, so the browser blocks the real request.
+				if allow {
+					w.Header().Set("Access-Control-Allow-Methods", corsAllowMethods)
+					w.Header().Set("Access-Control-Max-Age", corsMaxAge)
+					allowHeaders := corsBaseAllowHeaders
+					if req := r.Header.Get("Access-Control-Request-Headers"); req != "" {
+						// Echo whatever custom headers the client intends to send,
+						// in addition to the always-allowed base set.
+						allowHeaders = corsBaseAllowHeaders + ", " + req
+					}
+					w.Header().Set("Access-Control-Allow-Headers", allowHeaders)
+				}
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}
@@ -49,6 +118,7 @@ func corsMiddleware(allowed []string) func(http.Handler) http.Handler {
 // CSRF. A wildcard "*" in the allowlist disables the check.
 func csrfOriginGuard(allowed []string) func(http.Handler) http.Handler {
 	wildcard := slices.Contains(allowed, "*")
+	norm := normalizeOrigins(allowed)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if wildcard || !isStateChanging(r.Method) {
@@ -56,7 +126,7 @@ func csrfOriginGuard(allowed []string) func(http.Handler) http.Handler {
 				return
 			}
 			origin := requestOrigin(r)
-			if origin != "" && !slices.Contains(allowed, origin) {
+			if origin != "" && !slices.Contains(norm, normalizeOrigin(origin)) {
 				writeError(w, http.StatusForbidden, "cross-origin request blocked")
 				return
 			}

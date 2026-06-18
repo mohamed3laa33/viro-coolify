@@ -2,10 +2,22 @@
 //
 // Reads the base URL from NEXT_PUBLIC_VORTEX_API_URL (falling back to the legacy
 // NEXT_PUBLIC_VIRO_API_URL) and attaches `Authorization: Bearer <token>` when a
-// token is provided. In development the URL falls back to http://localhost:8080;
-// in production an unset URL is a hard error (no silent localhost default).
+// token is provided. In development the URL falls back to http://localhost:8080.
+//
+// IMPORTANT: resolving the base URL must NEVER throw at module load. A missing
+// NEXT_PUBLIC_VORTEX_API_URL in production used to throw here, which crashed the
+// entire client bundle on import (every page that imported this module
+// white-screened before any error boundary could mount). Instead we degrade
+// gracefully: fall back to a same-origin relative base ("") so requests resolve
+// against the current host, and surface the misconfiguration as a handled,
+// per-request error (see `request`) that route error boundaries can render.
 //
 // Resource endpoints are org-scoped: /v1/orgs/{orgId}/...
+
+// Sentinel meaning "no API base URL was configured in production". `buildUrl`
+// treats it as a same-origin relative base so module load never throws, while
+// `request` converts an actual call into a clear, catchable ApiError.
+const UNCONFIGURED = "";
 
 function resolveApiBaseUrl(): string {
   const configured =
@@ -13,15 +25,17 @@ function resolveApiBaseUrl(): string {
     process.env.NEXT_PUBLIC_VIRO_API_URL;
   if (configured) return configured;
   if (process.env.NODE_ENV === "production") {
-    throw new Error(
-      "NEXT_PUBLIC_VORTEX_API_URL is not set. The API base URL must be " +
-        "configured explicitly in production; there is no localhost fallback.",
-    );
+    // Do not throw at import time — that white-screens the whole app. Degrade
+    // to a same-origin relative base; a real request surfaces a handled error.
+    return UNCONFIGURED;
   }
   return "http://localhost:8080";
 }
 
 export const API_BASE_URL = resolveApiBaseUrl();
+
+/** True when no API base URL was configured (production misconfiguration). */
+export const API_BASE_URL_CONFIGURED = API_BASE_URL !== UNCONFIGURED;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -451,6 +465,7 @@ interface RequestOptions {
 export function buildUrl(path: string): string {
   const base = API_BASE_URL.replace(/\/+$/, "");
   const suffix = path.startsWith("/") ? path : `/${path}`;
+  // When unconfigured, base is "" — yielding a same-origin relative URL.
   return `${base}${suffix}`;
 }
 
@@ -459,6 +474,17 @@ async function request<T>(
   options: RequestOptions = {},
 ): Promise<T> {
   const { method = "GET", body, token, signal, onUnauthorized } = options;
+
+  // Fail loud-but-handled if the API base URL was never configured. Throwing an
+  // ApiError here (rather than at module load) keeps the app shell alive: the
+  // call site's catch / route error boundary renders a real fallback instead of
+  // the whole bundle white-screening on import.
+  if (!API_BASE_URL_CONFIGURED) {
+    throw new ApiError(
+      "The API base URL is not configured. Set NEXT_PUBLIC_VORTEX_API_URL.",
+      0,
+    );
+  }
 
   async function exec(authToken: string | null | undefined): Promise<Response> {
     const headers: Record<string, string> = {
@@ -506,7 +532,18 @@ async function request<T>(
     return undefined as T;
   }
 
-  return (await res.json()) as T;
+  // A 2xx response may have an empty or non-JSON body (e.g. a 200/201 with no
+  // content). Parse defensively so a missing/non-JSON body resolves to undefined
+  // instead of throwing an uncaught SyntaxError out of every API call.
+  const text = await res.text();
+  if (text === "") {
+    return undefined as T;
+  }
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new ApiError("server returned a malformed response", res.status);
+  }
 }
 
 // ---------------------------------------------------------------------------

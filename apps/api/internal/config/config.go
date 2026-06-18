@@ -61,6 +61,19 @@ type Config struct {
 	StripeWebhookSecret string
 	BillingEnabled      bool
 
+	// CORSAllowedOrigins is the exact set of browser Origins permitted to make
+	// credentialed (cookie) cross-origin calls. It is driven by VORTEX_CORS_ORIGINS
+	// (comma-separated). In production the web app is served from a different
+	// subdomain than the API (app.<...>.vortex.v60ai.com vs api.vortex.v60ai.com),
+	// so the deploying operator MUST set VORTEX_CORS_ORIGINS to the exact web
+	// origin(s), e.g.:
+	//
+	//	VORTEX_CORS_ORIGINS=https://app.vortex.v60ai.com
+	//
+	// Each entry is matched exactly (scheme + host + optional port) and echoed back
+	// as Access-Control-Allow-Origin; wildcard host patterns are NOT expanded, so
+	// list every concrete origin. The default below covers local dev plus the
+	// canonical production web origin.
 	CORSAllowedOrigins []string
 
 	// Super-admin: emails (normalized) that are granted platform-wide admin.
@@ -100,7 +113,7 @@ func Load() (*Config, error) {
 		StripeSecretKey:             getenv("STRIPE_SECRET_KEY", ""),
 		StripeWebhookSecret:         getenv("STRIPE_WEBHOOK_SECRET", ""),
 		BillingEnabled:              getenvBool("BILLING_ENABLED", false),
-		CORSAllowedOrigins:          splitAndTrim(getenv("CORS_ORIGINS", "http://localhost:3000")),
+		CORSAllowedOrigins:          splitAndTrim(getenv("CORS_ORIGINS", "http://localhost:3000,https://app.vortex.v60ai.com")),
 		AdminEmails:                 splitAndTrim(strings.ToLower(getenv("ADMIN_EMAILS", ""))),
 	}
 	if cfg.IsProduction() && (cfg.JWTSecret == "" || cfg.JWTSecret == defaultDevJWTSecret) {

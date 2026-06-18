@@ -178,6 +178,13 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return false
 	}
+	// Reject a body that contains more than a single JSON value (e.g. trailing
+	// garbage or a second concatenated object): Decode reads only the first
+	// value, so without this check "{} junk" would be silently accepted.
+	if dec.More() {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return false
+	}
 	return true
 }
 
