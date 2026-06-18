@@ -42,7 +42,9 @@ func clearAuthCookies(w http.ResponseWriter, cfg *config.Config) {
 }
 
 func authCookie(name, value string, maxAge int, cfg *config.Config) *http.Cookie {
-	c := &http.Cookie{
+	// Secure and Domain are set below for production (cfg.IsProduction()). In dev we
+	// serve http://localhost, where a Secure cookie would be dropped by the browser.
+	c := &http.Cookie{ // nosemgrep: go.lang.security.audit.net.cookie-missing-secure.cookie-missing-secure
 		Name:     name,
 		Value:    value,
 		Path:     "/",

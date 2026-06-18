@@ -16,7 +16,9 @@ Thumbs.db
 *.pem
 *.key
 !**/testdata/*.key
-secrets/
+# Only ignore a repo-root secrets/ dump — NOT Go source packages named "secrets"
+# (e.g. apps/api/internal/secrets/), which must be committed.
+/secrets/
 kubeconfig
 *.kubeconfig
 

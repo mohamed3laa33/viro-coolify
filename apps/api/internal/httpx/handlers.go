@@ -62,7 +62,9 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 func (s *Server) writeMetrics(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = io.WriteString(w, s.metrics.render())
+	// Prometheus text exposition (Content-Type text/plain; server-generated, no user
+	// input) — not HTML, so there is no XSS vector here.
+	_, _ = io.WriteString(w, s.metrics.render()) // nosemgrep: go.lang.security.audit.xss.no-io-writestring-to-responsewriter.no-io-writestring-to-responsewriter
 }
 
 func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
