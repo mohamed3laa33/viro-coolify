@@ -158,15 +158,23 @@ func (s *MemoryStore) seed() {
 	}
 }
 
-// defaultPricing seeds the billable component CATALOG only — which resources are
-// metered (cpu/memory/storage) and their units. Prices are seeded at 0 on
-// purpose: the platform never invents prices. The admin sets the real
-// PricePerHour via the super-admin pricing API; until then a component is free.
+// defaultPricing seeds the billable component CATALOG — which resources are
+// metered (cpu/memory/storage), their units, and a sensible NON-ZERO starting
+// hourly price so a fresh deploy bills something instead of silently running for
+// free (the "setup cliff"). These are conservative defaults, NOT a hardcoded
+// business policy: they live ONLY in the seed/migration and are fully overridable
+// by the super-admin via the pricing API (PATCH /v1/admin/pricing/<key>) — change
+// them there, never in handlers/UI (invariant #1). Setting a component's price to
+// 0 via the admin API makes it free again.
+//
+// Starting rates (USD): $0.025/vCPU-hour, $0.005/GB-hour, $0.0002/GB-hour storage.
+// These are deliberate ballpark values an operator is expected to tune to their
+// infra cost; they exist so metering is never accidentally a no-op out of the box.
 func defaultPricing() []domain.PricingComponent {
 	return []domain.PricingComponent{
-		{Key: "cpu", Name: "vCPU", Unit: "vCPU-hour", PricePerHour: 0, Currency: "usd", Active: true, SortOrder: 1},
-		{Key: "memory", Name: "Memory", Unit: "GB-hour", PricePerHour: 0, Currency: "usd", Active: true, SortOrder: 2},
-		{Key: "storage", Name: "Storage", Unit: "GB-hour", PricePerHour: 0, Currency: "usd", Active: true, SortOrder: 3},
+		{Key: "cpu", Name: "vCPU", Unit: "vCPU-hour", PricePerHour: 0.025, Currency: "usd", Active: true, SortOrder: 1},
+		{Key: "memory", Name: "Memory", Unit: "GB-hour", PricePerHour: 0.005, Currency: "usd", Active: true, SortOrder: 2},
+		{Key: "storage", Name: "Storage", Unit: "GB-hour", PricePerHour: 0.0002, Currency: "usd", Active: true, SortOrder: 3},
 	}
 }
 

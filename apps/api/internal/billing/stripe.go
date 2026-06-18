@@ -156,9 +156,18 @@ func (s *StripeProvider) CreateSubscription(ctx context.Context, orgID, customer
 }
 
 // ReportUsage records metered usage against the subscription's metered price item.
-// It posts a usage record to Stripe so the metered compute-hours roll into the
-// customer's invoice. quantity is the whole compute-hours to add. This satisfies
-// billing.UsageReporter; the MockProvider does not implement it (no-op).
+// It posts a usage record to Stripe so the metered compute COST rolls into the
+// customer's invoice.
+//
+// UNIT: quantity is the whole CENTS of size-aware metered compute cost to add (the
+// same unit the caller, Service.ReportUsage, computes and the unit stored end to
+// end — see MeterMetric / usageSoFarCents). It is NOT compute-hours: the platform
+// meters cost, not raw hours, so a 64-vCPU workload accrues 64x the cents of a
+// 1-vCPU workload for the same wall-clock time. The Stripe metered price item this
+// reports against MUST therefore be configured at 1 unit = 1 cent (i.e. a
+// unit_amount of $0.01 / 1 cent per unit), so the reported quantity equals the
+// invoiced amount in cents. This satisfies billing.UsageReporter; the MockProvider
+// does not implement it (no-op).
 func (s *StripeProvider) ReportUsage(ctx context.Context, subscriptionItemID string, quantity int64, at time.Time) error {
 	if subscriptionItemID == "" || quantity <= 0 {
 		return nil

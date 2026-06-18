@@ -1,6 +1,14 @@
 "use client";
 
-import { use, useEffect, useMemo, useState, type FormEvent } from "react";
+import {
+  Suspense,
+  use,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 import Link from "next/link";
 import {
   ArrowLeft,
@@ -26,11 +34,15 @@ import {
   History,
   Hammer,
   Lock,
+  ExternalLink,
+  CheckCircle2,
+  AlertTriangle,
 } from "lucide-react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 import {
   api,
+  statusVariant,
   streamAppLogs,
   type App,
   type AppDetail,
@@ -55,6 +67,7 @@ import { Badge } from "@/components/ui/badge";
 import { Notice } from "@/components/ui/notice";
 import { Tabs } from "@/components/ui/tabs";
 import { StatusDot } from "@/components/ui/status-dot";
+import { MetricsTimeseries } from "@/components/metrics-timeseries";
 
 const TABS = [
   "Overview",
@@ -68,7 +81,72 @@ const TABS = [
 ] as const;
 type Tab = (typeof TABS)[number];
 
+// Map a `?tab=` query value (case-insensitive) to a real tab, so deep-links like
+// `?tab=metrics` open the right panel. Unknown values fall back to Overview.
+function tabFromParam(raw: string | null): Tab {
+  if (!raw) return "Overview";
+  const found = TABS.find((t) => t.toLowerCase() === raw.toLowerCase());
+  return found ?? "Overview";
+}
+
 type ActionKind = "deploy" | "stop" | "restart";
+
+// Terminal statuses: once a deploy/restart lands on one of these the rollout
+// watch stops. Everything else (deploying/restarting/created/empty) is still
+// "in flight" and keeps the watcher polling.
+const SETTLED_STATUSES = new Set(["running", "stopped", "error"]);
+
+// While a deploy/restart is being watched we poll the app detail this often so
+// the status, active release, and host reflect the live rollout rather than a
+// single post-action snapshot.
+const ROLLOUT_POLL_MS = 2_500;
+
+// Safety cap so the rollout watcher can't poll forever if a deploy never
+// settles (e.g. an image that crash-loops). After this it stops polling and
+// leaves whatever the last real status was — never a fake "running".
+const ROLLOUT_WATCH_TIMEOUT_MS = 5 * 60_000;
+
+// Optional rollout/health fields the API *may* attach to an app once Wave 0's
+// working deploy path lands. They are read defensively (see `readRollout`) and
+// never fabricated — if the backend doesn't send them, no replica/health count
+// is shown (honesty over fake-success).
+interface RolloutInfo {
+  readyReplicas?: number;
+  desiredReplicas?: number;
+  healthy?: boolean;
+  health?: string;
+}
+
+// Safely read possible rollout/health fields off an app detail without assuming
+// they exist on the current `AppDetail` type. Returns only the values the
+// backend actually provided.
+function readRollout(app: AppDetail | null): RolloutInfo {
+  if (!app) return {};
+  const raw = app as unknown as Record<string, unknown>;
+  const num = (v: unknown): number | undefined =>
+    typeof v === "number" && Number.isFinite(v) ? v : undefined;
+  const str = (v: unknown): string | undefined =>
+    typeof v === "string" && v.trim() !== "" ? v : undefined;
+  return {
+    readyReplicas: num(raw.readyReplicas) ?? num(raw.replicasReady),
+    desiredReplicas:
+      num(raw.desiredReplicas) ?? num(raw.replicas) ?? num(raw.replicaCount),
+    healthy: typeof raw.healthy === "boolean" ? raw.healthy : undefined,
+    health: str(raw.health) ?? str(raw.healthStatus),
+  };
+}
+
+// Resolve the public HTTPS URL for an app. Prefers the backend-reported host
+// (the real routed hostname); falls back to the deterministic platform FQDN
+// `<app>.<project>.<org>.vortex.v60ai.com` so the URL is shown even before the
+// backend echoes a host back.
+function appHttpsUrl(app: AppDetail, orgSlug: string): string {
+  const host = app.host && app.host.trim() !== "" ? app.host.trim() : null;
+  const fqdn = host ?? buildAppFqdn(app.name, orgSlug);
+  return fqdn.startsWith("http://") || fqdn.startsWith("https://")
+    ? fqdn
+    : `https://${fqdn}`;
+}
 
 // Sample log lines shown only in demo mode (when the API is unreachable). In
 // production the Logs tab fetches the real tail from the API.
@@ -94,8 +172,22 @@ export default function AppDetailPage({
   params: Promise<{ appId: string }>;
 }) {
   const { appId } = use(params);
+  // useSearchParams() requires a Suspense boundary in Next.js 15 (otherwise the
+  // whole route opts out of static rendering). The page param promise is
+  // resolved above and threaded in so the inner content can read it directly.
+  return (
+    <Suspense
+      fallback={<p className="text-sm text-muted-foreground">Loading app…</p>}
+    >
+      <AppDetailContent appId={appId} />
+    </Suspense>
+  );
+}
+
+function AppDetailContent({ appId }: { appId: string }) {
   const router = useRouter();
-  const { activeOrgId, authedCall } = useAuth();
+  const searchParams = useSearchParams();
+  const { activeOrgId, authedCall, orgs } = useAuth();
 
   // In demo mode show a mock app as the fallback; in production there is no
   // fabricated app, so a failed/absent fetch renders an explicit empty state.
@@ -104,6 +196,11 @@ export default function AppDetailPage({
     (m) => m.mockApps.find((a) => a.id === appId) ?? m.mockApps[0] ?? null,
     null,
   );
+
+  // Rollout watch: after a deploy/restart we poll the app detail until its
+  // status settles, so the UI reflects the real rollout instead of a single
+  // post-action snapshot. Polling is driven by `useResource`'s interval option.
+  const [watching, setWatching] = useState(false);
 
   const {
     data: fetched,
@@ -121,11 +218,13 @@ export default function AppDetailPage({
       : null,
     fallback,
     [activeOrgId, appId, fallback],
+    // While watching a rollout, poll fast; otherwise no background polling.
+    watching ? { refetchIntervalMs: ROLLOUT_POLL_MS } : {},
   );
 
-  // Brief optimistic status while an action is in flight; once the action
-  // resolves we refetch() so the displayed status reflects the backend rather
-  // than an optimistic guess that can desync.
+  // Brief optimistic status while an action is in flight; the rollout watcher
+  // then reconciles it against the live status feed. Once a real status lands
+  // for the watched app we drop the optimistic guess.
   const [optimisticStatus, setOptimisticStatus] = useState<
     App["status"] | null
   >(null);
@@ -137,11 +236,31 @@ export default function AppDetailPage({
     [fetched, optimisticStatus],
   );
 
-  const [tab, setTab] = useState<Tab>("Overview");
+  const orgSlug = slugify(
+    orgs.find((o) => o.id === activeOrgId)?.slug ?? "personal",
+  );
+
+  // Initialize the active tab from the `?tab=` deep-link (e.g. ?tab=metrics).
+  const initialTab = useMemo(
+    () => tabFromParam(searchParams.get("tab")),
+    [searchParams],
+  );
+  const [tab, setTab] = useState<Tab>(initialTab);
+
   const [pending, setPending] = useState<ActionKind | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
+
+  // Tracks which action started the current rollout watch so the success
+  // banner / URL reveal only appears after a deploy or restart (not a stop),
+  // and so a stale watch from a previous action doesn't latch.
+  const [watchKind, setWatchKind] = useState<ActionKind | null>(null);
+  // Timestamp the watch began, used to honor ROLLOUT_WATCH_TIMEOUT_MS.
+  const watchStartedAt = useRef<number>(0);
+  // Set true once a watched deploy/restart reaches "running" so we can reveal
+  // the live URL with a celebratory banner exactly once per rollout.
+  const [justWentLive, setJustWentLive] = useState(false);
 
   // Optimistic status hint per action so the StatusDot reacts instantly.
   const optimisticFor: Record<ActionKind, App["status"]> = {
@@ -158,6 +277,7 @@ export default function AppDetailPage({
     setPending(kind);
     setOptimisticStatus(optimisticFor[kind]);
     setNotice(null);
+    setJustWentLive(false);
     try {
       await authedCall((token, on) =>
         kind === "deploy"
@@ -166,10 +286,16 @@ export default function AppDetailPage({
             ? api.stopApp(activeOrgId, appId, token, on)
             : api.restartApp(activeOrgId, appId, token, on),
       );
-      // Reconcile with the backend instead of trusting the optimistic state.
+      // Start watching the live status feed (poll loop) instead of a single
+      // refetch, so the UI follows the real rollout to completion.
+      setWatchKind(kind);
+      watchStartedAt.current = Date.now();
+      setWatching(true);
       refetch();
     } catch (err) {
       setOptimisticStatus(null);
+      setWatching(false);
+      setWatchKind(null);
       setNotice(
         `${capitalize(kind)} failed — ${errorMessage(err, "the API is unreachable.")}`,
       );
@@ -178,9 +304,33 @@ export default function AppDetailPage({
     }
   }
 
-  // Clear the optimistic status once a fresh fetch lands.
+  // Reconcile the rollout watch against each fresh app detail. Once a real
+  // status lands, drop the optimistic guess; when the status settles (or the
+  // watch times out) stop polling. A deploy/restart that reaches "running"
+  // triggers the go-live URL reveal.
   useEffect(() => {
+    if (!fetched) return;
+    // A real status has arrived — the optimistic guess is no longer needed.
     if (optimisticStatus) setOptimisticStatus(null);
+
+    if (!watching) return;
+
+    const status = fetched.status ?? "";
+    const settled = SETTLED_STATUSES.has(status);
+    const timedOut =
+      Date.now() - watchStartedAt.current > ROLLOUT_WATCH_TIMEOUT_MS;
+
+    if (
+      status === "running" &&
+      (watchKind === "deploy" || watchKind === "restart")
+    ) {
+      setJustWentLive(true);
+    }
+
+    if (settled || timedOut) {
+      setWatching(false);
+      setWatchKind(null);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetched]);
 
@@ -292,6 +442,31 @@ export default function AppDetailPage({
       </div>
 
       {notice && <Notice variant="error">{notice}</Notice>}
+
+      {/* Live rollout progress — shown while a deploy/restart is in flight so the
+          user watches the real status (deploying → running) instead of a single
+          optimistic dot. */}
+      {app && watching && (
+        <RolloutPanel
+          status={app.status}
+          action={watchKind}
+          rollout={readRollout(app)}
+          release={fetched?.currentRelease ?? null}
+        />
+      )}
+
+      {/* Go-live reveal — once a watched deploy reaches "running" we surface the
+          clickable HTTPS URL with copy + open. It also stays visible whenever the
+          app is running and has a deployed host, so the URL is always reachable. */}
+      {app &&
+        ((justWentLive && app.status === "running") ||
+          (app.status === "running" && !!app.host)) && (
+          <LiveUrlCard
+            url={appHttpsUrl(app, orgSlug)}
+            celebrate={justWentLive}
+            onDismiss={() => setJustWentLive(false)}
+          />
+        )}
 
       {/* Tabs */}
       <Tabs tabs={TABS} active={tab} onChange={setTab} />
@@ -672,24 +847,14 @@ function MetricsTab({ appId }: { appId: string }) {
 
   return (
     <div className="space-y-4">
-      <div className="grid gap-4 sm:grid-cols-2">
-        <Card className="p-5">
-          <div className="flex items-center justify-between">
-            <p className="text-sm text-muted-foreground">CPU (aggregate)</p>
-            <p className="text-2xl font-semibold tracking-tight tabular-nums">
-              {formatMillicores(data.cpuMillicores)}
-            </p>
-          </div>
-        </Card>
-        <Card className="p-5">
-          <div className="flex items-center justify-between">
-            <p className="text-sm text-muted-foreground">Memory (aggregate)</p>
-            <p className="text-2xl font-semibold tracking-tight tabular-nums">
-              {formatBytes(data.memoryBytes)}
-            </p>
-          </div>
-        </Card>
-      </div>
+      {/* Short client-side rolling trend (last ~30 polls) rendered as small
+          line charts; falls back to the live number until enough history is
+          collected. No synthetic data — only values the backend reported. */}
+      <MetricsTimeseries
+        snapshot={data}
+        formatMillicores={formatMillicores}
+        formatBytes={formatBytes}
+      />
 
       <Card>
         <CardHeader>
@@ -1715,6 +1880,226 @@ function ScaleCard({
             Apply
           </Button>
         </form>
+      </CardContent>
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Rollout progress + go-live URL
+// ---------------------------------------------------------------------------
+
+// Live rollout status while a deploy/restart is in flight. Mirrors the real
+// backend status (deploying → running) and surfaces replica/health detail ONLY
+// when the API actually reports it — nothing is fabricated (invariant #6).
+function RolloutPanel({
+  status,
+  action,
+  rollout,
+  release,
+}: {
+  status: string;
+  action: ActionKind | null;
+  rollout: RolloutInfo;
+  release: Release | null;
+}) {
+  // statusVariant() can return "muted", which is not a Badge variant; map it to
+  // the visually-equivalent "outline" so the Badge type stays satisfied.
+  const sv = statusVariant(status);
+  const badgeVariant = sv === "muted" ? "outline" : sv;
+  const failed = status === "error";
+  const running = status === "running";
+  const stopped = status === "stopped";
+  const verb =
+    action === "restart"
+      ? "Restarting"
+      : action === "stop"
+        ? "Stopping"
+        : "Deploying";
+
+  // Show "X/Y" only when the backend gave both numbers; otherwise omit it
+  // rather than invent counts.
+  const hasReplicas =
+    rollout.readyReplicas !== undefined &&
+    rollout.desiredReplicas !== undefined;
+  const replicaLabel = hasReplicas
+    ? `${rollout.readyReplicas}/${rollout.desiredReplicas} replicas ready`
+    : null;
+
+  // Health line, again only when the backend reports it.
+  const healthLabel =
+    rollout.health ??
+    (rollout.healthy === true
+      ? "healthy"
+      : rollout.healthy === false
+        ? "unhealthy"
+        : null);
+
+  // Determinate bar when replica counts are known; otherwise full on a settled
+  // state (running/stopped/failed) and an indeterminate "in progress" shimmer
+  // while still rolling out.
+  const ready = rollout.readyReplicas ?? 0;
+  const desired = rollout.desiredReplicas ?? 0;
+  const settledNow = running || stopped || failed;
+  const pct =
+    hasReplicas && desired > 0
+      ? Math.min(100, Math.round((ready / desired) * 100))
+      : settledNow
+        ? 100
+        : null;
+
+  return (
+    <Card className="overflow-hidden">
+      <CardContent className="space-y-3 py-4">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5">
+            {failed ? (
+              <AlertTriangle className="h-4 w-4 text-destructive" />
+            ) : running || stopped ? (
+              <CheckCircle2 className="h-4 w-4 text-success" />
+            ) : (
+              <Loader2 className="h-4 w-4 animate-spin text-warning motion-reduce:animate-none" />
+            )}
+            <span className="text-sm font-medium">
+              {failed
+                ? "Rollout failed"
+                : running
+                  ? "Rollout complete"
+                  : stopped
+                    ? "Stopped"
+                    : `${verb}…`}
+            </span>
+            <Badge variant={badgeVariant} className="capitalize">
+              {status || "pending"}
+            </Badge>
+          </div>
+          {replicaLabel && (
+            <span className="font-mono text-xs tabular-nums text-muted-foreground">
+              {replicaLabel}
+            </span>
+          )}
+        </div>
+
+        {/* Progress bar: determinate when replica counts are known, else an
+            indeterminate sweep while the rollout is in flight. */}
+        <div
+          className="h-1.5 w-full overflow-hidden rounded-full bg-muted"
+          role="progressbar"
+          aria-label="Rollout progress"
+          aria-valuenow={pct ?? undefined}
+          aria-valuemin={0}
+          aria-valuemax={100}
+        >
+          {pct !== null ? (
+            <div
+              className={cn(
+                "h-full rounded-full transition-[width] duration-500",
+                failed
+                  ? "bg-destructive"
+                  : running
+                    ? "bg-success"
+                    : stopped
+                      ? "bg-muted-foreground"
+                      : "bg-warning",
+              )}
+              style={{ width: `${pct}%` }}
+            />
+          ) : (
+            <div className="h-full w-1/3 animate-pulse rounded-full bg-warning motion-reduce:animate-none" />
+          )}
+        </div>
+
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+          {healthLabel && (
+            <span className="inline-flex items-center gap-1.5">
+              <ShieldCheck className="h-3.5 w-3.5" />
+              Health: <span className="capitalize">{healthLabel}</span>
+            </span>
+          )}
+          {release && (
+            <span className="inline-flex items-center gap-1.5 font-mono">
+              <History className="h-3.5 w-3.5" />
+              Revision {release.revision}
+              <span className="capitalize">
+                ({release.status.replace("_", " ")})
+              </span>
+            </span>
+          )}
+          {!settledNow && (
+            <span>Watching the live status — this updates automatically.</span>
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+// Prominent reveal of the app's working HTTPS URL once it's live, with copy and
+// open actions. Celebrates the first go-live moment, then persists as a quiet
+// header while the app is running.
+function LiveUrlCard({
+  url,
+  celebrate,
+  onDismiss,
+}: {
+  url: string;
+  celebrate: boolean;
+  onDismiss: () => void;
+}) {
+  return (
+    <Card
+      className={cn(
+        "overflow-hidden border-success/40",
+        celebrate && "glow-violet",
+      )}
+    >
+      <CardContent className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex min-w-0 items-center gap-3">
+          <CheckCircle2 className="h-5 w-5 shrink-0 text-success" />
+          <div className="min-w-0">
+            <p className="text-sm font-medium">
+              {celebrate ? "Your app is live" : "Live URL"}
+            </p>
+            <a
+              href={url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex min-w-0 max-w-full items-center gap-1.5 font-mono text-sm text-primary hover:underline"
+            >
+              <Globe className="h-3.5 w-3.5 shrink-0" />
+              <span className="truncate">{url}</span>
+            </a>
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <CopyButton value={url} label="Copy URL" />
+          {/* Anchor styled as a primary button — the Button primitive only
+              renders a <button>, so an <a> can't nest inside it. */}
+          <a
+            href={url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className={cn(
+              "inline-flex h-8 items-center justify-center gap-1.5 whitespace-nowrap rounded-md px-3 text-xs font-medium transition-colors",
+              "bg-primary text-primary-foreground shadow-sm hover:bg-primary/90",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+              "pointer-coarse:min-h-11",
+            )}
+          >
+            <ExternalLink className="h-3.5 w-3.5" />
+            Open
+          </a>
+          {celebrate && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={onDismiss}
+              aria-label="Dismiss"
+            >
+              Dismiss
+            </Button>
+          )}
+        </div>
       </CardContent>
     </Card>
   );

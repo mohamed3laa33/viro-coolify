@@ -5,10 +5,12 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/billing"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/store"
 )
 
 // handlePlans returns the public plan catalog.
@@ -75,6 +77,58 @@ func (s *Server) handleSubscribe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+type spendCapRequest struct {
+	// SpendCapCents is the per-org hard ceiling on the current-period charge, in
+	// cents. 0 clears the per-org cap (the platform default DefaultSpendCapCents
+	// applies instead). A nil pointer is rejected as a malformed body so an empty
+	// PUT can never silently clear an existing cap.
+	SpendCapCents *int64 `json:"spendCapCents"`
+}
+
+// handleSetSpendCap sets (or clears, with 0) an org's per-period spend cap (org
+// admin+). The cap is the org's own budget — an admin/DB-driven business value set
+// per org, never a hardcoded platform constant — so the value is supplied by the
+// caller and persisted on the organization. The billing engine reads it via
+// effectiveSpendCap (per-org value, else the platform default).
+func (s *Server) handleSetSpendCap(w http.ResponseWriter, r *http.Request) {
+	orgID := chi.URLParam(r, "orgID")
+	var req spendCapRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.SpendCapCents == nil {
+		writeError(w, http.StatusBadRequest, "spendCapCents is required")
+		return
+	}
+	if *req.SpendCapCents < 0 {
+		writeError(w, http.StatusBadRequest, "spendCapCents must not be negative")
+		return
+	}
+	org, err := s.store.GetOrganization(r.Context(), orgID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if err != nil {
+		s.logger.Error("set spend cap: get org", "org", orgID, "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to load organization")
+		return
+	}
+	org.SpendCapCents = *req.SpendCapCents
+	if err := s.store.UpdateOrg(r.Context(), org); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+		s.logger.Error("set spend cap: update org", "org", orgID, "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to update spend cap")
+		return
+	}
+	s.audit(r.Context(), orgID, "billing.spend_cap.set", "organization", orgID,
+		"spendCapCents="+strconv.FormatInt(org.SpendCapCents, 10))
+	writeJSON(w, http.StatusOK, map[string]any{"spendCapCents": org.SpendCapCents})
 }
 
 // handleStripeWebhook verifies and processes Stripe webhook events.

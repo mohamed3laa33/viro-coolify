@@ -114,6 +114,127 @@ type Status struct {
 	ReadyReplicas int
 }
 
+// RolloutStatus is the detailed, deploy-progress view of a workload's
+// Deployment/StatefulSet rollout, richer than Status. The UI renders a progress
+// bar / health badge from it (e.g. "3/5 ready, 4 updated, Progressing"). All
+// counts come straight from the controller's observed status — there is no
+// fabricated progress (invariant #6).
+type RolloutStatus struct {
+	// Desired is the spec replica count the controller is converging toward.
+	Desired int `json:"desired"`
+	// Ready / Updated / Available mirror the controller's observed status:
+	// Ready = pods passing readiness, Updated = pods on the newest pod-template
+	// (the in-flight rollout's progress), Available = pods available for at least
+	// minReadySeconds. Updated/Available are best-effort for a StatefulSet (it
+	// exposes UpdatedReplicas but not AvailableReplicas — Available then mirrors
+	// Ready).
+	Ready     int `json:"ready"`
+	Updated   int `json:"updated"`
+	Available int `json:"available"`
+
+	// ObservedGeneration / Generation let the caller detect a stale controller
+	// status: when ObservedGeneration < Generation the controller has not yet
+	// acted on the latest spec (the rollout is still being picked up).
+	ObservedGeneration int64 `json:"observedGeneration"`
+	Generation         int64 `json:"generation"`
+
+	// Health is the derived rollout health, one of:
+	//   "complete"    — Desired==Ready==Updated and the controller is up to date
+	//   "progressing" — a rollout is in flight (or scaling up) and on track
+	//   "degraded"    — the controller reports a failure (ReplicaFailure / a
+	//                   Progressing=False condition, e.g. ProgressDeadlineExceeded)
+	//   "scaled-zero" — Desired==0 (stopped / scaled to zero)
+	//   "unknown"     — no controller found / status not yet observed
+	Health string `json:"health"`
+	// Phase is the same coarse phase string Status reports, kept for callers that
+	// only need the one-word state (Running | Pending | Scaled to zero | ...).
+	Phase string `json:"phase"`
+	// Reason / Message surface the controller condition that drove a non-complete
+	// Health (e.g. reason "ProgressDeadlineExceeded"), so the UI can show WHY a
+	// deploy is stuck rather than just spinning. Empty when complete/healthy.
+	Reason  string `json:"reason,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
+// BackupSpec describes a one-shot (or scheduled) logical database backup. The
+// platform layer populates it from the stored domain.Database (engine, namespace,
+// release, connection credentials) plus the admin/DB-driven backup settings
+// (image, storage size/class, schedule); none of these are hardcoded here
+// (invariant #1). The dump runs as a Kubernetes Job (or CronJob when Schedule is
+// set) writing an engine-appropriate dump file to a per-database backup PVC.
+type BackupSpec struct {
+	Namespace string // tenant namespace the database lives in
+	Release   string // the database's Helm release / Service name (in-cluster host)
+	Engine    string // postgresql | mysql | mariadb | mongodb | redis (template key)
+
+	// In-cluster connection details for the dump tool. Host defaults to Release
+	// (the ClusterIP Service name) when empty; Port defaults to the engine default.
+	Host     string
+	Port     int
+	Database string // logical database name to dump
+	Username string
+	Password string
+
+	// Image is the dump/restore client image (admin/DB-driven, e.g. a pinned
+	// "postgres:16" whose pg_dump/psql match the server). Empty falls back to an
+	// engine-default client image so a backup still runs in dev.
+	Image string
+
+	// StorageGB / StorageClass size the per-database backup PVC. StorageGB<=0
+	// clamps to a safe minimum; StorageClass empty uses the cluster default.
+	StorageGB    int
+	StorageClass string
+
+	// Schedule, when non-empty, makes EnsureBackupSchedule render a CronJob with
+	// this cron expression (e.g. "0 3 * * *" for a daily 03:00 dump) instead of a
+	// one-shot Job. BackupDatabase always runs a one-shot Job (ignores Schedule).
+	Schedule string
+}
+
+// RestoreSpec describes restoring a named backup file into a database. It mirrors
+// BackupSpec's connection details and names the dump file (as returned by
+// ListDatabaseBackups) to restore from the backup PVC.
+type RestoreSpec struct {
+	Namespace string
+	Release   string
+	Engine    string
+
+	Host     string
+	Port     int
+	Database string
+	Username string
+	Password string
+
+	Image string
+
+	// BackupName is the dump file (DatabaseBackup.Name) on the backup PVC to
+	// restore from. Required.
+	BackupName string
+}
+
+// DatabaseBackup is one observed backup artifact / run. For an on-demand backup
+// it is the Job created by BackupDatabase; ListDatabaseBackups returns every
+// backup Job (newest first) with its observed phase so the UI can show backup
+// history and offer a restore. There is no fabricated "succeeded" — Phase
+// reflects the Job's real condition (invariant #6).
+type DatabaseBackup struct {
+	// Name is the backup Job name (and the basis for the dump file name). It is
+	// what RestoreSpec.BackupName references.
+	Name string `json:"name"`
+	// Phase is the backup run state derived from the Job status:
+	//   "Running" | "Succeeded" | "Failed" | "Pending" | "Unknown".
+	Phase string `json:"phase"`
+	// CreatedAt / CompletedAt are the Job's creation and completion timestamps
+	// (RFC3339); CompletedAt is empty while the backup is still running.
+	CreatedAt   string `json:"createdAt"`
+	CompletedAt string `json:"completedAt,omitempty"`
+	// Engine echoes the database engine the backup was taken from.
+	Engine string `json:"engine"`
+	// Scheduled is true when this run was created by the backup CronJob (vs. an
+	// on-demand BackupDatabase call).
+	Scheduled bool `json:"scheduled"`
+}
+
 // PodMetric is a single workload pod's live resource usage as read from the
 // Kubernetes metrics-server (metrics.k8s.io/v1beta1 PodMetrics). CPU is in
 // millicores, memory in bytes — summed across the pod's containers.
@@ -195,10 +316,41 @@ type Backend interface {
 	LogStream(ctx context.Context, namespace, release string, opts LogStreamOptions, w io.Writer) error
 	// Status reports replica counts for the release's Deployment/StatefulSet.
 	Status(ctx context.Context, namespace, release string) (Status, error)
+	// AppRolloutStatus reports the detailed deploy-progress view of the release's
+	// Deployment/StatefulSet rollout (desired/ready/updated/available replicas,
+	// observed vs. spec generation, and a derived health/condition) so the UI can
+	// render live deploy progress. A missing controller returns
+	// RolloutStatus{Health:"unknown"} with an error.
+	AppRolloutStatus(ctx context.Context, namespace, release string) (RolloutStatus, error)
 	// Metrics reads the live per-pod CPU/memory usage for the release from the
 	// metrics-server. When the metrics-server is unavailable it returns
 	// WorkloadMetrics{Available:false} (never fabricated numbers), not an error.
 	Metrics(ctx context.Context, namespace, release string) (WorkloadMetrics, error)
+
+	// BackupDatabase runs a one-shot, engine-appropriate logical backup
+	// (pg_dump / mysqldump / mongodump / redis SAVE) of the database as a
+	// Kubernetes Job, writing the dump to a per-database backup PVC (ensured
+	// idempotently). It returns the created DatabaseBackup descriptor (whose Name
+	// is the restore handle). It does NOT wait for the dump to finish — the caller
+	// polls ListDatabaseBackups for the run's phase. An unsupported engine returns
+	// an error.
+	BackupDatabase(ctx context.Context, spec BackupSpec) (DatabaseBackup, error)
+	// EnsureBackupSchedule installs/updates a CronJob that runs the same dump on
+	// spec.Schedule (e.g. a daily "0 3 * * *"). It is the data-durability default:
+	// the platform ensures it on database create so backups happen without manual
+	// action. An empty Schedule removes any existing CronJob (backups disabled).
+	EnsureBackupSchedule(ctx context.Context, spec BackupSpec) error
+	// ListDatabaseBackups returns the database's backup runs (on-demand Jobs and
+	// the latest CronJob-spawned Jobs), newest first, each with its observed phase
+	// so the UI can show history and offer a restore. A namespace/release with no
+	// backups returns an empty slice (not an error).
+	ListDatabaseBackups(ctx context.Context, namespace, release string) ([]DatabaseBackup, error)
+	// RestoreDatabase runs a Job that restores spec.BackupName (a dump file on the
+	// backup PVC) into the live database via the engine's restore client
+	// (psql / mysql / mongorestore). DESTRUCTIVE: it overwrites current data, so
+	// the platform/handler layer must gate it behind an explicit confirmation. It
+	// returns when the restore Job is SUBMITTED (the caller polls for completion).
+	RestoreDatabase(ctx context.Context, spec RestoreSpec) error
 
 	// EnsureDomainCertificate creates (idempotently) a cert-manager Certificate for
 	// a VERIFIED custom hostname, signed by the platform ClusterIssuer, into a TLS

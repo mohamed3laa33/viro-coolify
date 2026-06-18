@@ -62,23 +62,40 @@ deployment:
   # -- Annotations to add to the pod
   podAnnotations: {}
 
-  # -- SecurityContext holds pod-level security attributes and common container settings.
-  # This defaults to non root user with uid 1000 and gid 1000.
+  # -- Pod-level SecurityContext. HARDENED-BY-DEFAULT for tenant workloads: an
+  # empty context previously let tenants run as root. These defaults satisfy the
+  # Pod Security Admission `restricted` profile (see deploy/helmfile.yaml for the
+  # namespace labels) so a tenant cannot run as UID 0. Override per-workload only
+  # when the image genuinely requires a different (still non-zero) UID/GID.
   # ref: https://kubernetes.io/docs/tasks/configure-pod-container/security-context/
-  podSecurityContext: {}
-    # fsGroup: 1000
-    # runAsNonRoot: true
-    # runAsUser: 1000
-    # runAsGroup: 1000
-  # -- SecurityContext settings for the main container
-  containerSecurityContext: {}
-    # capabilities:
-    #   drop:
-    #   - ALL
-    # readOnlyRootFilesystem: true
-    # runAsNonRoot: true
-    # runAsUser: 1000
-    # runAsGroup: 1000
+  # ref: https://kubernetes.io/docs/concepts/security/pod-security-standards/#restricted
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  # -- Container-level SecurityContext for the main container. HARDENED-BY-DEFAULT:
+  # drops all Linux capabilities, blocks privilege escalation, forces non-root and
+  # the runtime-default seccomp profile — the fields required by the PSA
+  # `restricted` profile.
+  #
+  # readOnlyRootFilesystem is intentionally LEFT UNSET (effectively false) at the
+  # chart default: tenant images are arbitrary and most (e.g. the default nginx,
+  # databases, WordPress) write to their rootfs, so forcing it on would break real
+  # deploys. It is NOT required by the PSA `restricted` profile. Set it true
+  # per-workload for images that support it and mount an emptyDir (extraVolumes /
+  # extraVolumeMounts) for any writable paths the image needs.
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    runAsNonRoot: true
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault
+    # readOnlyRootFilesystem: true  # opt-in per workload (see note above)
 
   # -- Environment variable to add to the pods
   env: {}
@@ -578,6 +595,25 @@ serviceMonitor:
 ##########################################################
 cronjob:
   enabled: false
+  # -- Hardened, PSA `restricted`-compatible defaults applied to every CronJob's
+  # pod/container unless the individual job entry overrides them via its own
+  # `securityContext` / `containerSecurityContext`.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    runAsNonRoot: true
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault
+    # readOnlyRootFilesystem: true  # opt-in per job
   jobs:
 
 ##########################################################
@@ -657,6 +693,25 @@ persistentVolumeClaimRetentionPolicy:
 ##########################################################
 job:
   enabled: false
+  # -- Pod-level SecurityContext for Job pods. Defaults to the same hardened,
+  # PSA `restricted`-compatible posture as long-running workloads.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  # -- Container-level SecurityContext for the Job container.
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    runAsNonRoot: true
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault
+    # readOnlyRootFilesystem: true  # opt-in per workload
 
 
 ##########################################################

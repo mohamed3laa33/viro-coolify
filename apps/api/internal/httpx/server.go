@@ -791,6 +791,8 @@ func (s *Server) routes() chi.Router {
 						r.With(s.orgAuthz(domain.RoleMember)).Get("/", s.handleListApps)
 						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/", s.handleCreateApp)
 						r.With(s.appProjectAuthz(domain.RoleMember)).Get("/{appID}", s.handleGetApp)
+						// Live deploy/rollout status (replica/health progress) for the UI.
+						r.With(s.appProjectAuthz(domain.RoleMember)).Get("/{appID}/status", s.handleAppStatus)
 						r.With(s.appProjectAuthz(domain.RoleMember)).Get("/{appID}/logs", s.handleAppLogs)
 						r.With(s.appProjectAuthz(domain.RoleAdmin)).Patch("/{appID}", s.handleUpdateApp)
 						r.With(s.appProjectAuthz(domain.RoleAdmin)).Delete("/{appID}", s.handleDeleteApp)
@@ -839,10 +841,19 @@ func (s *Server) routes() chi.Router {
 						r.With(s.databaseProjectAuthz(domain.RoleAdmin)).Post("/{databaseID}/stop", s.handleStopDatabase)
 						r.With(s.databaseProjectAuthz(domain.RoleAdmin)).Post("/{databaseID}/restart", s.handleRestartDatabase)
 						r.With(s.databaseProjectAuthz(domain.RoleAdmin)).Delete("/{databaseID}", s.handleDeleteDatabase)
+
+						// Managed-database backups: listing is a read (member+);
+						// triggering a backup and restoring (destructive) require admin+.
+						r.With(s.databaseProjectAuthz(domain.RoleMember)).Get("/{databaseID}/backups", s.handleListDatabaseBackups)
+						r.With(s.databaseProjectAuthz(domain.RoleAdmin)).Post("/{databaseID}/backups", s.handleBackupDatabase)
+						r.With(s.databaseProjectAuthz(domain.RoleAdmin)).Post("/{databaseID}/restore", s.handleRestoreDatabase)
 					})
 
 					r.With(s.orgAuthz(domain.RoleMember)).Get("/billing", s.handleGetBilling)
 					r.With(s.orgAuthz(domain.RoleAdmin)).Post("/billing/subscribe", s.handleSubscribe)
+					// Per-org spend cap (the org's own budget; admin+). The cap exists on
+					// the org model + store but had no write route until now.
+					r.With(s.orgAuthz(domain.RoleAdmin)).Put("/billing/spend-cap", s.handleSetSpendCap)
 
 					// Org-scoped audit trail (org admin+).
 					r.With(s.orgAuthz(domain.RoleAdmin)).Get("/audit", s.handleOrgAudit)

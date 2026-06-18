@@ -180,6 +180,12 @@ func errPayment(format string, args ...any) error {
 // subscriptionItemID is the metered subscription-ITEM id (si_…), NOT the
 // subscription id (sub_…): Stripe's usage_records endpoint is per-item and 404s on
 // a sub_ id.
+//
+// quantity is in whole CENTS of size-aware metered compute cost — the SAME unit
+// computed by Service.ReportUsage and stored end to end (see usageSoFarCents). It
+// is deliberately NOT compute-hours; the provider's metered price must be set so 1
+// unit = 1 cent. Keeping a single unit (cents) across meter → store → report
+// avoids the cents-vs-hours mismatch.
 type UsageReporter interface {
 	ReportUsage(ctx context.Context, subscriptionItemID string, quantity int64, at time.Time) error
 }
