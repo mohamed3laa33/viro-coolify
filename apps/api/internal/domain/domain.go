@@ -128,11 +128,63 @@ type App struct {
 	CPU           float64 `json:"cpu"`      // requested vCPU
 	MemoryMB      int     `json:"memoryMb"` // requested memory in MB
 	Status        string  `json:"status"`
+	// MinReplicas/MaxReplicas are the per-app autoscaling bounds threaded into the
+	// KEDA ScaledObject. Zero means "use the platform default" (admin/DB-driven);
+	// a STATELESS app may set MinReplicas to 0 to scale to zero. They are set via
+	// the scale endpoint and persisted so a redeploy keeps the same bounds.
+	MinReplicas int `json:"minReplicas,omitempty"`
+	MaxReplicas int `json:"maxReplicas,omitempty"`
 	// Kubernetes placement returned by the deploy backend (kube.Backend).
 	Namespace string    `json:"namespace,omitempty"` // per-org-project namespace
 	Release   string    `json:"release,omitempty"`   // Helm release name
 	Host      string    `json:"host,omitempty"`      // generated public hostname
 	CreatedAt time.Time `json:"createdAt"`
+}
+
+// ReleaseStatus is the lifecycle state of a single app release (revision).
+type ReleaseStatus string
+
+const (
+	// ReleaseDeploying is a release that has been Applied but not yet observed
+	// Running by the reconciler.
+	ReleaseDeploying ReleaseStatus = "deploying"
+	// ReleaseActive is the release currently serving the app (observed Running, or
+	// Applied successfully). At most one release per app is active at a time.
+	ReleaseActive ReleaseStatus = "active"
+	// ReleaseFailed is a release whose deploy did not come up.
+	ReleaseFailed ReleaseStatus = "failed"
+	// ReleaseSuperseded is a previously-active release replaced by a newer one.
+	ReleaseSuperseded ReleaseStatus = "superseded"
+	// ReleaseRolledBack marks a release that has been rolled back away from (it was
+	// active and a rollback to an EARLIER revision superseded it). The new release
+	// created BY a rollback is itself active and carries Note="rollback to rN".
+	ReleaseRolledBack ReleaseStatus = "rolled_back"
+)
+
+// Release is one immutable deploy revision of an app: the exact image + resources
+// that were Applied, a monotonic per-app Revision, and a ConfigHash fingerprint of
+// the full rendered spec (image+env+resources+domains). Every successful Apply for
+// an app records a Release; a rollback re-renders a stored Release's snapshot and
+// records a NEW Release. Releases give the app a per-deploy history and a target to
+// roll back to.
+type Release struct {
+	ID       string `json:"id"`
+	AppID    string `json:"appId"`
+	OrgID    string `json:"orgId"`
+	Revision int    `json:"revision"` // monotonic per app, starting at 1
+	Image    string `json:"image"`
+	GitRef   string `json:"gitRef,omitempty"`
+	// ConfigHash is a stable fingerprint of the rendered spec (image + env +
+	// resources + domains) at deploy time, so two identical deploys hash equal and a
+	// change is detectable.
+	ConfigHash string `json:"configHash,omitempty"`
+	// CPU/MemoryMB capture the resource size this release was deployed with, so a
+	// rollback can restore the release-time size (not just the image).
+	CPU       float64       `json:"cpu"`
+	MemoryMB  int           `json:"memoryMb"`
+	Status    ReleaseStatus `json:"status"`
+	Note      string        `json:"note,omitempty"` // e.g. "rollback to r2"
+	CreatedAt time.Time     `json:"createdAt"`
 }
 
 // Service is a one-click catalog instance (WordPress, a database, etc.) owned by
@@ -322,6 +374,38 @@ type PlatformSettings struct {
 	// DefaultSpendCapCents is the platform-wide current-period spend ceiling applied
 	// to an org that has no per-org SpendCapCents set. 0 disables the default cap.
 	DefaultSpendCapCents int64 `json:"defaultSpendCapCents"`
+
+	// KEDA autoscaling defaults (admin/DB-driven; never hardcoded). These drive the
+	// ScaledObject the deploy backend renders for every stateless workload, with
+	// per-app overrides via App.MinReplicas/MaxReplicas.
+	//
+	// KedaDefaultMinReplicas is the floor for a stateless app when it sets no
+	// per-app override. 0 enables scale-to-zero (the core cost lever). DATABASES
+	// always keep a floor of 1 regardless of this value.
+	KedaDefaultMinReplicas int `json:"kedaDefaultMinReplicas"`
+	// KedaDefaultMaxReplicas is the autoscaling ceiling for a stateless app with no
+	// per-app override.
+	KedaDefaultMaxReplicas int `json:"kedaDefaultMaxReplicas"`
+	// KedaMaxReplicasCeiling is the hard upper bound on a per-app MaxReplicas override
+	// (set via the scale endpoint). It stops a tenant from requesting an unbounded
+	// MaxReplicas and bypassing the plan/platform autoscaling limit. 0 disables the
+	// ceiling. Admin-tunable via the settings PATCH.
+	KedaMaxReplicasCeiling int `json:"kedaMaxReplicasCeiling"`
+	// KedaPollingInterval is how often (seconds) KEDA evaluates the triggers.
+	KedaPollingInterval int `json:"kedaPollingInterval"`
+	// KedaCooldownPeriod is how long (seconds) KEDA waits after the last trigger
+	// activity before scaling back down (to the idle/min count). A non-zero cooldown
+	// is what makes a CPU-trigger scale-to-zero behave sanely without the HTTP add-on.
+	KedaCooldownPeriod int `json:"kedaCooldownPeriod"`
+	// KedaCPUUtilization is the CPU-utilization target (%) for the default CPU
+	// trigger. The CPU trigger is the safe default because it needs no extra add-on.
+	KedaCPUUtilization int `json:"kedaCpuUtilization"`
+	// KedaHTTPTrigger gates an HTTP-concurrency trigger (true HTTP-wake / scale on
+	// request rate). It requires the keda-http-add-on to be installed in the
+	// cluster, so it is OFF by default; turning it on without the add-on installed
+	// would leave the ScaledObject's HTTP trigger inert. When false the workload
+	// uses the CPU trigger only.
+	KedaHTTPTrigger bool `json:"kedaHttpTrigger"`
 }
 
 // SubscriptionStatus mirrors the lifecycle of a subscription.

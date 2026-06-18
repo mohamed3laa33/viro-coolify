@@ -492,7 +492,17 @@ func (s *Server) reconcileOrg(ctx context.Context, orgID string) {
 		a := apps[i]
 		s.reconcileWorkload(ctx, a.ID, a.Status, a.Namespace, a.Release, func(status string) error {
 			a.Status = status
-			return s.store.UpdateApp(ctx, &a)
+			if err := s.store.UpdateApp(ctx, &a); err != nil {
+				return err
+			}
+			// Mirror the observed machine status onto the app's CURRENT release so a
+			// crashlooped deploy is recorded failed (and a recovered one active) — the
+			// app-row status alone never reached the release history. Best-effort: a
+			// release-bookkeeping failure must not fail the app-status reconcile.
+			if rerr := s.platform.ReconcileReleaseStatus(ctx, a.ID, status); rerr != nil {
+				s.logger.Warn("reconcile: release status", "app", a.ID, "err", rerr)
+			}
+			return nil
 		})
 	}
 
@@ -762,10 +772,16 @@ func (s *Server) routes() chi.Router {
 						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/", s.handleCreateApp)
 						r.With(s.appProjectAuthz(domain.RoleMember)).Get("/{appID}", s.handleGetApp)
 						r.With(s.appProjectAuthz(domain.RoleMember)).Get("/{appID}/logs", s.handleAppLogs)
+						r.With(s.appProjectAuthz(domain.RoleAdmin)).Patch("/{appID}", s.handleUpdateApp)
 						r.With(s.appProjectAuthz(domain.RoleAdmin)).Delete("/{appID}", s.handleDeleteApp)
 						r.With(s.appProjectAuthz(domain.RoleAdmin)).Post("/{appID}/deploy", s.handleDeployApp)
 						r.With(s.appProjectAuthz(domain.RoleAdmin)).Post("/{appID}/stop", s.handleStopApp)
 						r.With(s.appProjectAuthz(domain.RoleAdmin)).Post("/{appID}/restart", s.handleRestartApp)
+						r.With(s.appProjectAuthz(domain.RoleAdmin)).Post("/{appID}/scale", s.handleScaleApp)
+
+						// Release history + rollback.
+						r.With(s.appProjectAuthz(domain.RoleMember)).Get("/{appID}/releases", s.handleListReleases)
+						r.With(s.appProjectAuthz(domain.RoleAdmin)).Post("/{appID}/rollback", s.handleRollbackApp)
 
 						// App env / secrets. Listing env requires admin (it may reveal
 						// which secret KEYS exist); secret values are always masked.

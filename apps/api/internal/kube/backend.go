@@ -76,6 +76,28 @@ type Workload struct {
 	// values), while non-secret config still flows through Env. The platform
 	// creates/updates this Secret via EnsureAppSecret before Apply.
 	EnvSecretName string
+
+	// Scaling holds the admin/DB-driven KEDA autoscaling configuration (defaults
+	// from platform settings, with per-app min/max overrides). The platform
+	// populates it per Apply so buildValues renders the ScaledObject from live
+	// settings rather than hardcoded constants. The zero value falls back to the
+	// backend's built-in conservative defaults so a caller that does not set it
+	// keeps working.
+	Scaling Scaling
+}
+
+// Scaling is the admin/DB-driven KEDA autoscaling configuration for a workload.
+// MinReplicas/MaxReplicas are already resolved (per-app override or platform
+// default) by the platform layer; a stateful (database) workload is floored to a
+// minimum of 1 by buildValues regardless of MinReplicas (never scale a database to
+// zero). A MinReplicas of 0 on a stateless workload enables scale-to-zero.
+type Scaling struct {
+	MinReplicas     int
+	MaxReplicas     int
+	PollingInterval int  // seconds; <=0 falls back to a built-in default
+	CooldownPeriod  int  // seconds; <=0 falls back to a built-in default
+	CPUUtilization  int  // % target for the CPU trigger; <=0 falls back to a default
+	HTTPTrigger     bool // add an HTTP-concurrency trigger (requires keda-http-add-on)
 }
 
 // Status is the observed runtime state of a workload's controller.

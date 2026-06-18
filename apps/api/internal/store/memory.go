@@ -58,6 +58,7 @@ type MemoryStore struct {
 	memberships    map[string]domain.Membership         // key: orgID + "\x00" + userID
 	apps           map[string]domain.App                // by id
 	builds         map[string]domain.Build              // by id
+	releases       map[string]domain.Release            // by id
 	databases      map[string]domain.Database           // by id
 	subscriptions  map[string]domain.Subscription       // by orgID
 	usage          map[string][]domain.UsageRecord      // by orgID
@@ -88,6 +89,7 @@ func NewMemoryStore() *MemoryStore {
 		memberships:    make(map[string]domain.Membership),
 		apps:           make(map[string]domain.App),
 		builds:         make(map[string]domain.Build),
+		releases:       make(map[string]domain.Release),
 		databases:      make(map[string]domain.Database),
 		subscriptions:  make(map[string]domain.Subscription),
 		usage:          make(map[string][]domain.UsageRecord),
@@ -205,6 +207,19 @@ func defaultSettings() domain.PlatformSettings {
 		MemoryOvercommitFactor: 0.35,
 		DefaultRegion:          "fra1",
 		Regions:                []string{"fra1", "nyc1", "sfo3", "sgp1"},
+		// KEDA autoscaling defaults. A stateless app defaults to a floor of 1 (a
+		// conservative default; an admin can drop it to 0 platform-wide, or a single
+		// stateless app can scale to zero via the per-app override). Databases always
+		// keep a floor of 1. The CPU trigger needs no extra add-on; HTTP-wake is off.
+		KedaDefaultMinReplicas: 1,
+		KedaDefaultMaxReplicas: 5,
+		KedaPollingInterval:    30,
+		KedaCooldownPeriod:     300,
+		KedaCPUUtilization:     70,
+		KedaHTTPTrigger:        false,
+		// Hard ceiling on a per-app MaxReplicas override (admin-tunable). The scale
+		// endpoint rejects a request above this so a tenant can't go unbounded.
+		KedaMaxReplicasCeiling: 20,
 	}
 }
 
@@ -483,6 +498,61 @@ func (s *MemoryStore) UpdateBuild(_ context.Context, b *domain.Build) error {
 		return ErrNotFound
 	}
 	s.builds[b.ID] = *b
+	return nil
+}
+
+// ---- Releases ----
+
+func (s *MemoryStore) CreateRelease(_ context.Context, rel *domain.Release) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.releases[rel.ID]; exists {
+		return ErrConflict
+	}
+	// Mirror Postgres' UNIQUE(app_id, revision): a duplicate revision for the same
+	// app is a conflict, so the two stores agree and the recordRelease retry loop
+	// behaves identically against either backend.
+	for _, existing := range s.releases {
+		if existing.AppID == rel.AppID && existing.Revision == rel.Revision {
+			return ErrConflict
+		}
+	}
+	s.releases[rel.ID] = *rel
+	return nil
+}
+
+func (s *MemoryStore) GetRelease(_ context.Context, id string) (*domain.Release, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rel, ok := s.releases[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return &rel, nil
+}
+
+func (s *MemoryStore) ListReleasesByApp(_ context.Context, appID string) ([]domain.Release, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]domain.Release, 0)
+	for _, rel := range s.releases {
+		if rel.AppID == appID {
+			out = append(out, rel)
+		}
+	}
+	// Newest revision first (revision desc), so the history endpoint shows the
+	// current release at the top.
+	sort.Slice(out, func(i, j int) bool { return out[i].Revision > out[j].Revision })
+	return out, nil
+}
+
+func (s *MemoryStore) UpdateRelease(_ context.Context, rel *domain.Release) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.releases[rel.ID]; !ok {
+		return ErrNotFound
+	}
+	s.releases[rel.ID] = *rel
 	return nil
 }
 

@@ -432,22 +432,22 @@ func (s *PostgresStore) RemoveMembership(ctx context.Context, orgID, userID stri
 
 func (s *PostgresStore) CreateApp(ctx context.Context, a *domain.App) error {
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO apps (id, org_id, project_id, coolify_uuid, name, git_repository, git_branch, build_pack, cpu, memory_mb, status, namespace, "release", host, image, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
-		a.ID, a.OrgID, a.ProjectID, a.CoolifyUUID, a.Name, a.GitRepository, a.GitBranch, a.BuildPack, a.CPU, a.MemoryMB, a.Status, a.Namespace, a.Release, a.Host, a.Image, a.CreatedAt,
+		`INSERT INTO apps (id, org_id, project_id, coolify_uuid, name, git_repository, git_branch, build_pack, cpu, memory_mb, min_replicas, max_replicas, status, namespace, "release", host, image, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
+		a.ID, a.OrgID, a.ProjectID, a.CoolifyUUID, a.Name, a.GitRepository, a.GitBranch, a.BuildPack, a.CPU, a.MemoryMB, a.MinReplicas, a.MaxReplicas, a.Status, a.Namespace, a.Release, a.Host, a.Image, a.CreatedAt,
 	)
 	return mapErr(err)
 }
 
 func (s *PostgresStore) GetApp(ctx context.Context, id string) (*domain.App, error) {
 	return s.scanApp(s.pool.QueryRow(ctx,
-		`SELECT id, org_id, project_id, coolify_uuid, name, git_repository, git_branch, build_pack, cpu, memory_mb, status, namespace, "release", host, image, created_at
+		`SELECT id, org_id, project_id, coolify_uuid, name, git_repository, git_branch, build_pack, cpu, memory_mb, min_replicas, max_replicas, status, namespace, "release", host, image, created_at
 		 FROM apps WHERE id = $1`, id))
 }
 
 func (s *PostgresStore) scanApp(row pgx.Row) (*domain.App, error) {
 	var a domain.App
-	if err := row.Scan(&a.ID, &a.OrgID, &a.ProjectID, &a.CoolifyUUID, &a.Name, &a.GitRepository, &a.GitBranch, &a.BuildPack, &a.CPU, &a.MemoryMB, &a.Status, &a.Namespace, &a.Release, &a.Host, &a.Image, &a.CreatedAt); err != nil {
+	if err := row.Scan(&a.ID, &a.OrgID, &a.ProjectID, &a.CoolifyUUID, &a.Name, &a.GitRepository, &a.GitBranch, &a.BuildPack, &a.CPU, &a.MemoryMB, &a.MinReplicas, &a.MaxReplicas, &a.Status, &a.Namespace, &a.Release, &a.Host, &a.Image, &a.CreatedAt); err != nil {
 		return nil, mapErr(err)
 	}
 	return &a, nil
@@ -455,7 +455,7 @@ func (s *PostgresStore) scanApp(row pgx.Row) (*domain.App, error) {
 
 func (s *PostgresStore) ListAppsByOrg(ctx context.Context, orgID string) ([]domain.App, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, org_id, project_id, coolify_uuid, name, git_repository, git_branch, build_pack, cpu, memory_mb, status, namespace, "release", host, image, created_at
+		`SELECT id, org_id, project_id, coolify_uuid, name, git_repository, git_branch, build_pack, cpu, memory_mb, min_replicas, max_replicas, status, namespace, "release", host, image, created_at
 		 FROM apps WHERE org_id = $1`, orgID)
 	if err != nil {
 		return nil, mapErr(err)
@@ -464,7 +464,7 @@ func (s *PostgresStore) ListAppsByOrg(ctx context.Context, orgID string) ([]doma
 	out := make([]domain.App, 0)
 	for rows.Next() {
 		var a domain.App
-		if err := rows.Scan(&a.ID, &a.OrgID, &a.ProjectID, &a.CoolifyUUID, &a.Name, &a.GitRepository, &a.GitBranch, &a.BuildPack, &a.CPU, &a.MemoryMB, &a.Status, &a.Namespace, &a.Release, &a.Host, &a.Image, &a.CreatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.OrgID, &a.ProjectID, &a.CoolifyUUID, &a.Name, &a.GitRepository, &a.GitBranch, &a.BuildPack, &a.CPU, &a.MemoryMB, &a.MinReplicas, &a.MaxReplicas, &a.Status, &a.Namespace, &a.Release, &a.Host, &a.Image, &a.CreatedAt); err != nil {
 			return nil, mapErr(err)
 		}
 		out = append(out, a)
@@ -475,10 +475,10 @@ func (s *PostgresStore) ListAppsByOrg(ctx context.Context, orgID string) ([]doma
 func (s *PostgresStore) UpdateApp(ctx context.Context, a *domain.App) error {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE apps SET org_id = $2, project_id = $3, coolify_uuid = $4, name = $5, git_repository = $6,
-		 git_branch = $7, build_pack = $8, cpu = $9, memory_mb = $10, status = $11,
-		 namespace = $12, "release" = $13, host = $14, image = $15, created_at = $16
+		 git_branch = $7, build_pack = $8, cpu = $9, memory_mb = $10, min_replicas = $11, max_replicas = $12,
+		 status = $13, namespace = $14, "release" = $15, host = $16, image = $17, created_at = $18
 		 WHERE id = $1`,
-		a.ID, a.OrgID, a.ProjectID, a.CoolifyUUID, a.Name, a.GitRepository, a.GitBranch, a.BuildPack, a.CPU, a.MemoryMB, a.Status, a.Namespace, a.Release, a.Host, a.Image, a.CreatedAt,
+		a.ID, a.OrgID, a.ProjectID, a.CoolifyUUID, a.Name, a.GitRepository, a.GitBranch, a.BuildPack, a.CPU, a.MemoryMB, a.MinReplicas, a.MaxReplicas, a.Status, a.Namespace, a.Release, a.Host, a.Image, a.CreatedAt,
 	)
 	if err != nil {
 		return mapErr(err)
@@ -554,6 +554,74 @@ func (s *PostgresStore) UpdateBuild(ctx context.Context, b *domain.Build) error 
 		 image = $6, logs = $7, created_at = $8, finished_at = $9
 		 WHERE id = $1`,
 		b.ID, b.AppID, b.OrgID, string(b.Status), b.CommitRef, b.Image, b.Logs, b.CreatedAt, b.FinishedAt,
+	)
+	if err != nil {
+		return mapErr(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ---- Releases ----
+
+func (s *PostgresStore) CreateRelease(ctx context.Context, rel *domain.Release) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO releases (id, app_id, org_id, revision, image, git_ref, config_hash, cpu, memory_mb, status, note, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		rel.ID, rel.AppID, rel.OrgID, rel.Revision, rel.Image, rel.GitRef, rel.ConfigHash,
+		rel.CPU, rel.MemoryMB, string(rel.Status), rel.Note, rel.CreatedAt,
+	)
+	return mapErr(err)
+}
+
+func (s *PostgresStore) GetRelease(ctx context.Context, id string) (*domain.Release, error) {
+	return s.scanRelease(s.pool.QueryRow(ctx,
+		`SELECT id, app_id, org_id, revision, image, git_ref, config_hash, cpu, memory_mb, status, note, created_at
+		 FROM releases WHERE id = $1`, id))
+}
+
+func (s *PostgresStore) scanRelease(row pgx.Row) (*domain.Release, error) {
+	var rel domain.Release
+	var status string
+	if err := row.Scan(&rel.ID, &rel.AppID, &rel.OrgID, &rel.Revision, &rel.Image, &rel.GitRef,
+		&rel.ConfigHash, &rel.CPU, &rel.MemoryMB, &status, &rel.Note, &rel.CreatedAt); err != nil {
+		return nil, mapErr(err)
+	}
+	rel.Status = domain.ReleaseStatus(status)
+	return &rel, nil
+}
+
+func (s *PostgresStore) ListReleasesByApp(ctx context.Context, appID string) ([]domain.Release, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, app_id, org_id, revision, image, git_ref, config_hash, cpu, memory_mb, status, note, created_at
+		 FROM releases WHERE app_id = $1 ORDER BY revision DESC`, appID)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+	out := make([]domain.Release, 0)
+	for rows.Next() {
+		var rel domain.Release
+		var status string
+		if err := rows.Scan(&rel.ID, &rel.AppID, &rel.OrgID, &rel.Revision, &rel.Image, &rel.GitRef,
+			&rel.ConfigHash, &rel.CPU, &rel.MemoryMB, &status, &rel.Note, &rel.CreatedAt); err != nil {
+			return nil, mapErr(err)
+		}
+		rel.Status = domain.ReleaseStatus(status)
+		out = append(out, rel)
+	}
+	return out, mapErr(rows.Err())
+}
+
+func (s *PostgresStore) UpdateRelease(ctx context.Context, rel *domain.Release) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE releases SET app_id = $2, org_id = $3, revision = $4, image = $5, git_ref = $6,
+		 config_hash = $7, cpu = $8, memory_mb = $9, status = $10, note = $11, created_at = $12
+		 WHERE id = $1`,
+		rel.ID, rel.AppID, rel.OrgID, rel.Revision, rel.Image, rel.GitRef, rel.ConfigHash,
+		rel.CPU, rel.MemoryMB, string(rel.Status), rel.Note, rel.CreatedAt,
 	)
 	if err != nil {
 		return mapErr(err)
@@ -1602,10 +1670,14 @@ func (s *PostgresStore) GetSettings(ctx context.Context) (*domain.PlatformSettin
 	var ps domain.PlatformSettings
 	err := s.pool.QueryRow(ctx,
 		`SELECT default_cpu, default_memory_mb, default_plan_id, cpu_overcommit_factor,
-		 memory_overcommit_factor, default_region, regions, grace_past_due, default_spend_cap_cents
+		 memory_overcommit_factor, default_region, regions, grace_past_due, default_spend_cap_cents,
+		 keda_default_min_replicas, keda_default_max_replicas, keda_polling_interval,
+		 keda_cooldown_period, keda_cpu_utilization, keda_http_trigger, keda_max_replicas_ceiling
 		 FROM platform_settings WHERE id = true`,
 	).Scan(&ps.DefaultCPU, &ps.DefaultMemoryMB, &ps.DefaultPlanID, &ps.CPUOvercommitFactor,
-		&ps.MemoryOvercommitFactor, &ps.DefaultRegion, &ps.Regions, &ps.GracePastDue, &ps.DefaultSpendCapCents)
+		&ps.MemoryOvercommitFactor, &ps.DefaultRegion, &ps.Regions, &ps.GracePastDue, &ps.DefaultSpendCapCents,
+		&ps.KedaDefaultMinReplicas, &ps.KedaDefaultMaxReplicas, &ps.KedaPollingInterval,
+		&ps.KedaCooldownPeriod, &ps.KedaCPUUtilization, &ps.KedaHTTPTrigger, &ps.KedaMaxReplicasCeiling)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -1620,8 +1692,10 @@ func (s *PostgresStore) UpdateSettings(ctx context.Context, in *domain.PlatformS
 	_, err := s.pool.Exec(ctx,
 		`INSERT INTO platform_settings (id, default_cpu, default_memory_mb, default_plan_id,
 		 cpu_overcommit_factor, memory_overcommit_factor, default_region, regions,
-		 grace_past_due, default_spend_cap_cents)
-		 VALUES (true, $1, $2, $3, $4, $5, $6, $7, $8, $9)
+		 grace_past_due, default_spend_cap_cents,
+		 keda_default_min_replicas, keda_default_max_replicas, keda_polling_interval,
+		 keda_cooldown_period, keda_cpu_utilization, keda_http_trigger, keda_max_replicas_ceiling)
+		 VALUES (true, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 		 ON CONFLICT (id) DO UPDATE SET
 		   default_cpu = EXCLUDED.default_cpu,
 		   default_memory_mb = EXCLUDED.default_memory_mb,
@@ -1631,9 +1705,18 @@ func (s *PostgresStore) UpdateSettings(ctx context.Context, in *domain.PlatformS
 		   default_region = EXCLUDED.default_region,
 		   regions = EXCLUDED.regions,
 		   grace_past_due = EXCLUDED.grace_past_due,
-		   default_spend_cap_cents = EXCLUDED.default_spend_cap_cents`,
+		   default_spend_cap_cents = EXCLUDED.default_spend_cap_cents,
+		   keda_default_min_replicas = EXCLUDED.keda_default_min_replicas,
+		   keda_default_max_replicas = EXCLUDED.keda_default_max_replicas,
+		   keda_polling_interval = EXCLUDED.keda_polling_interval,
+		   keda_cooldown_period = EXCLUDED.keda_cooldown_period,
+		   keda_cpu_utilization = EXCLUDED.keda_cpu_utilization,
+		   keda_http_trigger = EXCLUDED.keda_http_trigger,
+		   keda_max_replicas_ceiling = EXCLUDED.keda_max_replicas_ceiling`,
 		in.DefaultCPU, in.DefaultMemoryMB, in.DefaultPlanID, in.CPUOvercommitFactor,
 		in.MemoryOvercommitFactor, in.DefaultRegion, regions, in.GracePastDue, in.DefaultSpendCapCents,
+		in.KedaDefaultMinReplicas, in.KedaDefaultMaxReplicas, in.KedaPollingInterval,
+		in.KedaCooldownPeriod, in.KedaCPUUtilization, in.KedaHTTPTrigger, in.KedaMaxReplicasCeiling,
 	)
 	return mapErr(err)
 }

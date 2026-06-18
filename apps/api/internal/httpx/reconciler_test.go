@@ -181,6 +181,64 @@ func TestReconcileDoesNotClobberBuildFailed(t *testing.T) {
 	}
 }
 
+// TestReconcileFailedMarksCurrentReleaseFailed asserts that when the reconciler
+// observes a workload as Failed and writes the app's status, it ALSO transitions
+// the app's current release to failed — so a crashlooped deploy is recorded in the
+// release history rather than staying "active" forever (fix #5).
+func TestReconcileFailedMarksCurrentReleaseFailed(t *testing.T) {
+	s, fb, st := newReconcileServer(t)
+	ctx := context.Background()
+	if err := st.CreateOrganization(ctx, &domain.Organization{ID: "org-1", Slug: "acme"}); err != nil {
+		t.Fatalf("create org: %v", err)
+	}
+
+	// Create an image-based app so it deploys (records rev1 active) on the fake.
+	app, err := s.platform.CreateApp(ctx, "org-1", platform.CreateAppInput{
+		Name: "api", Image: "nginx:1", CPU: 0.25, MemoryMB: 256,
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	if app.Release == "" {
+		t.Fatalf("expected a Release after deploy")
+	}
+
+	// The current release is active to start with.
+	cur, err := s.platform.CurrentRelease(ctx, app.ID)
+	if err != nil || cur == nil || cur.Status != domain.ReleaseActive {
+		t.Fatalf("initial current release = %+v (err %v), want active", cur, err)
+	}
+
+	// Force the backend to report the workload as Failed (crashloop).
+	fb.PhaseOverride[app.Namespace+"/"+app.Release] = "Failed"
+
+	s.reconcileOnce(ctx)
+
+	// The app row is now failed...
+	got, _ := st.GetApp(ctx, app.ID)
+	if got.Status != "failed" {
+		t.Fatalf("app status after failed reconcile = %q, want failed", got.Status)
+	}
+	// ...and so is its current release.
+	cur, err = s.platform.CurrentRelease(ctx, app.ID)
+	if err != nil {
+		t.Fatalf("current release: %v", err)
+	}
+	if cur != nil && cur.Status == domain.ReleaseActive {
+		t.Fatalf("current release still active after failed reconcile")
+	}
+	rels, _ := st.ListReleasesByApp(ctx, app.ID)
+	var sawFailed bool
+	for _, r := range rels {
+		if r.Status == domain.ReleaseFailed {
+			sawFailed = true
+		}
+	}
+	if !sawFailed {
+		t.Fatalf("expected a failed release after failed reconcile: %+v", rels)
+	}
+}
+
 func TestReconcileSkipsWorkloadsWithoutRelease(t *testing.T) {
 	s, _, st := newReconcileServer(t)
 	ctx := context.Background()

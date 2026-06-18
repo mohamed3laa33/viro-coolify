@@ -46,6 +46,12 @@ type FakeBackend struct {
 	// cert Secret name so tests can assert the listener references the right cert.
 	GatewayListeners map[string]string
 
+	// PhaseOverride, when set for a "<namespace>/<release>" key, forces Status to
+	// report that Phase verbatim (e.g. "Failed") instead of deriving it from the
+	// replica count. It lets tests drive the reconciler down the failed/pending
+	// paths the replica-count derivation can't otherwise produce.
+	PhaseOverride map[string]string
+
 	// MetricsAvailable controls whether Metrics reports live data. When false the
 	// fake mimics a cluster without a metrics-server (honest "unavailable").
 	MetricsAvailable bool
@@ -69,6 +75,7 @@ func NewFakeBackend() *FakeBackend {
 		AppSecrets:       map[string]map[string]string{},
 		DomainCerts:      map[string]bool{},
 		GatewayListeners: map[string]string{},
+		PhaseOverride:    map[string]string{},
 		LogLines:         "fake log line\n",
 		// Deterministic test values: a deployed workload reports a fixed live usage
 		// so platform/handler tests can assert REAL (non-synthetic) numbers.
@@ -269,6 +276,9 @@ func (f *FakeBackend) Status(_ context.Context, namespace, release string) (Stat
 		return Status{Phase: "Unknown"}, fmt.Errorf("kube(fake): no release %q in %q", release, namespace)
 	}
 	n := f.Replicas[k]
+	if ph, ok := f.PhaseOverride[k]; ok {
+		return Status{Phase: ph, Replicas: n, ReadyReplicas: n}, nil
+	}
 	phase := "Running"
 	if n == 0 {
 		phase = "Scaled to zero"

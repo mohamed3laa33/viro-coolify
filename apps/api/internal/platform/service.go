@@ -483,7 +483,42 @@ func (s *Service) appWorkload(ctx context.Context, app *domain.App, orgSlug, pro
 		EnvSecretName:          envSecretName,
 		CPUOvercommitFactor:    cpuF,
 		MemoryOvercommitFactor: memF,
+		Scaling:                s.scalingForApp(ctx, app),
 	}, nil
+}
+
+// scalingForApp resolves the KEDA autoscaling config for an app from the
+// admin/DB-driven platform settings, applying the app's per-app min/max overrides
+// when set. A stateless app with a resolved MinReplicas of 0 scales to zero; the
+// kube backend floors databases at 1 (apps are never floored here). All values are
+// live from the store — none are hardcoded on this path.
+func (s *Service) scalingForApp(ctx context.Context, app *domain.App) kube.Scaling {
+	sc := kube.Scaling{
+		MinReplicas:     1,
+		MaxReplicas:     5,
+		PollingInterval: 30,
+		CooldownPeriod:  300,
+		CPUUtilization:  70,
+	}
+	if set, err := s.store.GetSettings(ctx); err == nil && set != nil {
+		sc.MinReplicas = set.KedaDefaultMinReplicas
+		sc.MaxReplicas = set.KedaDefaultMaxReplicas
+		sc.PollingInterval = set.KedaPollingInterval
+		sc.CooldownPeriod = set.KedaCooldownPeriod
+		sc.CPUUtilization = set.KedaCPUUtilization
+		sc.HTTPTrigger = set.KedaHTTPTrigger
+	}
+	// Per-app overrides. MinReplicas may legitimately be 0 (scale-to-zero), so a
+	// stored override of 0 is honored only when the user explicitly set bounds; we
+	// treat a non-zero MaxReplicas as "this app has explicit bounds" and then take
+	// MinReplicas verbatim (0 allowed). When only MinReplicas is set (>0) we apply it.
+	if app.MaxReplicas > 0 {
+		sc.MaxReplicas = app.MaxReplicas
+		sc.MinReplicas = app.MinReplicas // 0 allowed => scale-to-zero
+	} else if app.MinReplicas > 0 {
+		sc.MinReplicas = app.MinReplicas
+	}
+	return sc
 }
 
 // applyApp injects the app's SECRET env as a per-app Kubernetes Secret (envFrom),
@@ -581,6 +616,15 @@ func (s *Service) CreateApp(ctx context.Context, orgID string, in CreateAppInput
 		app.Status = "deploying"
 		if err := s.store.CreateApp(ctx, app); err != nil {
 			return nil, err
+		}
+		// Record the first release revision (rev1). A failure here must not fail the
+		// already-successful create/deploy — log and continue.
+		if wl, werr := s.appWorkload(ctx, app, orgSlug, projSlug); werr == nil {
+			if _, rerr := s.recordRelease(ctx, app, wl, "", domain.ReleaseSuperseded); rerr != nil {
+				s.logRelease(app.ID, rerr)
+			}
+		} else {
+			s.logRelease(app.ID, werr)
 		}
 	case app.GitRepository != "":
 		// Git-source app: create a Build record, persist the app as "building", and
@@ -772,6 +816,14 @@ func (s *Service) finishBuildSuccess(ctx context.Context, appID, buildID, orgSlu
 	app.Host = host
 	app.Status = "deploying"
 	_ = s.store.UpdateApp(ctx, app)
+	// Record the release for this built deploy. Best-effort (the deploy succeeded).
+	if wl, werr := s.appWorkload(ctx, app, orgSlug, projSlug); werr == nil {
+		if _, rerr := s.recordRelease(ctx, app, wl, "", domain.ReleaseSuperseded); rerr != nil {
+			s.logRelease(app.ID, rerr)
+		}
+	} else {
+		s.logRelease(app.ID, werr)
+	}
 }
 
 // gateBuiltDeploy re-applies the request-time revenue/quota gates before an
@@ -979,6 +1031,14 @@ func (s *Service) Deploy(ctx context.Context, orgID, appID string) (*domain.App,
 	app.Status = "deploying"
 	if err := s.store.UpdateApp(ctx, app); err != nil {
 		return nil, err
+	}
+	// Record a new release revision for this (re)deploy. Best-effort.
+	if wl, werr := s.appWorkload(ctx, app, orgSlug, projSlug); werr == nil {
+		if _, rerr := s.recordRelease(ctx, app, wl, "", domain.ReleaseSuperseded); rerr != nil {
+			s.logRelease(app.ID, rerr)
+		}
+	} else {
+		s.logRelease(app.ID, werr)
 	}
 	return app, nil
 }

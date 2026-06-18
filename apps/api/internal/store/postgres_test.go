@@ -220,7 +220,10 @@ func TestGetSettings(t *testing.T) {
 	rows := pgxmock.NewRows([]string{
 		"default_cpu", "default_memory_mb", "default_plan_id", "cpu_overcommit_factor",
 		"memory_overcommit_factor", "default_region", "regions", "grace_past_due", "default_spend_cap_cents",
-	}).AddRow(0.25, 256, "hobby", 0.2, 0.35, "fra1", []string{"fra1", "nyc1"}, false, int64(0))
+		"keda_default_min_replicas", "keda_default_max_replicas", "keda_polling_interval",
+		"keda_cooldown_period", "keda_cpu_utilization", "keda_http_trigger", "keda_max_replicas_ceiling",
+	}).AddRow(0.25, 256, "hobby", 0.2, 0.35, "fra1", []string{"fra1", "nyc1"}, false, int64(0),
+		1, 5, 30, 300, 70, false, 20)
 
 	mock.ExpectQuery("SELECT default_cpu, default_memory_mb").WillReturnRows(rows)
 
@@ -246,7 +249,7 @@ func TestCreateAppAndListByOrg(t *testing.T) {
 	now := time.Now()
 	a := &domain.App{ID: "a1", OrgID: "o1", ProjectID: "p1", Name: "web", CPU: 0.5, MemoryMB: 256, Status: "running", CreatedAt: now}
 	mock.ExpectExec("INSERT INTO apps").
-		WithArgs("a1", "o1", "p1", "", "web", "", "", "", 0.5, 256, "running", "", "", "", "", now).
+		WithArgs("a1", "o1", "p1", "", "web", "", "", "", 0.5, 256, 0, 0, "running", "", "", "", "", now).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 	if err := s.CreateApp(context.Background(), a); err != nil {
@@ -255,8 +258,8 @@ func TestCreateAppAndListByOrg(t *testing.T) {
 
 	rows := pgxmock.NewRows([]string{
 		"id", "org_id", "project_id", "coolify_uuid", "name", "git_repository", "git_branch",
-		"build_pack", "cpu", "memory_mb", "status", "namespace", "release", "host", "image", "created_at",
-	}).AddRow("a1", "o1", "p1", "", "web", "", "", "", 0.5, 256, "running", "", "", "", "", now)
+		"build_pack", "cpu", "memory_mb", "min_replicas", "max_replicas", "status", "namespace", "release", "host", "image", "created_at",
+	}).AddRow("a1", "o1", "p1", "", "web", "", "", "", 0.5, 256, 0, 0, "running", "", "", "", "", now)
 
 	mock.ExpectQuery("SELECT id, org_id, project_id, coolify_uuid, name, git_repository").
 		WithArgs("o1").

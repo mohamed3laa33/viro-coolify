@@ -62,6 +62,15 @@ type Store interface {
 	ListBuildsByApp(ctx context.Context, appID string) ([]domain.Build, error)
 	UpdateBuild(ctx context.Context, b *domain.Build) error
 
+	// Releases (immutable per-deploy revisions of an app, tenant-scoped via the
+	// owning app/org). CreateRelease records one revision; GetRelease fetches by id;
+	// ListReleasesByApp returns the app's revisions newest-first (revision desc);
+	// UpdateRelease persists a status/note change (e.g. superseded -> active).
+	CreateRelease(ctx context.Context, rel *domain.Release) error
+	GetRelease(ctx context.Context, id string) (*domain.Release, error)
+	ListReleasesByApp(ctx context.Context, appID string) ([]domain.Release, error)
+	UpdateRelease(ctx context.Context, rel *domain.Release) error
+
 	// Databases (tenant-scoped).
 	CreateDatabase(ctx context.Context, d *domain.Database) error
 	GetDatabase(ctx context.Context, id string) (*domain.Database, error)

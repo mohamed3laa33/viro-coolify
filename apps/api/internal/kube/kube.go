@@ -761,23 +761,14 @@ func (b *KubeBackend) buildValues(w Workload, h string) map[string]any {
 		}},
 	}
 
-	// KEDA: CPU-utilization trigger with sane min/max. Databases keep a floor of 1
-	// (no scale-to-zero); stateless workloads can be tuned to 0 by the caller later.
-	minReplicas := 1
-	maxReplicas := 5
-	keda := map[string]any{
-		"enabled":         true,
-		"scaleTargetKind": scaleTargetKind(stateful),
-		"minReplicaCount": minReplicas,
-		"maxReplicaCount": maxReplicas,
-		"pollingInterval": 30,
-		"cooldownPeriod":  300,
-		"triggers": []map[string]any{{
-			"type":       "cpu",
-			"metricType": "Utilization",
-			"metadata":   map[string]any{"value": "70"},
-		}},
-	}
+	// KEDA: admin/DB-driven autoscaling. The min/max/polling/cooldown/trigger come
+	// from the resolved Scaling config (platform settings + per-app overrides), not
+	// hardcoded constants. A STATELESS workload may scale to ZERO (min/idle = 0 — the
+	// core cost lever); a stateful (database) workload is floored to 1 here so a
+	// database never scales to zero. The CPU trigger is always present (it needs no
+	// extra add-on); an HTTP-concurrency trigger is added only when explicitly gated
+	// on (it requires the keda-http-add-on to actually wake the workload).
+	keda := buildKeda(w.Scaling, stateful)
 
 	// HTTPRoute attaching to the SHARED Gateway via parentRefs. Databases are
 	// internal-only (no public route); apps/services get the generated host plus
@@ -890,6 +881,89 @@ func scaleTargetKind(stateful bool) string {
 		return "StatefulSet"
 	}
 	return "Deployment"
+}
+
+// BuildKedaForTest exposes buildKeda for cross-package tests (platform) so they can
+// assert the rendered ScaledObject (scale-to-zero for stateless, floor of 1 for
+// stateful) without standing up the full helm render path.
+func BuildKedaForTest(sc Scaling, stateful bool) map[string]any { return buildKeda(sc, stateful) }
+
+// buildKeda renders the chart's `keda` values block from the resolved Scaling
+// config. It is the single place the ScaledObject min/max/polling/cooldown/triggers
+// are decided, so the values are fully admin/DB-driven (no hardcoded autoscaling
+// constants on the deploy path).
+//
+//   - A STATELESS workload may scale to ZERO: when MinReplicas<=0 we render
+//     minReplicaCount=0 AND idleReplicaCount=0 so KEDA returns the workload to zero
+//     during the cooldown. This is the platform's core cost lever.
+//   - A STATEFUL (database) workload is floored to a minimum of 1 — a database must
+//     never scale to zero (its single replica owns the data volume).
+//   - The CPU-utilization trigger is always present (needs no add-on). An
+//     HTTP-concurrency trigger is appended only when HTTPTrigger is set; true
+//     HTTP-wake additionally requires the keda-http-add-on installed in-cluster.
+func buildKeda(sc Scaling, stateful bool) map[string]any {
+	minReplicas := sc.MinReplicas
+	maxReplicas := sc.MaxReplicas
+	polling := sc.PollingInterval
+	cooldown := sc.CooldownPeriod
+	cpuUtil := sc.CPUUtilization
+
+	// Built-in conservative fallbacks for an unset (zero-value) Scaling, so a caller
+	// that does not populate it still produces a valid ScaledObject.
+	if maxReplicas <= 0 {
+		maxReplicas = 5
+	}
+	if polling <= 0 {
+		polling = 30
+	}
+	if cooldown <= 0 {
+		cooldown = 300
+	}
+	if cpuUtil <= 0 {
+		cpuUtil = 70
+	}
+	if minReplicas < 0 {
+		minReplicas = 0
+	}
+	if minReplicas > maxReplicas {
+		// Keep the bounds coherent: the floor can never exceed the ceiling.
+		minReplicas = maxReplicas
+	}
+	// Databases never scale to zero — floor the minimum at 1.
+	if stateful && minReplicas < 1 {
+		minReplicas = 1
+	}
+
+	triggers := []map[string]any{{
+		"type":       "cpu",
+		"metricType": "Utilization",
+		"metadata":   map[string]any{"value": fmt.Sprintf("%d", cpuUtil)},
+	}}
+	// HTTP-concurrency trigger (request-rate / true HTTP-wake). Gated behind a
+	// setting because it needs the keda-http-add-on; without the add-on the trigger
+	// is inert, so it is opt-in.
+	if sc.HTTPTrigger && !stateful {
+		triggers = append(triggers, map[string]any{
+			"type":     "http",
+			"metadata": map[string]any{"scaledObjectName": ""},
+		})
+	}
+
+	keda := map[string]any{
+		"enabled":         true,
+		"scaleTargetKind": scaleTargetKind(stateful),
+		"minReplicaCount": minReplicas,
+		"maxReplicaCount": maxReplicas,
+		"pollingInterval": polling,
+		"cooldownPeriod":  cooldown,
+		"triggers":        triggers,
+	}
+	// Scale-to-zero: KEDA needs idleReplicaCount=0 (with minReplicaCount=0) to take
+	// a stateless workload all the way down to zero during the cooldown window.
+	if minReplicas == 0 {
+		keda["idleReplicaCount"] = 0
+	}
+	return keda
 }
 
 // ---------------------------------------------------------------------------

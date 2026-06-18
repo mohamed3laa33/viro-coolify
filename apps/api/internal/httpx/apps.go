@@ -55,6 +55,10 @@ func (s *Server) writePlatformError(w http.ResponseWriter, action string, err er
 		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, platform.ErrNoImage):
 		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, platform.ErrNoRelease):
+		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, platform.ErrInvalidScale):
+		writeError(w, http.StatusBadRequest, err.Error())
 	default:
 		s.logger.Error(action, "err", err)
 		writeError(w, http.StatusBadGateway, "upstream error from deploy backend")
@@ -140,12 +144,107 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
-	app, err := s.platform.GetApp(r.Context(), chi.URLParam(r, "orgID"), chi.URLParam(r, "appID"))
+	orgID, appID := chi.URLParam(r, "orgID"), chi.URLParam(r, "appID")
+	app, err := s.platform.GetApp(r.Context(), orgID, appID)
 	if err != nil {
 		s.writePlatformError(w, "get app", err)
 		return
 	}
+	// Surface the currently-active release on the app detail (best-effort: a
+	// release lookup error is logged, not fatal — the app itself still renders).
+	cur, cerr := s.platform.CurrentRelease(r.Context(), appID)
+	if cerr != nil {
+		s.logger.Warn("get app: current release", "app", appID, "err", cerr)
+	}
+	// Embed *domain.App so its JSON flattens TOP-LEVEL (preserving the existing web
+	// client contract that reads the app fields, e.g. "id", at the top level) and add
+	// currentRelease as a sibling field rather than nesting the app under {"app":...}.
+	writeJSON(w, http.StatusOK, appDetailResponse{App: app, CurrentRelease: cur})
+}
+
+// appDetailResponse is the GET /apps/{id} body: the app's fields are flattened to
+// the top level (embedded *domain.App) and currentRelease rides alongside them, so
+// the response stays backward-compatible with clients reading app fields top-level.
+type appDetailResponse struct {
+	*domain.App
+	CurrentRelease *domain.Release `json:"currentRelease,omitempty"`
+}
+
+type updateAppRequest struct {
+	Image         *string  `json:"image"`
+	CPU           *float64 `json:"cpu"`
+	MemoryMB      *int     `json:"memoryMb"`
+	GitRepository *string  `json:"gitRepository"`
+	GitBranch     *string  `json:"gitBranch"`
+}
+
+func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
+	var req updateAppRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	app, err := s.platform.UpdateApp(r.Context(), chi.URLParam(r, "orgID"), chi.URLParam(r, "appID"),
+		platform.UpdateAppInput{
+			Image:         req.Image,
+			CPU:           req.CPU,
+			MemoryMB:      req.MemoryMB,
+			GitRepository: req.GitRepository,
+			GitBranch:     req.GitBranch,
+		})
+	if err != nil {
+		s.writePlatformError(w, "update app", err)
+		return
+	}
 	writeJSON(w, http.StatusOK, app)
+}
+
+type scaleAppRequest struct {
+	MinReplicas *int `json:"minReplicas"`
+	MaxReplicas *int `json:"maxReplicas"`
+}
+
+func (s *Server) handleScaleApp(w http.ResponseWriter, r *http.Request) {
+	var req scaleAppRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	app, err := s.platform.ScaleApp(r.Context(), chi.URLParam(r, "orgID"), chi.URLParam(r, "appID"),
+		platform.ScaleAppInput{MinReplicas: req.MinReplicas, MaxReplicas: req.MaxReplicas})
+	if err != nil {
+		s.writePlatformError(w, "scale app", err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, app)
+}
+
+func (s *Server) handleListReleases(w http.ResponseWriter, r *http.Request) {
+	rels, err := s.platform.ListReleases(r.Context(), chi.URLParam(r, "orgID"), chi.URLParam(r, "appID"))
+	if err != nil {
+		s.writePlatformError(w, "list releases", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": rels})
+}
+
+type rollbackRequest struct {
+	Revision int `json:"revision"`
+}
+
+func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
+	var req rollbackRequest
+	// The body is optional (default: previous release); tolerate an empty body.
+	if r.ContentLength != 0 {
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+	}
+	app, err := s.platform.RollbackApp(r.Context(),
+		chi.URLParam(r, "orgID"), chi.URLParam(r, "appID"), req.Revision)
+	if err != nil {
+		s.writePlatformError(w, "rollback app", err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, app)
 }
 
 func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
