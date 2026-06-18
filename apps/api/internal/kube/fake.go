@@ -26,6 +26,8 @@ type FakeBackend struct {
 	Hosts map[string]string
 	// Replicas records the desired replica count per "<namespace>/<release>".
 	Replicas map[string]int
+	// PullSecrets records every EnsureImagePullSecret call as "<namespace>/<name>".
+	PullSecrets map[string]bool
 	// LogLines is the canned log output returned by Logs.
 	LogLines string
 }
@@ -35,12 +37,13 @@ var _ Backend = (*FakeBackend)(nil)
 // NewFakeBackend returns an initialized FakeBackend.
 func NewFakeBackend() *FakeBackend {
 	return &FakeBackend{
-		BaseDomain: "vortex.v60ai.com",
-		Tenants:    map[string]Quota{},
-		Applied:    map[string]Workload{},
-		Hosts:      map[string]string{},
-		Replicas:   map[string]int{},
-		LogLines:   "fake log line\n",
+		BaseDomain:  "vortex.v60ai.com",
+		Tenants:     map[string]Quota{},
+		Applied:     map[string]Workload{},
+		Hosts:       map[string]string{},
+		Replicas:    map[string]int{},
+		PullSecrets: map[string]bool{},
+		LogLines:    "fake log line\n",
 	}
 }
 
@@ -59,6 +62,13 @@ func (f *FakeBackend) EnsureTenant(_ context.Context, orgSlug, projSlug string, 
 	ns := namespaceName(orgSlug, projSlug)
 	f.Tenants[ns] = q
 	return ns, nil
+}
+
+func (f *FakeBackend) EnsureImagePullSecret(_ context.Context, ns, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.PullSecrets[ns+"/"+name] = true
+	return nil
 }
 
 func (f *FakeBackend) Apply(_ context.Context, w Workload) (string, string, error) {

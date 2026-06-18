@@ -428,6 +428,70 @@ func (s *PostgresStore) DeleteApp(ctx context.Context, id string) error {
 	return nil
 }
 
+// ---- Builds ----
+
+func (s *PostgresStore) CreateBuild(ctx context.Context, b *domain.Build) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO builds (id, app_id, org_id, status, commit_ref, image, logs, created_at, finished_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		b.ID, b.AppID, b.OrgID, string(b.Status), b.CommitRef, b.Image, b.Logs, b.CreatedAt, b.FinishedAt,
+	)
+	return mapErr(err)
+}
+
+func (s *PostgresStore) GetBuild(ctx context.Context, id string) (*domain.Build, error) {
+	return s.scanBuild(s.pool.QueryRow(ctx,
+		`SELECT id, app_id, org_id, status, commit_ref, image, logs, created_at, finished_at
+		 FROM builds WHERE id = $1`, id))
+}
+
+func (s *PostgresStore) scanBuild(row pgx.Row) (*domain.Build, error) {
+	var b domain.Build
+	var status string
+	if err := row.Scan(&b.ID, &b.AppID, &b.OrgID, &status, &b.CommitRef, &b.Image, &b.Logs, &b.CreatedAt, &b.FinishedAt); err != nil {
+		return nil, mapErr(err)
+	}
+	b.Status = domain.BuildStatus(status)
+	return &b, nil
+}
+
+func (s *PostgresStore) ListBuildsByApp(ctx context.Context, appID string) ([]domain.Build, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, app_id, org_id, status, commit_ref, image, logs, created_at, finished_at
+		 FROM builds WHERE app_id = $1 ORDER BY created_at DESC`, appID)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+	out := make([]domain.Build, 0)
+	for rows.Next() {
+		var b domain.Build
+		var status string
+		if err := rows.Scan(&b.ID, &b.AppID, &b.OrgID, &status, &b.CommitRef, &b.Image, &b.Logs, &b.CreatedAt, &b.FinishedAt); err != nil {
+			return nil, mapErr(err)
+		}
+		b.Status = domain.BuildStatus(status)
+		out = append(out, b)
+	}
+	return out, mapErr(rows.Err())
+}
+
+func (s *PostgresStore) UpdateBuild(ctx context.Context, b *domain.Build) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE builds SET app_id = $2, org_id = $3, status = $4, commit_ref = $5,
+		 image = $6, logs = $7, created_at = $8, finished_at = $9
+		 WHERE id = $1`,
+		b.ID, b.AppID, b.OrgID, string(b.Status), b.CommitRef, b.Image, b.Logs, b.CreatedAt, b.FinishedAt,
+	)
+	if err != nil {
+		return mapErr(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // ---- Databases ----
 
 func (s *PostgresStore) CreateDatabase(ctx context.Context, d *domain.Database) error {

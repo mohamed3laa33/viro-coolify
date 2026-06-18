@@ -60,15 +60,14 @@ func TestDeployReAppliesWithEnvAndDomains(t *testing.T) {
 	}
 }
 
-// TestDeployNoImageReturnsErrNoImage asserts a git app with no built image yet
-// cannot be deployed (no fake success) and returns ErrNoImage.
+// TestDeployNoImageReturnsErrNoImage asserts a NON-git app with no image cannot
+// be deployed (no fake success) and returns ErrNoImage. (Git apps rebuild on
+// deploy instead — see wave2_test.go.)
 func TestDeployNoImageReturnsErrNoImage(t *testing.T) {
 	svc := newSvc()
 	ctx := context.Background()
 
-	app, err := svc.CreateApp(ctx, "org-1", CreateAppInput{
-		Name: "web", GitRepository: "https://example.com/repo.git",
-	})
+	app, err := svc.CreateApp(ctx, "org-1", CreateAppInput{Name: "web"})
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}

@@ -272,6 +272,54 @@ func TestCreateAppAndListByOrg(t *testing.T) {
 	}
 }
 
+func TestBuildCRUD_Postgres(t *testing.T) {
+	s, mock := newMockStore(t)
+	defer mock.Close()
+
+	now := time.Now()
+	var zero time.Time
+	b := &domain.Build{
+		ID: "b1", AppID: "a1", OrgID: "o1", Status: domain.BuildBuilding,
+		CommitRef: "main", CreatedAt: now,
+	}
+	mock.ExpectExec("INSERT INTO builds").
+		WithArgs("b1", "a1", "o1", "building", "main", "", "", now, zero).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	if err := s.CreateBuild(context.Background(), b); err != nil {
+		t.Fatalf("CreateBuild: %v", err)
+	}
+
+	// List by app (newest first).
+	rows := pgxmock.NewRows([]string{
+		"id", "app_id", "org_id", "status", "commit_ref", "image", "logs", "created_at", "finished_at",
+	}).AddRow("b1", "a1", "o1", "succeeded", "main", "ghcr.io/x:1", "", now, now)
+	mock.ExpectQuery("SELECT id, app_id, org_id, status, commit_ref, image, logs, created_at, finished_at\\s+FROM builds WHERE app_id").
+		WithArgs("a1").
+		WillReturnRows(rows)
+	got, err := s.ListBuildsByApp(context.Background(), "a1")
+	if err != nil {
+		t.Fatalf("ListBuildsByApp: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "b1" || got[0].Status != domain.BuildSucceeded {
+		t.Fatalf("unexpected builds: %+v", got)
+	}
+
+	// Update.
+	b.Status = domain.BuildFailed
+	b.Logs = "boom"
+	b.FinishedAt = now
+	mock.ExpectExec("UPDATE builds SET").
+		WithArgs("b1", "a1", "o1", "failed", "main", "", "boom", now, now).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	if err := s.UpdateBuild(context.Background(), b); err != nil {
+		t.Fatalf("UpdateBuild: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+}
+
 func TestAddMembership_Conflict(t *testing.T) {
 	s, mock := newMockStore(t)
 	defer mock.Close()

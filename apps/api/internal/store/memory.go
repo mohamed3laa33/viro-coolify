@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"sync"
 
@@ -16,6 +17,7 @@ type MemoryStore struct {
 	organizations  map[string]domain.Organization
 	memberships    map[string]domain.Membership        // key: orgID + "\x00" + userID
 	apps           map[string]domain.App               // by id
+	builds         map[string]domain.Build             // by id
 	databases      map[string]domain.Database          // by id
 	subscriptions  map[string]domain.Subscription      // by orgID
 	usage          map[string][]domain.UsageRecord     // by orgID
@@ -41,6 +43,7 @@ func NewMemoryStore() *MemoryStore {
 		organizations:  make(map[string]domain.Organization),
 		memberships:    make(map[string]domain.Membership),
 		apps:           make(map[string]domain.App),
+		builds:         make(map[string]domain.Build),
 		databases:      make(map[string]domain.Database),
 		subscriptions:  make(map[string]domain.Subscription),
 		usage:          make(map[string][]domain.UsageRecord),
@@ -328,6 +331,52 @@ func (s *MemoryStore) DeleteApp(_ context.Context, id string) error {
 		return ErrNotFound
 	}
 	delete(s.apps, id)
+	return nil
+}
+
+// ---- Builds ----
+
+func (s *MemoryStore) CreateBuild(_ context.Context, b *domain.Build) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.builds[b.ID]; exists {
+		return ErrConflict
+	}
+	s.builds[b.ID] = *b
+	return nil
+}
+
+func (s *MemoryStore) GetBuild(_ context.Context, id string) (*domain.Build, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	b, ok := s.builds[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return &b, nil
+}
+
+func (s *MemoryStore) ListBuildsByApp(_ context.Context, appID string) ([]domain.Build, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]domain.Build, 0)
+	for _, b := range s.builds {
+		if b.AppID == appID {
+			out = append(out, b)
+		}
+	}
+	// Newest first, so the list endpoint shows the latest build at the top.
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	return out, nil
+}
+
+func (s *MemoryStore) UpdateBuild(_ context.Context, b *domain.Build) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.builds[b.ID]; !ok {
+		return ErrNotFound
+	}
+	s.builds[b.ID] = *b
 	return nil
 }
 

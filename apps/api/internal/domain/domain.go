@@ -143,6 +143,32 @@ type Service struct {
 	CreatedAt time.Time `json:"createdAt"`
 }
 
+// BuildStatus is the lifecycle state of an image build.
+type BuildStatus string
+
+const (
+	BuildPending   BuildStatus = "pending"
+	BuildBuilding  BuildStatus = "building"
+	BuildSucceeded BuildStatus = "succeeded"
+	BuildFailed    BuildStatus = "failed"
+)
+
+// Build records one git-source image build for an app: the source ref it built,
+// the image it produced (on success), captured logs (on failure), and timing.
+// Builds have no Helm release of their own — once a build succeeds the platform
+// deploys the produced image through the normal app deploy path.
+type Build struct {
+	ID         string      `json:"id"`
+	AppID      string      `json:"appId"`
+	OrgID      string      `json:"orgId"`
+	Status     BuildStatus `json:"status"`
+	CommitRef  string      `json:"commitRef,omitempty"` // git ref/commit the build targeted
+	Image      string      `json:"image,omitempty"`     // image produced on success
+	Logs       string      `json:"logs,omitempty"`      // captured build logs (on failure)
+	CreatedAt  time.Time   `json:"createdAt"`
+	FinishedAt time.Time   `json:"finishedAt,omitempty"`
+}
+
 // Domain is a custom domain (FQDN) attached to an app.
 type Domain struct {
 	ID        string    `json:"id"`

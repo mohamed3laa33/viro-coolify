@@ -43,6 +43,13 @@ type Config struct {
 	// HelmTimeout bounds each `helm upgrade` (with --wait --atomic). Zero falls
 	// back to defaultHelmTimeout. Sourced from the VORTEX_* env (admin-tunable).
 	HelmTimeout time.Duration
+
+	// RegistryPullSecret / RegistryPullSecretNamespace identify the control-plane
+	// SOURCE Secret (kubernetes.io/dockerconfigjson) whose .dockerconfigjson is
+	// copied into each tenant namespace by EnsureImagePullSecret so a private built
+	// image can be pulled. Empty in local/dev: EnsureImagePullSecret then no-ops.
+	RegistryPullSecret          string
+	RegistryPullSecretNamespace string
 }
 
 // defaultHelmTimeout is the fallback per-Apply helm deadline when cfg.HelmTimeout
@@ -112,6 +119,22 @@ func NewWithClients(cfg Config, client kubernetes.Interface, dyn dynamic.Interfa
 	return b
 }
 
+// NewClientset builds a typed Kubernetes clientset from in-cluster config,
+// falling back to the supplied kubeconfig path (or the default loading rules
+// when empty). It is shared by other packages (e.g. the build pipeline) that
+// need a clientset without the full KubeBackend.
+func NewClientset(kubeconfigPath string) (kubernetes.Interface, error) {
+	restCfg, err := restConfig(kubeconfigPath)
+	if err != nil {
+		return nil, err
+	}
+	cs, err := kubernetes.NewForConfig(restCfg)
+	if err != nil {
+		return nil, fmt.Errorf("kube: build clientset: %w", err)
+	}
+	return cs, nil
+}
+
 // restConfig prefers in-cluster config and falls back to a kubeconfig file.
 func restConfig(kubeconfigPath string) (*rest.Config, error) {
 	if c, err := rest.InClusterConfig(); err == nil {
@@ -164,6 +187,54 @@ func (b *KubeBackend) EnsureTenant(ctx context.Context, orgSlug, projSlug string
 		return "", err
 	}
 	return ns, nil
+}
+
+// EnsureImagePullSecret upserts a kubernetes.io/dockerconfigjson Secret named
+// "name" in tenant namespace "ns" by copying the dockerconfigjson from the
+// configured control-plane source secret (cfg.RegistryPullSecret in
+// cfg.RegistryPullSecretNamespace). When no source is configured it no-ops, so
+// local/dev (and any non-registry flow) keeps working.
+func (b *KubeBackend) EnsureImagePullSecret(ctx context.Context, ns, name string) error {
+	if b.cfg.RegistryPullSecret == "" || name == "" {
+		return nil
+	}
+	srcNS := b.cfg.RegistryPullSecretNamespace
+	if srcNS == "" {
+		srcNS = "vortex"
+	}
+	src, err := b.client.CoreV1().Secrets(srcNS).Get(ctx, b.cfg.RegistryPullSecret, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("kube: read source pull secret %s/%s: %w", srcNS, b.cfg.RegistryPullSecret, err)
+	}
+	dockercfg := src.Data[corev1.DockerConfigJsonKey]
+	if len(dockercfg) == 0 {
+		return fmt.Errorf("kube: source pull secret %s/%s missing %s", srcNS, b.cfg.RegistryPullSecret, corev1.DockerConfigJsonKey)
+	}
+	sec := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: ns,
+			Labels:    map[string]string{"app.kubernetes.io/managed-by": "vortex"},
+		},
+		Type: corev1.SecretTypeDockerConfigJson,
+		Data: map[string][]byte{corev1.DockerConfigJsonKey: dockercfg},
+	}
+	return upsert(ctx,
+		func() error {
+			_, err := b.client.CoreV1().Secrets(ns).Create(ctx, sec, metav1.CreateOptions{})
+			return err
+		},
+		func() error {
+			cur, err := b.client.CoreV1().Secrets(ns).Get(ctx, name, metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+			cur.Type = sec.Type
+			cur.Data = sec.Data
+			_, err = b.client.CoreV1().Secrets(ns).Update(ctx, cur, metav1.UpdateOptions{})
+			return err
+		},
+	)
 }
 
 func (b *KubeBackend) waitNamespaceActive(ctx context.Context, ns string) error {
@@ -379,6 +450,14 @@ func (b *KubeBackend) buildValues(w Workload, h string) map[string]any {
 		},
 		"resources": resources,
 		"env":       env,
+	}
+
+	// Attach the tenant-namespace pull secret for PRIVATE built images so the
+	// Deployment/StatefulSet podSpec.imagePullSecrets is populated (the common-chart
+	// renders deployment.imagePullSecrets verbatim). Without it a built private
+	// image fails with ImagePullBackOff.
+	if w.ImagePullSecret != "" {
+		deployment["imagePullSecrets"] = []map[string]any{{"name": w.ImagePullSecret}}
 	}
 
 	// StatefulSet reads container ports from deployment.ports; Deployment reads

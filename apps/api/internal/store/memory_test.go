@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/domain"
 )
@@ -193,6 +194,56 @@ func TestMemoryStoreUpdateDatabase(t *testing.T) {
 	}
 	// Updating a missing database is a not-found error.
 	if err := s.UpdateDatabase(ctx, &domain.Database{ID: "missing"}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("update missing: expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestMemoryStoreBuilds(t *testing.T) {
+	s := NewMemoryStore()
+	ctx := context.Background()
+
+	now := time.Now()
+	b1 := &domain.Build{ID: "b1", AppID: "a1", OrgID: "o1", Status: domain.BuildBuilding, CreatedAt: now}
+	b2 := &domain.Build{ID: "b2", AppID: "a1", OrgID: "o1", Status: domain.BuildPending, CreatedAt: now.Add(time.Second)}
+	if err := s.CreateBuild(ctx, b1); err != nil {
+		t.Fatalf("create b1: %v", err)
+	}
+	if err := s.CreateBuild(ctx, b2); err != nil {
+		t.Fatalf("create b2: %v", err)
+	}
+	// Duplicate id conflicts.
+	if err := s.CreateBuild(ctx, b1); !errors.Is(err, ErrConflict) {
+		t.Fatalf("duplicate create: expected ErrConflict, got %v", err)
+	}
+
+	// List newest-first.
+	list, err := s.ListBuildsByApp(ctx, "a1")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(list) != 2 || list[0].ID != "b2" {
+		t.Fatalf("expected newest-first [b2,b1], got %+v", list)
+	}
+
+	// Update.
+	b1.Status = domain.BuildSucceeded
+	b1.Image = "img:1"
+	if err := s.UpdateBuild(ctx, b1); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	got, err := s.GetBuild(ctx, "b1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Status != domain.BuildSucceeded || got.Image != "img:1" {
+		t.Fatalf("unexpected build: %+v", got)
+	}
+
+	// Missing get/update.
+	if _, err := s.GetBuild(ctx, "nope"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("get missing: expected ErrNotFound, got %v", err)
+	}
+	if err := s.UpdateBuild(ctx, &domain.Build{ID: "nope"}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("update missing: expected ErrNotFound, got %v", err)
 	}
 }

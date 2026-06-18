@@ -78,6 +78,9 @@ func main() {
 	// querying the pool when it closes.
 	stop()
 	bg.Wait()
+	// Drain any in-flight async git builds before releasing store resources, so a
+	// build worker never writes to a pool that is about to close.
+	srv.WaitBuilds()
 	// Release store resources (e.g. the pgx connection pool) after the HTTP
 	// server has drained and the background loops have exited.
 	st.Close()

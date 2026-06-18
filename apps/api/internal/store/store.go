@@ -40,6 +40,12 @@ type Store interface {
 	UpdateApp(ctx context.Context, a *domain.App) error
 	DeleteApp(ctx context.Context, id string) error
 
+	// Builds (git-source image builds, tenant-scoped via the owning app/org).
+	CreateBuild(ctx context.Context, b *domain.Build) error
+	GetBuild(ctx context.Context, id string) (*domain.Build, error)
+	ListBuildsByApp(ctx context.Context, appID string) ([]domain.Build, error)
+	UpdateBuild(ctx context.Context, b *domain.Build) error
+
 	// Databases (tenant-scoped).
 	CreateDatabase(ctx context.Context, d *domain.Database) error
 	GetDatabase(ctx context.Context, id string) (*domain.Database, error)

@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/auth"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/billing"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/build"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/config"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/domain"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/identity"
@@ -25,12 +26,17 @@ type Server struct {
 	cfg      *config.Config
 	logger   *slog.Logger
 	backend  kube.Backend
+	builder  build.Builder
 	store    store.Store
 	tokens   *auth.TokenManager
 	identity *identity.Service
 	platform *platform.Service
 	billing  *billing.Service
 	router   chi.Router
+
+	// buildWG tracks in-flight async git builds so a graceful shutdown can wait
+	// for them to drain (see WaitBuilds). It is passed to the platform service.
+	buildWG sync.WaitGroup
 }
 
 // Option customizes Server construction (used by tests to inject a deploy
@@ -39,12 +45,20 @@ type Option func(*serverOptions)
 
 type serverOptions struct {
 	backend kube.Backend
+	builder build.Builder
 }
 
 // WithBackend overrides the Kubernetes deploy backend (e.g. kube.FakeBackend in
 // tests). When unset, NewServer builds the backend from config.
 func WithBackend(b kube.Backend) Option {
 	return func(o *serverOptions) { o.backend = b }
+}
+
+// WithBuilder overrides the git-source image builder (e.g. build.FakeBuilder in
+// tests). When unset, NewServer builds the builder from cluster config (with a
+// FakeBuilder fallback when no cluster is reachable).
+func WithBuilder(b build.Builder) Option {
+	return func(o *serverOptions) { o.builder = b }
 }
 
 // NewServer constructs a Server with its dependencies and routes wired up.
@@ -71,6 +85,15 @@ func NewServer(cfg *config.Config, logger *slog.Logger, st store.Store, opts ...
 		backend = newKubeBackend(cfg, logger)
 	}
 
+	// Git-source image builder: build the real KanikoBuilder from cluster config;
+	// on failure (local dev with no cluster) fall back to the in-memory
+	// FakeBuilder so the API still boots and the git→build→deploy flow is
+	// exercised end-to-end (NOT a demo success path — see build.FakeBuilder).
+	builder := so.builder
+	if builder == nil {
+		builder = newBuilder(cfg, logger)
+	}
+
 	// Payment provider: Stripe when billing is enabled and configured, else a mock
 	// that activates subscriptions locally (so the billing UX works in dev).
 	var provider billing.PaymentProvider = billing.MockProvider{}
@@ -91,14 +114,62 @@ func NewServer(cfg *config.Config, logger *slog.Logger, st store.Store, opts ...
 		cfg:      cfg,
 		logger:   logger,
 		backend:  backend,
+		builder:  builder,
 		store:    st,
 		tokens:   tokens,
 		identity: identity.NewService(st, tokens, cfg.AdminEmails),
-		platform: platform.NewService(st, backend, bill),
 		billing:  bill,
 	}
+	// Build the platform service with the git image builder wired in, threading
+	// the server's build WaitGroup so in-flight builds drain on shutdown. The
+	// per-tenant imagePullSecret is only attached/ensured when a registry pull
+	// secret SOURCE is configured (production); local/dev leaves it empty so the
+	// FakeBuilder/public-image flows don't reference a non-existent secret.
+	pullSecretName := ""
+	if cfg.RegistryPullSecretSource != "" {
+		pullSecretName = cfg.RegistryPullSecret
+	}
+	s.platform = platform.NewService(st, backend, bill,
+		platform.WithBuilder(builder),
+		platform.WithBuildRegistry(cfg.BuildRegistry),
+		platform.WithPullSecretName(pullSecretName),
+		platform.WithBuildTimeout(time.Duration(cfg.BuildTimeoutSec)*time.Second),
+		platform.WithBuildWaitGroup(&s.buildWG),
+	)
 	s.router = s.routes()
 	return s
+}
+
+// WaitBuilds blocks until all in-flight async git builds have finished. Call it
+// on graceful shutdown (after the HTTP server has drained) before closing the
+// store, so a mid-flight build never writes to a pool that is about to close.
+func (s *Server) WaitBuilds() { s.buildWG.Wait() }
+
+// newBuilder builds the git-source image builder from config. When the cluster
+// is unreachable it logs a warning and returns an in-memory FakeBuilder so
+// local/dev still boots.
+func newBuilder(cfg *config.Config, logger *slog.Logger) build.Builder {
+	cs, err := kube.NewClientset(cfg.Kubeconfig)
+	if err != nil {
+		logger.Warn("build: cluster unavailable; falling back to in-memory FakeBuilder",
+			"err", err)
+		return build.NewFakeBuilder()
+	}
+	// SECURITY (item 4): only mount the shared push secret when a registry is
+	// actually configured. With no registry (local/dev) nothing is mounted, so a
+	// tenant build pod can never read registry credentials. See build.Config.PushSecret
+	// for the deferred per-org-scoped-token TODO.
+	pushSecret := ""
+	if cfg.BuildRegistry != "" {
+		pushSecret = cfg.BuildPushSecret
+	}
+	return build.NewKanikoBuilder(build.Config{
+		Namespace:            cfg.BuildNamespace,
+		KanikoImage:          cfg.BuildKanikoImage,
+		PushSecret:           pushSecret,
+		GitCredentialsSecret: cfg.BuildGitCreds,
+		Timeout:              time.Duration(cfg.BuildTimeoutSec) * time.Second,
+	}, cs)
 }
 
 // newKubeBackend builds the Kubernetes deploy backend from config. When the
@@ -110,13 +181,15 @@ func newKubeBackend(cfg *config.Config, logger *slog.Logger) kube.Backend {
 	// derived from the org's plan.
 	settings := store.DefaultSettings()
 	kc := kube.Config{
-		BaseDomain:             cfg.BaseDomain,
-		ChartPath:              cfg.KubeChartPath,
-		GatewayName:            cfg.GatewayName,
-		GatewayNamespace:       cfg.GatewayNamespace,
-		CPUOvercommitFactor:    settings.CPUOvercommitFactor,
-		MemoryOvercommitFactor: settings.MemoryOvercommitFactor,
-		HelmTimeout:            time.Duration(cfg.HelmTimeoutSec) * time.Second,
+		BaseDomain:                  cfg.BaseDomain,
+		ChartPath:                   cfg.KubeChartPath,
+		GatewayName:                 cfg.GatewayName,
+		GatewayNamespace:            cfg.GatewayNamespace,
+		CPUOvercommitFactor:         settings.CPUOvercommitFactor,
+		MemoryOvercommitFactor:      settings.MemoryOvercommitFactor,
+		HelmTimeout:                 time.Duration(cfg.HelmTimeoutSec) * time.Second,
+		RegistryPullSecret:          cfg.RegistryPullSecretSource,
+		RegistryPullSecretNamespace: cfg.RegistryPullSecretNamespace,
 	}
 	be, err := kube.New(kc, cfg.Kubeconfig, nil)
 	if err != nil {
@@ -296,12 +369,16 @@ func (s *Server) reconcileWorkload(ctx context.Context, id, current, namespace, 
 	}
 }
 
-// stickyStatuses are user-initiated states the reconciler must NEVER overwrite.
-// "stopped" in particular gates billing (billable() charges anything that is not
+// stickyStatuses are user-initiated / terminal states the reconciler must NEVER
+// overwrite. "stopped" gates billing (billable() charges anything that is not
 // "stopped"), so clobbering it back to a machine state would resume charges for a
-// workload the user explicitly stopped.
+// workload the user explicitly stopped. "build_failed" is the outcome of a failed
+// build (incl. a rebuild of a still-running app, whose Deployment is non-empty);
+// without stickiness the reconciler would see the old Deployment as "running" and
+// silently clobber the failure, hiding it from the user.
 var stickyStatuses = map[string]bool{
-	"stopped": true,
+	"stopped":      true,
+	"build_failed": true,
 }
 
 // transientIntents are user-initiated states that should be LEFT ALONE until the
@@ -311,6 +388,10 @@ var stickyStatuses = map[string]bool{
 var transientIntents = map[string]bool{
 	"deploying":  true,
 	"restarting": true,
+	// A git app being built has no Release yet (reconcileWorkload returns early),
+	// but list it explicitly so a build intent is never downgraded if a stale
+	// Release lingers on the row.
+	"building": true,
 }
 
 // terminalMachinePhases are the machine-observable phases that are allowed to
@@ -487,6 +568,10 @@ func (s *Server) routes() chi.Router {
 
 						// App metrics.
 						r.With(s.orgAuthz(domain.RoleMember)).Get("/{appID}/metrics", s.handleAppMetrics)
+
+						// Git-source image builds.
+						r.With(s.orgAuthz(domain.RoleMember)).Get("/{appID}/builds", s.handleListBuilds)
+						r.With(s.orgAuthz(domain.RoleMember)).Get("/{appID}/builds/{buildID}", s.handleGetBuild)
 					})
 
 					r.Route("/services", func(r chi.Router) {

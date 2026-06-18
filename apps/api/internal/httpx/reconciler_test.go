@@ -151,6 +151,36 @@ func TestReconcileDoesNotClobberStopped(t *testing.T) {
 	}
 }
 
+// TestReconcileDoesNotClobberBuildFailed verifies a "build_failed" status (e.g. a
+// rebuild of a still-running app, whose Deployment is non-empty and would read as
+// "running") is sticky and never overwritten by the reconciler.
+func TestReconcileDoesNotClobberBuildFailed(t *testing.T) {
+	s, fb, st := newReconcileServer(t)
+	ctx := context.Background()
+	if err := st.CreateOrganization(ctx, &domain.Organization{ID: "org-1", Slug: "acme"}); err != nil {
+		t.Fatalf("create org: %v", err)
+	}
+	// Deploy a workload so the backend reports it running (replicas 1).
+	rel, host, err := fb.Apply(ctx, kube.Workload{OrgSlug: "acme", ProjectSlug: "web", Name: "api", Kind: "app"})
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	// The app's last build failed, but its prior Deployment is still up.
+	if err := st.CreateApp(ctx, &domain.App{
+		ID: "a1", OrgID: "org-1", Name: "api", Status: "build_failed",
+		Namespace: "vortex-acme-web", Release: rel, Host: host,
+	}); err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	s.reconcileOnce(ctx)
+
+	got, _ := st.GetApp(ctx, "a1")
+	if got.Status != "build_failed" {
+		t.Fatalf("status after reconcile = %q, want build_failed (sticky)", got.Status)
+	}
+}
+
 func TestReconcileSkipsWorkloadsWithoutRelease(t *testing.T) {
 	s, _, st := newReconcileServer(t)
 	ctx := context.Background()

@@ -41,6 +41,21 @@ type Config struct {
 	HelmTimeoutSec   int    // per-Apply helm deadline (seconds); --wait --atomic
 	ReconcileSec     int    // status reconciler interval (seconds)
 
+	// Git image builder (kaniko Job pipeline). All admin-tunable via VORTEX_BUILD_*.
+	BuildRegistry    string // push target host/repo prefix, e.g. ghcr.io/<owner> or registry.digitalocean.com/<reg>
+	BuildNamespace   string // namespace where kaniko build Jobs run
+	BuildPushSecret  string // docker-config Secret used to push (in the build namespace)
+	BuildGitCreds    string // optional Secret (build ns) exposing GIT_USERNAME/GIT_PASSWORD/GIT_TOKEN for private clones
+	BuildKanikoImage string // pinned kaniko executor image
+	BuildTimeoutSec  int    // per-build deadline (seconds)
+
+	// Registry pull secret: the per-tenant imagePullSecret name attached to built
+	// apps, and the control-plane SOURCE secret (+ namespace) copied into each
+	// tenant namespace so a private built image can be pulled.
+	RegistryPullSecret          string // tenant-namespace imagePullSecret name attached to built apps
+	RegistryPullSecretSource    string // control-plane source dockerconfigjson Secret to copy from (empty => no-op in dev)
+	RegistryPullSecretNamespace string // namespace of the source secret (default "vortex")
+
 	// Billing (Stripe, test-mode by default).
 	StripeSecretKey     string
 	StripeWebhookSecret string
@@ -55,28 +70,38 @@ type Config struct {
 // Load reads configuration from environment variables, applying development defaults.
 func Load() (*Config, error) {
 	cfg := &Config{
-		Env:                 getenv("ENV", "development"),
-		HTTPAddr:            getenv("HTTP_ADDR", ":8080"),
-		DatabaseURL:         getenv("DATABASE_URL", ""),
-		DBMaxConns:          getenvInt("DB_MAX_CONNS", 10),
-		DBMinConns:          getenvInt("DB_MIN_CONNS", 2),
-		JWTSecret:           getenv("JWT_SECRET", defaultDevJWTSecret),
-		JWTAccessTTL:        getenvInt("JWT_ACCESS_TTL_MIN", 15),
-		JWTRefreshTTL:       getenvInt("JWT_REFRESH_TTL_HOURS", 24*30),
-		CoolifyBaseURL:      getenv("COOLIFY_BASE_URL", "http://localhost:8000"),
-		CoolifyToken:        getenv("COOLIFY_TOKEN", ""),
-		BaseDomain:          getenv("BASE_DOMAIN", "vortex.v60ai.com"),
-		Kubeconfig:          getenv("KUBECONFIG", ""),
-		KubeChartPath:       getenv("KUBE_CHART_PATH", "deploy/charts/common-chart"),
-		GatewayName:         getenv("GATEWAY_NAME", "vortex"),
-		GatewayNamespace:    getenv("GATEWAY_NAMESPACE", "vortex"),
-		HelmTimeoutSec:      getenvInt("HELM_TIMEOUT_SEC", 300),
-		ReconcileSec:        getenvInt("RECONCILE_SEC", 30),
-		StripeSecretKey:     getenv("STRIPE_SECRET_KEY", ""),
-		StripeWebhookSecret: getenv("STRIPE_WEBHOOK_SECRET", ""),
-		BillingEnabled:      getenvBool("BILLING_ENABLED", false),
-		CORSAllowedOrigins:  splitAndTrim(getenv("CORS_ORIGINS", "http://localhost:3000")),
-		AdminEmails:         splitAndTrim(strings.ToLower(getenv("ADMIN_EMAILS", ""))),
+		Env:              getenv("ENV", "development"),
+		HTTPAddr:         getenv("HTTP_ADDR", ":8080"),
+		DatabaseURL:      getenv("DATABASE_URL", ""),
+		DBMaxConns:       getenvInt("DB_MAX_CONNS", 10),
+		DBMinConns:       getenvInt("DB_MIN_CONNS", 2),
+		JWTSecret:        getenv("JWT_SECRET", defaultDevJWTSecret),
+		JWTAccessTTL:     getenvInt("JWT_ACCESS_TTL_MIN", 15),
+		JWTRefreshTTL:    getenvInt("JWT_REFRESH_TTL_HOURS", 24*30),
+		CoolifyBaseURL:   getenv("COOLIFY_BASE_URL", "http://localhost:8000"),
+		CoolifyToken:     getenv("COOLIFY_TOKEN", ""),
+		BaseDomain:       getenv("BASE_DOMAIN", "vortex.v60ai.com"),
+		Kubeconfig:       getenv("KUBECONFIG", ""),
+		KubeChartPath:    getenv("KUBE_CHART_PATH", "deploy/charts/common-chart"),
+		GatewayName:      getenv("GATEWAY_NAME", "vortex"),
+		GatewayNamespace: getenv("GATEWAY_NAMESPACE", "vortex"),
+		HelmTimeoutSec:   getenvInt("HELM_TIMEOUT_SEC", 300),
+		ReconcileSec:     getenvInt("RECONCILE_SEC", 30),
+		BuildRegistry:    getenv("BUILD_REGISTRY", ""),
+		BuildNamespace:   getenv("BUILD_NAMESPACE", "vortex-builds"),
+		BuildPushSecret:  getenv("BUILD_PUSH_SECRET", "vortex-registry-push"),
+		BuildGitCreds:    getenv("BUILD_GIT_CREDS_SECRET", ""),
+		BuildKanikoImage: getenv("BUILD_KANIKO_IMAGE", "gcr.io/kaniko-project/executor:v1.23.2"),
+		BuildTimeoutSec:  getenvInt("BUILD_TIMEOUT_SEC", 600),
+
+		RegistryPullSecret:          getenv("REGISTRY_PULL_SECRET", "vortex-registry-pull"),
+		RegistryPullSecretSource:    getenv("REGISTRY_PULL_SECRET_SOURCE", ""),
+		RegistryPullSecretNamespace: getenv("REGISTRY_PULL_SECRET_NAMESPACE", "vortex"),
+		StripeSecretKey:             getenv("STRIPE_SECRET_KEY", ""),
+		StripeWebhookSecret:         getenv("STRIPE_WEBHOOK_SECRET", ""),
+		BillingEnabled:              getenvBool("BILLING_ENABLED", false),
+		CORSAllowedOrigins:          splitAndTrim(getenv("CORS_ORIGINS", "http://localhost:3000")),
+		AdminEmails:                 splitAndTrim(strings.ToLower(getenv("ADMIN_EMAILS", ""))),
 	}
 	if cfg.IsProduction() && (cfg.JWTSecret == "" || cfg.JWTSecret == defaultDevJWTSecret) {
 		return nil, errors.New("VORTEX_JWT_SECRET must be set to a strong value in production")

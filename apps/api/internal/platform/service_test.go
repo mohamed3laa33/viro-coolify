@@ -150,16 +150,16 @@ func TestCreateAppFromImageDeploys(t *testing.T) {
 	}
 }
 
-func TestCreateAppGitOnlyStaysQueued(t *testing.T) {
-	svc, fb := newSvcWithFake()
+// TestCreateAppGitStartsBuilding asserts a git-source app is marked "building" on
+// create (the build runs asynchronously) rather than the old "queued" no-op. The
+// full git→build→deploy flow is asserted in wave2_test.go.
+func TestCreateAppGitStartsBuilding(t *testing.T) {
+	svc, _ := newSvcWithFake()
 	app, err := svc.CreateApp(context.Background(), "org-git", CreateAppInput{Name: "web", GitRepository: "https://example.com/repo.git"})
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
-	if app.Status != "queued" || app.Release != "" {
-		t.Fatalf("git-only app should stay queued until built: %+v", app)
-	}
-	if len(fb.Applied) != 0 {
-		t.Fatalf("git-only app must not deploy yet, got %d applies", len(fb.Applied))
+	if app.Status != "building" {
+		t.Fatalf("git app should be building on create, got %q", app.Status)
 	}
 }

@@ -163,6 +163,25 @@ func (s *Server) handleAppLogs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"logs": logs})
 }
 
+func (s *Server) handleListBuilds(w http.ResponseWriter, r *http.Request) {
+	builds, err := s.platform.ListBuilds(r.Context(), chi.URLParam(r, "orgID"), chi.URLParam(r, "appID"))
+	if err != nil {
+		s.writePlatformError(w, "list builds", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": builds})
+}
+
+func (s *Server) handleGetBuild(w http.ResponseWriter, r *http.Request) {
+	b, err := s.platform.GetBuild(r.Context(),
+		chi.URLParam(r, "orgID"), chi.URLParam(r, "appID"), chi.URLParam(r, "buildID"))
+	if err != nil {
+		s.writePlatformError(w, "get build", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, b)
+}
+
 type createDatabaseRequest struct {
 	Name      string  `json:"name"`
 	Engine    string  `json:"engine"`

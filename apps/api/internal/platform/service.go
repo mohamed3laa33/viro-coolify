@@ -13,11 +13,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/billing"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/build"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/catalog"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/domain"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/kube"
@@ -104,22 +107,90 @@ func (s *Service) workloadCount(ctx context.Context, orgID string) (int, error) 
 type Service struct {
 	store   store.Store
 	backend kube.Backend
+	builder build.Builder
 	billing *billing.Service
 	idgen   func() string
 	now     func() time.Time
+
+	// buildRegistry is the push target prefix (host/repo) for built images, e.g.
+	// "ghcr.io/acme". Empty in dev; the target image ref is still computed so the
+	// FakeBuilder flow works end-to-end.
+	buildRegistry string
+	// pullSecretName is the tenant-namespace imagePullSecret name attached to BUILT
+	// apps so a private built image can be pulled. Empty when no registry is
+	// configured (local/dev) so public/FakeBuilder flows skip the pull secret.
+	pullSecretName string
+	// buildTimeout bounds the async build worker's detached context.
+	buildTimeout time.Duration
+	// buildWG, when set, tracks in-flight async builds so a graceful shutdown can
+	// Wait() for them to drain (mirrors the metering/reconciler WaitGroup).
+	buildWG *sync.WaitGroup
+}
+
+// Option customizes Service construction.
+type Option func(*Service)
+
+// WithBuilder injects the image builder used for git-source apps. When unset the
+// service defaults to build.NewFakeBuilder() (mirroring kube.FakeBackend), so
+// tests and no-cluster boots still exercise the full git→build→deploy flow.
+func WithBuilder(b build.Builder) Option {
+	return func(s *Service) {
+		if b != nil {
+			s.builder = b
+		}
+	}
+}
+
+// WithBuildRegistry sets the push target prefix for built images.
+func WithBuildRegistry(reg string) Option {
+	return func(s *Service) { s.buildRegistry = strings.TrimSpace(reg) }
+}
+
+// WithPullSecretName sets the tenant-namespace imagePullSecret name attached to
+// built apps (and ensured per tenant namespace before deploy). Empty disables it.
+func WithPullSecretName(name string) Option {
+	return func(s *Service) { s.pullSecretName = strings.TrimSpace(name) }
+}
+
+// WithBuildTimeout bounds the async build worker's detached context.
+func WithBuildTimeout(d time.Duration) Option {
+	return func(s *Service) {
+		if d > 0 {
+			s.buildTimeout = d
+		}
+	}
+}
+
+// WithBuildWaitGroup registers a WaitGroup so in-flight async builds drain on
+// shutdown.
+func WithBuildWaitGroup(wg *sync.WaitGroup) Option {
+	return func(s *Service) { s.buildWG = wg }
 }
 
 // NewService builds a platform service. The backend is the Kubernetes deploy
-// surface (kube.Backend); tests inject kube.FakeBackend. The billing service
-// supplies store-backed plan limits for quota enforcement.
-func NewService(s store.Store, backend kube.Backend, b *billing.Service) *Service {
+// surface (kube.Backend); tests inject kube.FakeBackend. The builder is the
+// git-source image builder (build.Builder); tests inject build.FakeBuilder. The
+// billing service supplies store-backed plan limits for quota enforcement.
+func NewService(s store.Store, backend kube.Backend, b *billing.Service, opts ...Option) *Service {
 	if b == nil {
 		b = billing.NewService(s, nil)
 	}
 	if backend == nil {
 		backend = kube.NewFakeBackend()
 	}
-	return &Service{store: s, backend: backend, billing: b, idgen: uuid.NewString, now: time.Now}
+	svc := &Service{
+		store:        s,
+		backend:      backend,
+		builder:      build.NewFakeBuilder(),
+		billing:      b,
+		idgen:        uuid.NewString,
+		now:          time.Now,
+		buildTimeout: 10 * time.Minute,
+	}
+	for _, opt := range opts {
+		opt(svc)
+	}
+	return svc
 }
 
 // orgSlug resolves the org's slug, falling back to the org id when the org
@@ -209,9 +280,16 @@ func (s *Service) appDomains(ctx context.Context, appID string) []string {
 }
 
 // appWorkload renders the full kube.Workload for an app, populating its stored
-// env + custom domains so they reach the pods on every Apply.
+// env + custom domains so they reach the pods on every Apply. For a git-BUILT app
+// (it has a GitRepository) it also attaches the tenant-namespace imagePullSecret
+// so the private built image can be pulled (no ImagePullBackOff). Public
+// image-based apps leave the pull secret empty.
 func (s *Service) appWorkload(ctx context.Context, app *domain.App, orgSlug, projSlug string) kube.Workload {
 	cpuF, memF := s.overcommitFactors(ctx)
+	pullSecret := ""
+	if app.GitRepository != "" {
+		pullSecret = s.pullSecretName
+	}
 	return kube.Workload{
 		OrgSlug:                orgSlug,
 		ProjectSlug:            projSlug,
@@ -222,9 +300,22 @@ func (s *Service) appWorkload(ctx context.Context, app *domain.App, orgSlug, pro
 		MemoryMB:               app.MemoryMB,
 		Env:                    s.appEnv(ctx, app.ID),
 		Domains:                s.appDomains(ctx, app.ID),
+		ImagePullSecret:        pullSecret,
 		CPUOvercommitFactor:    cpuF,
 		MemoryOvercommitFactor: memF,
 	}
+}
+
+// deployBuiltApp ensures the tenant-namespace imagePullSecret exists (so a private
+// built image can be pulled) and then applies the workload. Used by the build
+// success path. EnsureImagePullSecret no-ops when no registry/source is configured.
+func (s *Service) deployBuiltApp(ctx context.Context, app *domain.App, orgSlug, projSlug string) (string, string, error) {
+	if s.pullSecretName != "" {
+		if err := s.backend.EnsureImagePullSecret(ctx, app.Namespace, s.pullSecretName); err != nil {
+			return "", "", err
+		}
+	}
+	return s.backend.Apply(ctx, s.appWorkload(ctx, app, orgSlug, projSlug))
 }
 
 // CreateApp creates an app for the org. Requested CPU/memory are validated
@@ -265,7 +356,7 @@ func (s *Service) CreateApp(ctx context.Context, orgID string, in CreateAppInput
 		ProjectID:     in.ProjectID,
 		Name:          strings.TrimSpace(in.Name),
 		Image:         strings.TrimSpace(in.Image),
-		GitRepository: in.GitRepository,
+		GitRepository: strings.TrimSpace(in.GitRepository),
 		GitBranch:     branch,
 		BuildPack:     in.BuildPack,
 		CPU:           cpu,
@@ -275,7 +366,8 @@ func (s *Service) CreateApp(ctx context.Context, orgID string, in CreateAppInput
 		CreatedAt:     s.now(),
 	}
 
-	if app.Image != "" {
+	switch {
+	case app.Image != "":
 		// Image-based app: deploy directly, no build needed. The workload carries
 		// the app's stored env + custom domains so they reach the pods.
 		release, host, err := s.backend.Apply(ctx, s.appWorkload(ctx, app, orgSlug, projSlug))
@@ -285,13 +377,271 @@ func (s *Service) CreateApp(ctx context.Context, orgID string, in CreateAppInput
 		app.Release = release
 		app.Host = host
 		app.Status = "deploying"
-	}
-	// Git-only apps remain "queued" until the image builder produces an image.
-
-	if err := s.store.CreateApp(ctx, app); err != nil {
-		return nil, err
+		if err := s.store.CreateApp(ctx, app); err != nil {
+			return nil, err
+		}
+	case app.GitRepository != "":
+		// Git-source app: create a Build record, persist the app as "building", and
+		// kick off the build asynchronously. The build (on success) sets the app's
+		// image and deploys it through the normal Apply path.
+		app.Status = "building"
+		if err := s.store.CreateApp(ctx, app); err != nil {
+			return nil, err
+		}
+		if err := s.startBuild(ctx, app, orgSlug, projSlug); err != nil {
+			return nil, err
+		}
+	default:
+		// Neither an image nor a git repo: nothing to deploy yet; persist as queued.
+		if err := s.store.CreateApp(ctx, app); err != nil {
+			return nil, err
+		}
 	}
 	return app, nil
+}
+
+// imageRef computes the target push image ref for an app from UNAMBIGUOUS,
+// slash-delimited tenant IDs: <registry>/<orgID>/<projectID>/<appID>:<tag>. Using
+// the (already-unique, opaque) IDs joined by '/' — rather than concatenating
+// sanitized slugs with a separator — avoids cross-tenant path collisions (two
+// distinct tenants whose sanitized slugs collapse to the same string) and makes
+// the path non-guessable. The registry prefix is admin/DB-driven
+// (VORTEX_BUILD_REGISTRY); when unset a bare "<orgID>/<projectID>/<appID>:<tag>"
+// ref is produced so the FakeBuilder flow still works end-to-end in dev/tests.
+func (s *Service) imageRef(orgID, projectID, appID, tag string) string {
+	proj := kubeSanitize(projectID)
+	if proj == "" {
+		proj = "default"
+	}
+	repo := strings.Join([]string{kubeSanitize(orgID), proj, kubeSanitize(appID)}, "/")
+	if s.buildRegistry != "" {
+		repo = strings.TrimRight(s.buildRegistry, "/") + "/" + repo
+	}
+	if tag == "" {
+		tag = "latest"
+	}
+	return repo + ":" + tag
+}
+
+// startBuild records a "building" Build, computes the target image ref, and runs
+// the build asynchronously (detached, timeout-bound, WaitGroup-tracked). On
+// success it sets the app image and deploys; on failure it marks the app
+// "build_failed" and the Build "failed" with logs.
+func (s *Service) startBuild(ctx context.Context, app *domain.App, orgSlug, projSlug string) error {
+	bld := &domain.Build{
+		ID:        s.idgen(),
+		AppID:     app.ID,
+		OrgID:     app.OrgID,
+		Status:    domain.BuildBuilding,
+		CommitRef: app.GitBranch,
+		CreatedAt: s.now(),
+	}
+	if err := s.store.CreateBuild(ctx, bld); err != nil {
+		return err
+	}
+
+	// The image TAG includes the BUILD id so every build pushes a DISTINCT image
+	// ref the deploy then references — otherwise a rebuild would reuse a tag and the
+	// deploy could roll out a stale (cached) image.
+	tag := buildRef(app.GitBranch, bld.ID)
+	req := build.Request{
+		AppID:       app.ID,
+		BuildID:     bld.ID,
+		OrgSlug:     orgSlug,
+		ProjectSlug: projSlug,
+		AppName:     app.Name,
+		GitRepo:     app.GitRepository,
+		GitRef:      app.GitBranch,
+		Dockerfile:  "Dockerfile",
+		ImageRef:    s.imageRef(app.OrgID, app.ProjectID, app.ID, tag),
+		// SECURITY: runtime env/secrets are NOT forwarded as kaniko --build-args
+		// (they would be baked into image layers and exposed in the Job spec).
+		// Runtime env reaches pods only via the deploy Workload.Env path.
+		BuildArgs: nil,
+	}
+
+	s.runBuildAsync(app.ID, bld.ID, orgSlug, projSlug, req)
+	return nil
+}
+
+// runBuildAsync executes one build on a detached, timeout-bound context in a
+// goroutine registered with the shutdown WaitGroup. It is panic-guarded so a bad
+// build can never crash the process.
+func (s *Service) runBuildAsync(appID, buildID, orgSlug, projSlug string, req build.Request) {
+	if s.buildWG != nil {
+		s.buildWG.Add(1)
+	}
+	go func() {
+		if s.buildWG != nil {
+			defer s.buildWG.Done()
+		}
+		defer func() {
+			if r := recover(); r != nil {
+				s.finishBuildFailure(context.Background(), appID, buildID, fmt.Sprintf("build panic: %v", r))
+			}
+		}()
+
+		ctx, cancel := context.WithTimeout(context.Background(), s.buildTimeout)
+		defer cancel()
+
+		res, err := s.builder.Build(ctx, req)
+		if err != nil {
+			s.finishBuildFailure(ctx, appID, buildID, err.Error())
+			return
+		}
+		s.finishBuildSuccess(ctx, appID, buildID, orgSlug, projSlug, res.Image)
+	}()
+}
+
+// finishBuildSuccess records the produced image, marks the Build succeeded, then
+// deploys the app through the normal Apply path (release/host/env/domains).
+//
+// CONCURRENCY: the async worker re-fetches the app immediately before every
+// UpdateApp and only writes the worker-owned fields (Image/Release/Host/Status),
+// so it never clobbers a concurrent user edit (env/domains/size). If the user
+// changed intent mid-build to "stopped", the freshly-built image is recorded but
+// the app is NOT resurrected/deployed — the build is marked done and the app stays
+// stopped.
+func (s *Service) finishBuildSuccess(ctx context.Context, appID, buildID, orgSlug, projSlug, image string) {
+	// Mark the Build succeeded with the produced image (build-owned record).
+	if b, err := s.store.GetBuild(ctx, buildID); err == nil {
+		b.Status = domain.BuildSucceeded
+		b.Image = image
+		b.FinishedAt = s.now()
+		_ = s.store.UpdateBuild(ctx, b)
+	}
+
+	// Re-fetch before recording the image so a concurrent user edit is preserved.
+	app, err := s.store.GetApp(ctx, appID)
+	if err != nil {
+		return
+	}
+	// User stopped the app mid-build: do NOT resurrect/deploy. Record the image so a
+	// later Start/Deploy can ship it, but leave the stopped status untouched.
+	if app.Status == "stopped" {
+		app.Image = image
+		_ = s.store.UpdateApp(ctx, app)
+		return
+	}
+	app.Image = image
+	if err := s.store.UpdateApp(ctx, app); err != nil {
+		return
+	}
+
+	// Deploy the freshly-built image (ensuring the tenant pull secret first). A
+	// failure here marks the app "build_failed".
+	release, host, derr := s.deployBuiltApp(ctx, app, orgSlug, projSlug)
+
+	// Re-fetch again before the post-deploy write so we don't clobber an edit (or a
+	// user Stop) that landed during the deploy.
+	app, err = s.store.GetApp(ctx, appID)
+	if err != nil {
+		return
+	}
+	if app.Status == "stopped" {
+		// User stopped during the deploy: leave stopped, don't flip to deploying.
+		return
+	}
+	if derr != nil {
+		app.Status = "build_failed"
+		_ = s.store.UpdateApp(ctx, app)
+		return
+	}
+	app.Release = release
+	app.Host = host
+	app.Status = "deploying"
+	_ = s.store.UpdateApp(ctx, app)
+}
+
+// finishBuildFailure marks the app "build_failed" and the Build "failed" with the
+// captured logs. It re-fetches the app and only sets the status, and never
+// resurrects an app the user stopped mid-build.
+func (s *Service) finishBuildFailure(ctx context.Context, appID, buildID, logs string) {
+	if app, err := s.store.GetApp(ctx, appID); err == nil {
+		if app.Status != "stopped" {
+			app.Status = "build_failed"
+			_ = s.store.UpdateApp(ctx, app)
+		}
+	}
+	if b, err := s.store.GetBuild(ctx, buildID); err == nil {
+		b.Status = domain.BuildFailed
+		b.Logs = logs
+		b.FinishedAt = s.now()
+		_ = s.store.UpdateBuild(ctx, b)
+	}
+}
+
+// ListBuilds returns the org's builds for one of its apps (newest first).
+func (s *Service) ListBuilds(ctx context.Context, orgID, appID string) ([]domain.Build, error) {
+	if _, err := s.ownedApp(ctx, orgID, appID); err != nil {
+		return nil, err
+	}
+	return s.store.ListBuildsByApp(ctx, appID)
+}
+
+// GetBuild returns one build (incl. logs), ensuring it belongs to the org's app.
+func (s *Service) GetBuild(ctx context.Context, orgID, appID, buildID string) (*domain.Build, error) {
+	if _, err := s.ownedApp(ctx, orgID, appID); err != nil {
+		return nil, err
+	}
+	b, err := s.store.GetBuild(ctx, buildID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if b.AppID != appID || b.OrgID != orgID {
+		return nil, ErrNotFound
+	}
+	return b, nil
+}
+
+// buildRef derives a short, image-tag-safe tag for a build from the git ref and
+// the BUILD id, so every build produces a DISTINCT tag (e.g. "main-1a2b3c4d") and
+// a rebuild can never reuse a prior tag / roll out a stale cached image.
+func buildRef(gitRef, buildID string) string {
+	ref := imageTagSanitize(gitRef)
+	if ref == "" {
+		ref = "build"
+	}
+	short := imageTagSanitize(buildID)
+	if len(short) > 8 {
+		short = short[:8]
+	}
+	if short == "" {
+		return ref
+	}
+	return ref + "-" + short
+}
+
+// imageTagSafe keeps a string valid as a Docker image tag: alphanumerics, '.',
+// '_' and '-', collapsed and trimmed of leading separators.
+var imageTagSafe = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
+
+func imageTagSanitize(s string) string {
+	s = strings.TrimSpace(s)
+	s = imageTagSafe.ReplaceAllString(s, "-")
+	s = strings.Trim(s, "-._")
+	if len(s) > 64 {
+		s = s[:64]
+	}
+	return s
+}
+
+// kubeSanitize lowercases and collapses a slug to the same DNS-safe charset the
+// kube package uses for namespaces/releases, so a computed image repo path is
+// always valid.
+var kubeNonDNS = regexp.MustCompile(`[^a-z0-9-]+`)
+
+func kubeSanitize(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	s = kubeNonDNS.ReplaceAllString(s, "-")
+	s = strings.Trim(s, "-")
+	for strings.Contains(s, "--") {
+		s = strings.ReplaceAll(s, "--", "-")
+	}
+	return s
 }
 
 // AppLogs returns recent logs for an org's app from the backend (empty when the
@@ -334,19 +684,33 @@ func (s *Service) GetApp(ctx context.Context, orgID, appID string) (*domain.App,
 
 // Deploy (re)deploys an app: it re-renders the full kube.Workload (image, env,
 // custom domains, requested size) and runs a helm upgrade via backend.Apply, so
-// env/domain/image changes actually reach the pods. An app with no image yet
-// (a git app whose build hasn't produced an image) returns ErrNoImage rather
-// than faking success.
+// env/domain/image changes actually reach the pods.
+//
+// A git-source app with no built image yet RE-TRIGGERS a build (records a new
+// Build, marks the app "building", and runs the builder asynchronously) rather
+// than faking a deploy. A non-git app with no image still returns ErrNoImage.
 func (s *Service) Deploy(ctx context.Context, orgID, appID string) (*domain.App, error) {
 	app, err := s.ownedApp(ctx, orgID, appID)
 	if err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(app.Image) == "" {
-		return nil, ErrNoImage
-	}
 	orgSlug := s.orgSlug(ctx, orgID)
 	projSlug := s.projectSlug(ctx, app.ProjectID)
+
+	if strings.TrimSpace(app.Image) == "" {
+		// Git apps rebuild on deploy; image-less non-git apps have nothing to ship.
+		if strings.TrimSpace(app.GitRepository) == "" {
+			return nil, ErrNoImage
+		}
+		app.Status = "building"
+		if err := s.store.UpdateApp(ctx, app); err != nil {
+			return nil, err
+		}
+		if err := s.startBuild(ctx, app, orgSlug, projSlug); err != nil {
+			return nil, err
+		}
+		return app, nil
+	}
 
 	release, host, err := s.backend.Apply(ctx, s.appWorkload(ctx, app, orgSlug, projSlug))
 	if err != nil {

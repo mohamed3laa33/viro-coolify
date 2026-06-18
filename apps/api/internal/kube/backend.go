@@ -49,6 +49,13 @@ type Workload struct {
 
 	ServiceTemplateKey string   // e.g. wordpress, redis, postgresql
 	Domains            []string // extra custom hostnames in addition to the generated host
+
+	// ImagePullSecret, when set, names a kubernetes.io/dockerconfigjson Secret in
+	// the workload's tenant namespace that is attached to the pod's
+	// imagePullSecrets so a PRIVATE built image can be pulled. The platform sets
+	// this for git-built apps (the per-tenant copy of the registry pull secret);
+	// it is empty for public catalog images.
+	ImagePullSecret string
 }
 
 // Status is the observed runtime state of a workload's controller.
@@ -65,6 +72,13 @@ type Backend interface {
 	// ResourceQuota and LimitRange derived from the plan quota, returning the
 	// namespace name.
 	EnsureTenant(ctx context.Context, orgSlug, projSlug string, q Quota) (namespace string, err error)
+
+	// EnsureImagePullSecret upserts a kubernetes.io/dockerconfigjson Secret named
+	// "name" in tenant namespace "ns" by copying the dockerconfigjson from a
+	// configured control-plane source secret, so a private built image can be
+	// pulled. When no registry pull secret source is configured (local/dev) it is
+	// a no-op (returns nil) so non-registry flows keep working.
+	EnsureImagePullSecret(ctx context.Context, ns, name string) error
 
 	// Apply renders chart values for the workload and runs `helm upgrade
 	// --install`, returning the Helm release name and the generated public host.
