@@ -18,6 +18,7 @@ import (
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/identity"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/kube"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/platform"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/secrets"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/store"
 )
 
@@ -32,6 +33,7 @@ type Server struct {
 	identity *identity.Service
 	platform *platform.Service
 	billing  *billing.Service
+	cipher   secrets.Cipher
 	router   chi.Router
 
 	// buildWG tracks in-flight async git builds so a graceful shutdown can wait
@@ -129,6 +131,20 @@ func NewServer(cfg *config.Config, logger *slog.Logger, st store.Store, opts ...
 	if cfg.RegistryPullSecretSource != "" {
 		pullSecretName = cfg.RegistryPullSecret
 	}
+	// At-rest cipher for SECRET app env. A configured key enables AES-256-GCM; an
+	// empty key (dev) yields a no-op cipher with a logged warning — never a panic.
+	cipher, cipherErr := secrets.FromConfig(cfg.SecretEncryptionKey)
+	if cipherErr != nil {
+		// A NON-EMPTY but malformed key is operator misconfiguration: log and fall
+		// back to no-op so the API still boots (the warning is the actionable signal).
+		logger.Error("secrets: invalid VORTEX_SECRET_ENCRYPTION_KEY; secret env will NOT be encrypted at rest",
+			"err", cipherErr)
+		cipher = secrets.NoopCipher{}
+	}
+	if !cipher.Enabled() {
+		logger.Warn("secrets: VORTEX_SECRET_ENCRYPTION_KEY not set; SECRET app env stored WITHOUT encryption at rest (dev only)")
+	}
+	s.cipher = cipher
 	s.platform = platform.NewService(st, backend, bill,
 		platform.WithBuilder(builder),
 		platform.WithBuildRegistry(cfg.BuildRegistry),
@@ -137,6 +153,7 @@ func NewServer(cfg *config.Config, logger *slog.Logger, st store.Store, opts ...
 		platform.WithBuildWaitGroup(&s.buildWG),
 		platform.WithDBStorageDefault(cfg.DBDefaultStorageGB),
 		platform.WithDBStorageClass(cfg.DBStorageClass),
+		platform.WithCipher(cipher),
 	)
 	s.router = s.routes()
 	return s
@@ -532,6 +549,9 @@ func (s *Server) routes() chi.Router {
 
 				r.Get("/settings", s.handleAdminGetSettings)
 				r.Patch("/settings", s.handleAdminUpdateSettings)
+
+				// Platform-level audit trail (privileged mutations + auth events).
+				r.Get("/audit", s.handleAdminAudit)
 			})
 
 			r.Route("/orgs", func(r chi.Router) {
@@ -566,53 +586,61 @@ func (s *Server) routes() chi.Router {
 					})
 
 					r.Route("/apps", func(r chi.Router) {
+						// List/create are org-scoped (list is filtered to the caller's
+						// accessible projects in the handler); per-app routes enforce
+						// PROJECT membership so an org member without project access
+						// cannot read/deploy/delete another project's app.
 						r.With(s.orgAuthz(domain.RoleMember)).Get("/", s.handleListApps)
 						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/", s.handleCreateApp)
-						r.With(s.orgAuthz(domain.RoleMember)).Get("/{appID}", s.handleGetApp)
-						r.With(s.orgAuthz(domain.RoleMember)).Get("/{appID}/logs", s.handleAppLogs)
-						r.With(s.orgAuthz(domain.RoleAdmin)).Delete("/{appID}", s.handleDeleteApp)
-						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/{appID}/deploy", s.handleDeployApp)
-						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/{appID}/stop", s.handleStopApp)
-						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/{appID}/restart", s.handleRestartApp)
+						r.With(s.appProjectAuthz(domain.RoleMember)).Get("/{appID}", s.handleGetApp)
+						r.With(s.appProjectAuthz(domain.RoleMember)).Get("/{appID}/logs", s.handleAppLogs)
+						r.With(s.appProjectAuthz(domain.RoleAdmin)).Delete("/{appID}", s.handleDeleteApp)
+						r.With(s.appProjectAuthz(domain.RoleAdmin)).Post("/{appID}/deploy", s.handleDeployApp)
+						r.With(s.appProjectAuthz(domain.RoleAdmin)).Post("/{appID}/stop", s.handleStopApp)
+						r.With(s.appProjectAuthz(domain.RoleAdmin)).Post("/{appID}/restart", s.handleRestartApp)
 
-						// App env / secrets.
-						r.With(s.orgAuthz(domain.RoleMember)).Get("/{appID}/env", s.handleListAppEnv)
-						r.With(s.orgAuthz(domain.RoleAdmin)).Put("/{appID}/env", s.handleSetAppEnv)
-						r.With(s.orgAuthz(domain.RoleAdmin)).Delete("/{appID}/env/{key}", s.handleDeleteAppEnv)
+						// App env / secrets. Listing env requires admin (it may reveal
+						// which secret KEYS exist); secret values are always masked.
+						r.With(s.appProjectAuthz(domain.RoleAdmin)).Get("/{appID}/env", s.handleListAppEnv)
+						r.With(s.appProjectAuthz(domain.RoleAdmin)).Put("/{appID}/env", s.handleSetAppEnv)
+						r.With(s.appProjectAuthz(domain.RoleAdmin)).Delete("/{appID}/env/{key}", s.handleDeleteAppEnv)
 
 						// App domains.
-						r.With(s.orgAuthz(domain.RoleMember)).Get("/{appID}/domains", s.handleListAppDomains)
-						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/{appID}/domains", s.handleAddAppDomain)
-						r.With(s.orgAuthz(domain.RoleAdmin)).Delete("/{appID}/domains/{domainID}", s.handleDeleteAppDomain)
+						r.With(s.appProjectAuthz(domain.RoleMember)).Get("/{appID}/domains", s.handleListAppDomains)
+						r.With(s.appProjectAuthz(domain.RoleAdmin)).Post("/{appID}/domains", s.handleAddAppDomain)
+						r.With(s.appProjectAuthz(domain.RoleAdmin)).Delete("/{appID}/domains/{domainID}", s.handleDeleteAppDomain)
 
 						// App metrics.
-						r.With(s.orgAuthz(domain.RoleMember)).Get("/{appID}/metrics", s.handleAppMetrics)
+						r.With(s.appProjectAuthz(domain.RoleMember)).Get("/{appID}/metrics", s.handleAppMetrics)
 
 						// Git-source image builds.
-						r.With(s.orgAuthz(domain.RoleMember)).Get("/{appID}/builds", s.handleListBuilds)
-						r.With(s.orgAuthz(domain.RoleMember)).Get("/{appID}/builds/{buildID}", s.handleGetBuild)
+						r.With(s.appProjectAuthz(domain.RoleMember)).Get("/{appID}/builds", s.handleListBuilds)
+						r.With(s.appProjectAuthz(domain.RoleMember)).Get("/{appID}/builds/{buildID}", s.handleGetBuild)
 					})
 
 					r.Route("/services", func(r chi.Router) {
 						r.With(s.orgAuthz(domain.RoleMember)).Get("/", s.handleListServices)
-						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/{serviceID}/deploy", s.handleDeployService)
-						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/{serviceID}/stop", s.handleStopService)
-						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/{serviceID}/restart", s.handleRestartService)
-						r.With(s.orgAuthz(domain.RoleAdmin)).Delete("/{serviceID}", s.handleDeleteService)
+						r.With(s.serviceProjectAuthz(domain.RoleAdmin)).Post("/{serviceID}/deploy", s.handleDeployService)
+						r.With(s.serviceProjectAuthz(domain.RoleAdmin)).Post("/{serviceID}/stop", s.handleStopService)
+						r.With(s.serviceProjectAuthz(domain.RoleAdmin)).Post("/{serviceID}/restart", s.handleRestartService)
+						r.With(s.serviceProjectAuthz(domain.RoleAdmin)).Delete("/{serviceID}", s.handleDeleteService)
 					})
 
 					r.Route("/databases", func(r chi.Router) {
 						r.With(s.orgAuthz(domain.RoleMember)).Get("/", s.handleListDatabases)
 						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/", s.handleCreateDatabase)
-						r.With(s.orgAuthz(domain.RoleMember)).Get("/{databaseID}", s.handleGetDatabase)
-						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/{databaseID}/deploy", s.handleDeployDatabase)
-						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/{databaseID}/stop", s.handleStopDatabase)
-						r.With(s.orgAuthz(domain.RoleAdmin)).Post("/{databaseID}/restart", s.handleRestartDatabase)
-						r.With(s.orgAuthz(domain.RoleAdmin)).Delete("/{databaseID}", s.handleDeleteDatabase)
+						r.With(s.databaseProjectAuthz(domain.RoleMember)).Get("/{databaseID}", s.handleGetDatabase)
+						r.With(s.databaseProjectAuthz(domain.RoleAdmin)).Post("/{databaseID}/deploy", s.handleDeployDatabase)
+						r.With(s.databaseProjectAuthz(domain.RoleAdmin)).Post("/{databaseID}/stop", s.handleStopDatabase)
+						r.With(s.databaseProjectAuthz(domain.RoleAdmin)).Post("/{databaseID}/restart", s.handleRestartDatabase)
+						r.With(s.databaseProjectAuthz(domain.RoleAdmin)).Delete("/{databaseID}", s.handleDeleteDatabase)
 					})
 
 					r.With(s.orgAuthz(domain.RoleMember)).Get("/billing", s.handleGetBilling)
 					r.With(s.orgAuthz(domain.RoleAdmin)).Post("/billing/subscribe", s.handleSubscribe)
+
+					// Org-scoped audit trail (org admin+).
+					r.With(s.orgAuthz(domain.RoleAdmin)).Get("/audit", s.handleOrgAudit)
 				})
 			})
 		})

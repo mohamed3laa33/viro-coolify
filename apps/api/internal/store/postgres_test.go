@@ -360,3 +360,74 @@ func TestSumUsageByMetric(t *testing.T) {
 		t.Fatalf("expectations: %v", err)
 	}
 }
+
+func TestPostgresSetAppEnvWithSecret(t *testing.T) {
+	s, mock := newMockStore(t)
+	defer mock.Close()
+
+	mock.ExpectExec("INSERT INTO app_env").
+		WithArgs("app1", "API_KEY", "v1:ciphertext", true).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+
+	if err := s.SetAppEnv(context.Background(), "app1", "API_KEY", "v1:ciphertext", true); err != nil {
+		t.Fatalf("SetAppEnv: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+}
+
+func TestPostgresListAppEnv(t *testing.T) {
+	s, mock := newMockStore(t)
+	defer mock.Close()
+
+	rows := pgxmock.NewRows([]string{"key", "value", "secret"}).
+		AddRow("PLAIN", "v", false).
+		AddRow("SECRET", "v1:enc", true)
+	mock.ExpectQuery("SELECT key, value, secret FROM app_env WHERE app_id = \\$1").
+		WithArgs("app1").
+		WillReturnRows(rows)
+
+	got, err := s.ListAppEnv(context.Background(), "app1")
+	if err != nil {
+		t.Fatalf("ListAppEnv: %v", err)
+	}
+	if len(got) != 2 || got[1].Key != "SECRET" || !got[1].Secret {
+		t.Fatalf("unexpected entries: %+v", got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+}
+
+func TestPostgresCreateAndListAuditEvents(t *testing.T) {
+	s, mock := newMockStore(t)
+	defer mock.Close()
+
+	at := time.Now()
+	mock.ExpectExec("INSERT INTO audit_events").
+		WithArgs("e1", "org1", "u1", "a@b.com", "secret.set", "app_env", "app1/API_KEY", "", at).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	if err := s.CreateAuditEvent(context.Background(), &domain.AuditEvent{
+		ID: "e1", OrgID: "org1", ActorUserID: "u1", ActorEmail: "a@b.com",
+		Action: "secret.set", TargetType: "app_env", TargetID: "app1/API_KEY", At: at,
+	}); err != nil {
+		t.Fatalf("CreateAuditEvent: %v", err)
+	}
+
+	rows := pgxmock.NewRows([]string{"id", "org_id", "actor_user_id", "actor_email", "action", "target_type", "target_id", "metadata", "at"}).
+		AddRow("e1", "org1", "u1", "a@b.com", "secret.set", "app_env", "app1/API_KEY", "", at)
+	mock.ExpectQuery("SELECT id, org_id, actor_user_id, actor_email, action, target_type, target_id, metadata, at\\s+FROM audit_events WHERE org_id = \\$1").
+		WithArgs("org1", 100).
+		WillReturnRows(rows)
+	got, err := s.ListAuditEvents(context.Background(), domain.AuditFilter{OrgID: "org1"})
+	if err != nil {
+		t.Fatalf("ListAuditEvents: %v", err)
+	}
+	if len(got) != 1 || got[0].Action != "secret.set" {
+		t.Fatalf("unexpected events: %+v", got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+}

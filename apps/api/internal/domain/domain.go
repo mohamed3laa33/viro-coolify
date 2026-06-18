@@ -357,6 +357,42 @@ type MeterState struct {
 	LastMeteredHour time.Time `json:"lastMeteredHour"`
 }
 
+// AuditEvent is an append-only record of a privileged mutation or security-
+// relevant event (admin config change, secret write, role/membership change,
+// invitation lifecycle, subscription change, auth login/logout/failure). It is
+// written by the audit helper on the Server and never carries secret VALUES —
+// only the affected key/identifier in TargetID/Metadata.
+type AuditEvent struct {
+	ID string `json:"id"`
+	// OrgID scopes the event to an organization, or is empty ("") for
+	// platform-level (super-admin / auth) events.
+	OrgID       string    `json:"orgId,omitempty"`
+	ActorUserID string    `json:"actorUserId,omitempty"`
+	ActorEmail  string    `json:"actorEmail,omitempty"`
+	Action      string    `json:"action"`               // e.g. "plan.create", "secret.set", "auth.login"
+	TargetType  string    `json:"targetType,omitempty"` // e.g. "plan", "app_env", "member"
+	TargetID    string    `json:"targetId,omitempty"`   // the affected id/key (never a secret value)
+	Metadata    string    `json:"metadata,omitempty"`   // small JSON/string detail (never a secret value)
+	At          time.Time `json:"at"`
+}
+
+// AuditFilter scopes an audit-log listing. An empty OrgID lists platform-level
+// (super-admin) events; a set OrgID lists that org's events. Limit caps the
+// number of (most-recent-first) rows; <=0 falls back to a default.
+type AuditFilter struct {
+	OrgID string
+	Limit int
+}
+
+// AppEnvEntry is a single app environment variable / secret with its at-rest
+// representation. Secret entries carry an encrypted (or, in dev, plaintext)
+// Value and are masked before they leave the API.
+type AppEnvEntry struct {
+	Key    string `json:"key"`
+	Value  string `json:"value"`
+	Secret bool   `json:"secret"`
+}
+
 // RefreshToken is a persisted record of an issued refresh token, keyed by the
 // token's jti claim. It backs refresh-token rotation and revocation: a token is
 // only honored while a matching, non-revoked record exists. On rotation the old

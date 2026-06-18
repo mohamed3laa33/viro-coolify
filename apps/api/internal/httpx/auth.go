@@ -225,12 +225,21 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := s.identity.Login(r.Context(), req.Email, req.Password)
 	if err != nil {
+		// AUDIT: a failed login (wrong password / unknown user). Record only the
+		// attempted email — never the password. Platform-level (no org).
+		if errors.Is(err, identity.ErrInvalidCredentials) {
+			s.auditAs(r.Context(), "", normalizeAuditEmail(req.Email), "", "auth.login_failed", "user", "", "")
+		}
 		writeAuthError(w, err)
 		return
 	}
+	s.auditAs(r.Context(), res.User.ID, res.User.Email, "", "auth.login", "user", res.User.ID, "")
 	setAuthCookies(w, res.Access, res.Refresh, s.cfg)
 	writeJSON(w, http.StatusOK, toAuthResponse(res))
 }
+
+// normalizeAuditEmail lowercases/trims an attempted email for an audit record.
+func normalizeAuditEmail(e string) string { return strings.ToLower(strings.TrimSpace(e)) }
 
 func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	// Refresh accepts the token from the "vortex_refresh" cookie (browser) or the
@@ -260,6 +269,9 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if err := s.identity.Logout(r.Context(), token); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
+	}
+	if u, ok := userFromContext(r.Context()); ok && u != nil {
+		s.auditAs(r.Context(), u.ID, u.Email, "", "auth.logout", "user", u.ID, "")
 	}
 	clearAuthCookies(w, s.cfg)
 	w.WriteHeader(http.StatusNoContent)

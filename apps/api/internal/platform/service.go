@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
 	"regexp"
 	"strings"
@@ -25,6 +26,7 @@ import (
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/catalog"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/domain"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/kube"
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/secrets"
 	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/store"
 )
 
@@ -161,6 +163,11 @@ type Service struct {
 	// buildWG, when set, tracks in-flight async builds so a graceful shutdown can
 	// Wait() for them to drain (mirrors the metering/reconciler WaitGroup).
 	buildWG *sync.WaitGroup
+
+	// cipher encrypts/decrypts SECRET app env values at rest. Defaults to a no-op
+	// pass-through (dev) when no key is configured, so the system never panics for
+	// a missing key.
+	cipher secrets.Cipher
 }
 
 // Option customizes Service construction.
@@ -219,6 +226,16 @@ func WithDBStorageClass(class string) Option {
 	return func(s *Service) { s.dbStorageClass = strings.TrimSpace(class) }
 }
 
+// WithCipher injects the at-rest cipher used to encrypt/decrypt SECRET app env.
+// A nil cipher is ignored (the no-op default stands).
+func WithCipher(c secrets.Cipher) Option {
+	return func(s *Service) {
+		if c != nil {
+			s.cipher = c
+		}
+	}
+}
+
 // NewService builds a platform service. The backend is the Kubernetes deploy
 // surface (kube.Backend); tests inject kube.FakeBackend. The builder is the
 // git-source image builder (build.Builder); tests inject build.FakeBuilder. The
@@ -238,6 +255,7 @@ func NewService(s store.Store, backend kube.Backend, b *billing.Service, opts ..
 		idgen:        uuid.NewString,
 		now:          time.Now,
 		buildTimeout: 10 * time.Minute,
+		cipher:       secrets.NoopCipher{},
 	}
 	for _, opt := range opts {
 		opt(svc)
@@ -305,14 +323,60 @@ func (s *Service) overcommitFactors(ctx context.Context) (cpuFactor, memFactor f
 	return 0, 0
 }
 
-// appEnv returns the app's stored environment variables (key->value), or an
-// empty map when none are set / the lookup fails.
-func (s *Service) appEnv(ctx context.Context, appID string) map[string]string {
-	env, err := s.store.GetAppEnv(ctx, appID)
-	if err != nil || env == nil {
-		return map[string]string{}
+// appSecretName returns the per-app Kubernetes Secret name that holds the app's
+// SECRET env, injected into the workload via envFrom secretRef.
+func appSecretName(appID string) string {
+	return "vortex-env-" + kubeSanitize(appID)
+}
+
+// encValuePrefix marks a value that was written by the AES-GCM cipher
+// (secrets.encPrefix). A value carrying this prefix is REAL encrypted material:
+// if the configured (enabled) cipher cannot Open it, the key is wrong/rotated —
+// an operator error worth surfacing rather than silently deploying without it.
+const encValuePrefix = "v1:"
+
+// resolvedEnv splits an app's stored env into NON-secret config (returned as
+// plain values for deployment.env) and SECRET values (DECRYPTED, for the per-app
+// Kubernetes Secret). Secret values are decrypted on this deploy path only and
+// never returned over the API.
+//
+// Decrypt-failure handling:
+//   - When the active cipher is ENABLED and the stored value is a real encrypted
+//     "v1:"-prefixed blob that fails to Open, the deploy is FAILED (error) — that
+//     means a wrong/rotated key, and silently shipping without the secret would
+//     mask a serious operator error.
+//   - Otherwise (no-op cipher, or a legacy non-"v1:" plaintext value) a decrypt
+//     failure drops that single key and continues, so a single bad value never
+//     aborts the whole deploy.
+//
+// Every decrypt failure is logged by KEY NAME ONLY — never the value.
+func (s *Service) resolvedEnv(ctx context.Context, appID string) (plain, secret map[string]string, err error) {
+	plain = map[string]string{}
+	secret = map[string]string{}
+	entries, lerr := s.store.ListAppEnv(ctx, appID)
+	if lerr != nil {
+		// A failed env lookup must not silently deploy with no env — surface it.
+		return nil, nil, lerr
 	}
-	return env
+	for _, e := range entries {
+		if !e.Secret {
+			plain[e.Key] = e.Value
+			continue
+		}
+		dec, derr := s.cipher.Decrypt(e.Value)
+		if derr != nil {
+			log.Printf("platform: decrypt secret env key %q for app %s failed: %v", e.Key, appID, derr)
+			// A real encrypted value under an enabled cipher that won't decrypt is
+			// an operator error (wrong/rotated key) — fail the deploy rather than
+			// silently shipping without the secret.
+			if s.cipher.Enabled() && strings.HasPrefix(e.Value, encValuePrefix) {
+				return nil, nil, fmt.Errorf("platform: decrypt secret env key %q for app %s: %w", e.Key, appID, derr)
+			}
+			continue
+		}
+		secret[e.Key] = dec
+	}
+	return plain, secret, nil
 }
 
 // appDomains returns the custom hostnames attached to the app (in addition to
@@ -336,11 +400,23 @@ func (s *Service) appDomains(ctx context.Context, appID string) []string {
 // (it has a GitRepository) it also attaches the tenant-namespace imagePullSecret
 // so the private built image can be pulled (no ImagePullBackOff). Public
 // image-based apps leave the pull secret empty.
-func (s *Service) appWorkload(ctx context.Context, app *domain.App, orgSlug, projSlug string) kube.Workload {
+func (s *Service) appWorkload(ctx context.Context, app *domain.App, orgSlug, projSlug string) (kube.Workload, error) {
 	cpuF, memF := s.overcommitFactors(ctx)
 	pullSecret := ""
 	if app.GitRepository != "" {
 		pullSecret = s.pullSecretName
+	}
+	// Split stored env: non-secret config goes inline into the helm values; SECRET
+	// values are decrypted into a per-app Kubernetes Secret referenced via envFrom
+	// (so they are never baked into the release values). The Secret is ensured by
+	// applyApp before Apply.
+	plain, secret, err := s.resolvedEnv(ctx, app.ID)
+	if err != nil {
+		return kube.Workload{}, err
+	}
+	envSecretName := ""
+	if len(secret) > 0 {
+		envSecretName = appSecretName(app.ID)
 	}
 	return kube.Workload{
 		OrgSlug:                orgSlug,
@@ -350,24 +426,44 @@ func (s *Service) appWorkload(ctx context.Context, app *domain.App, orgSlug, pro
 		Image:                  app.Image,
 		CPU:                    app.CPU,
 		MemoryMB:               app.MemoryMB,
-		Env:                    s.appEnv(ctx, app.ID),
+		Env:                    plain,
 		Domains:                s.appDomains(ctx, app.ID),
 		ImagePullSecret:        pullSecret,
+		EnvSecretName:          envSecretName,
 		CPUOvercommitFactor:    cpuF,
 		MemoryOvercommitFactor: memF,
+	}, nil
+}
+
+// applyApp injects the app's SECRET env as a per-app Kubernetes Secret (envFrom),
+// then applies the workload. The Secret is upserted with the DECRYPTED values and
+// deleted when no secrets remain, so secret material never lives in the helm
+// release values. Plain config still flows through the workload Env.
+func (s *Service) applyApp(ctx context.Context, app *domain.App, orgSlug, projSlug string) (string, string, error) {
+	_, secret, err := s.resolvedEnv(ctx, app.ID)
+	if err != nil {
+		return "", "", err
 	}
+	if err := s.backend.EnsureAppSecret(ctx, app.Namespace, appSecretName(app.ID), secret); err != nil {
+		return "", "", err
+	}
+	wl, err := s.appWorkload(ctx, app, orgSlug, projSlug)
+	if err != nil {
+		return "", "", err
+	}
+	return s.backend.Apply(ctx, wl)
 }
 
 // deployBuiltApp ensures the tenant-namespace imagePullSecret exists (so a private
-// built image can be pulled) and then applies the workload. Used by the build
-// success path. EnsureImagePullSecret no-ops when no registry/source is configured.
+// built image can be pulled) and then applies the workload (with its secret env).
+// EnsureImagePullSecret no-ops when no registry/source is configured.
 func (s *Service) deployBuiltApp(ctx context.Context, app *domain.App, orgSlug, projSlug string) (string, string, error) {
 	if s.pullSecretName != "" {
 		if err := s.backend.EnsureImagePullSecret(ctx, app.Namespace, s.pullSecretName); err != nil {
 			return "", "", err
 		}
 	}
-	return s.backend.Apply(ctx, s.appWorkload(ctx, app, orgSlug, projSlug))
+	return s.applyApp(ctx, app, orgSlug, projSlug)
 }
 
 // CreateApp creates an app for the org. Requested CPU/memory are validated
@@ -425,7 +521,7 @@ func (s *Service) CreateApp(ctx context.Context, orgID string, in CreateAppInput
 	case app.Image != "":
 		// Image-based app: deploy directly, no build needed. The workload carries
 		// the app's stored env + custom domains so they reach the pods.
-		release, host, err := s.backend.Apply(ctx, s.appWorkload(ctx, app, orgSlug, projSlug))
+		release, host, err := s.applyApp(ctx, app, orgSlug, projSlug)
 		if err != nil {
 			return nil, err
 		}
@@ -807,7 +903,7 @@ func (s *Service) Deploy(ctx context.Context, orgID, appID string) (*domain.App,
 		return app, nil
 	}
 
-	release, host, err := s.backend.Apply(ctx, s.appWorkload(ctx, app, orgSlug, projSlug))
+	release, host, err := s.applyApp(ctx, app, orgSlug, projSlug)
 	if err != nil {
 		return nil, err
 	}

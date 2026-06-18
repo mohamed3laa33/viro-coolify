@@ -1,6 +1,7 @@
 package httpx
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -43,6 +44,87 @@ func (s *Server) currentUser(w http.ResponseWriter, r *http.Request) (*domain.Us
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 	}
 	return user, ok
+}
+
+// resourceProjectAuthz returns middleware that enforces PROJECT-membership authz
+// on a resource lifecycle route. It resolves the resource's ProjectID (via
+// resolveProjectID, scoped to the URL {orgID}) and then requires the caller to be
+// able to act on that project with at least `min` (org admins/owners retain full
+// access via AuthorizeProject's semantics; a non-member of the project is 403'd).
+//
+// This closes the IDOR where org-level authz let any org member read/deploy/
+// delete apps/services/databases in projects they are not a member of. A resource
+// not found within the org is hidden as 404 (no cross-tenant existence leak).
+func (s *Server) resourceProjectAuthz(idParam string, resolve func(ctx context.Context, orgID, resourceID string) (string, bool), min domain.Role) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			user, ok := userFromContext(r.Context())
+			if !ok {
+				writeError(w, http.StatusUnauthorized, "unauthorized")
+				return
+			}
+			orgID := chi.URLParam(r, "orgID")
+			resourceID := chi.URLParam(r, idParam)
+			projectID, found := resolve(r.Context(), orgID, resourceID)
+			if !found {
+				// Don't leak existence across tenants.
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			if err := s.identity.AuthorizeProject(r.Context(), user.ID, orgID, projectID, min); err != nil {
+				if errors.Is(err, identity.ErrForbidden) {
+					writeError(w, http.StatusForbidden, "you do not have access to this project")
+					return
+				}
+				s.logger.Error("authorize project resource", "err", err)
+				writeError(w, http.StatusInternalServerError, "authorization error")
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// resolveAppProject resolves an app's ProjectID, scoped to orgID. found=false
+// when the app does not exist or belongs to another org.
+func (s *Server) resolveAppProject(ctx context.Context, orgID, appID string) (string, bool) {
+	a, err := s.store.GetApp(ctx, appID)
+	if err != nil || a.OrgID != orgID {
+		return "", false
+	}
+	return a.ProjectID, true
+}
+
+// resolveServiceProject resolves a service's ProjectID, scoped to orgID.
+func (s *Server) resolveServiceProject(ctx context.Context, orgID, serviceID string) (string, bool) {
+	svc, err := s.store.GetService(ctx, serviceID)
+	if err != nil || svc.OrgID != orgID {
+		return "", false
+	}
+	return svc.ProjectID, true
+}
+
+// resolveDatabaseProject resolves a database's ProjectID, scoped to orgID.
+func (s *Server) resolveDatabaseProject(ctx context.Context, orgID, databaseID string) (string, bool) {
+	d, err := s.store.GetDatabase(ctx, databaseID)
+	if err != nil || d.OrgID != orgID {
+		return "", false
+	}
+	return d.ProjectID, true
+}
+
+// appProjectAuthz / serviceProjectAuthz / databaseProjectAuthz are the concrete
+// per-resource project-membership middlewares for the lifecycle routes.
+func (s *Server) appProjectAuthz(min domain.Role) func(http.Handler) http.Handler {
+	return s.resourceProjectAuthz("appID", s.resolveAppProject, min)
+}
+
+func (s *Server) serviceProjectAuthz(min domain.Role) func(http.Handler) http.Handler {
+	return s.resourceProjectAuthz("serviceID", s.resolveServiceProject, min)
+}
+
+func (s *Server) databaseProjectAuthz(min domain.Role) func(http.Handler) http.Handler {
+	return s.resourceProjectAuthz("databaseID", s.resolveDatabaseProject, min)
 }
 
 type createProjectRequest struct {
@@ -158,10 +240,12 @@ func (s *Server) handleUpdateMember(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if err := s.identity.UpdateMemberRole(r.Context(), user.ID, chi.URLParam(r, "orgID"), chi.URLParam(r, "userID"), domain.Role(req.Role)); err != nil {
+	orgID, targetID := chi.URLParam(r, "orgID"), chi.URLParam(r, "userID")
+	if err := s.identity.UpdateMemberRole(r.Context(), user.ID, orgID, targetID, domain.Role(req.Role)); err != nil {
 		s.writeIdentityError(w, "update member", err)
 		return
 	}
+	s.audit(r.Context(), orgID, "member.role_update", "member", targetID, "role="+req.Role)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -172,10 +256,12 @@ func (s *Server) handleRemoveMember(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.identity.RemoveMember(r.Context(), user.ID, chi.URLParam(r, "orgID"), chi.URLParam(r, "userID")); err != nil {
+	orgID, targetID := chi.URLParam(r, "orgID"), chi.URLParam(r, "userID")
+	if err := s.identity.RemoveMember(r.Context(), user.ID, orgID, targetID); err != nil {
 		s.writeIdentityError(w, "remove member", err)
 		return
 	}
+	s.audit(r.Context(), orgID, "member.remove", "member", targetID, "")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -198,11 +284,14 @@ func (s *Server) handleCreateInvitation(w http.ResponseWriter, r *http.Request) 
 	if role == "" {
 		role = domain.RoleMember
 	}
-	inv, err := s.identity.Invite(r.Context(), user.ID, chi.URLParam(r, "orgID"), req.ProjectID, req.Email, role)
+	orgID := chi.URLParam(r, "orgID")
+	inv, err := s.identity.Invite(r.Context(), user.ID, orgID, req.ProjectID, req.Email, role)
 	if err != nil {
 		s.writeIdentityError(w, "invite", err)
 		return
 	}
+	// AUDIT: record the invitation id + invited email (an email is not a secret).
+	s.audit(r.Context(), orgID, "invitation.create", "invitation", inv.ID, "email="+inv.Email)
 	writeJSON(w, http.StatusCreated, inv)
 }
 
@@ -225,10 +314,12 @@ func (s *Server) handleRevokeInvitation(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	if err := s.identity.RevokeInvitation(r.Context(), user.ID, chi.URLParam(r, "orgID"), chi.URLParam(r, "inviteID")); err != nil {
+	orgID, inviteID := chi.URLParam(r, "orgID"), chi.URLParam(r, "inviteID")
+	if err := s.identity.RevokeInvitation(r.Context(), user.ID, orgID, inviteID); err != nil {
 		s.writeIdentityError(w, "revoke invitation", err)
 		return
 	}
+	s.audit(r.Context(), orgID, "invitation.revoke", "invitation", inviteID, "")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -250,6 +341,9 @@ func (s *Server) handleAcceptInvitation(w http.ResponseWriter, r *http.Request) 
 		s.writeIdentityError(w, "accept invitation", err)
 		return
 	}
+	// Audit the moment the user actually gains org membership/role (the invite
+	// CREATE and REVOKE are already audited above; this closes the gap).
+	s.audit(r.Context(), inv.OrgID, "member.invite_accept", "member", user.ID, "role="+string(inv.Role))
 	writeJSON(w, http.StatusOK, inv)
 }
 

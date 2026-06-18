@@ -9,11 +9,13 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	netv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -192,7 +194,187 @@ func (b *KubeBackend) EnsureTenant(ctx context.Context, orgSlug, projSlug string
 	if err := b.applyLimitRange(ctx, ns, q); err != nil {
 		return "", err
 	}
+	// Per-tenant ServiceAccount (token auto-mount disabled) so workloads no longer
+	// run under the namespace default SA / its auto-mounted API token.
+	if err := b.ensureServiceAccount(ctx, ns); err != nil {
+		return "", err
+	}
+	// Default-deny + scoped-egress NetworkPolicy isolating the tenant namespace
+	// from other tenants and the control-plane datastore.
+	if err := b.ensureNetworkPolicy(ctx, ns); err != nil {
+		return "", err
+	}
 	return ns, nil
+}
+
+// tenantServiceAccount is the per-namespace ServiceAccount every tenant workload
+// runs under (instead of the namespace default SA). Its API token is NOT
+// auto-mounted, so a compromised tenant pod cannot reach the Kubernetes API with
+// ambient credentials.
+const tenantServiceAccount = "vortex-workload"
+
+// ensureServiceAccount creates (idempotently) the per-namespace workload
+// ServiceAccount with automountServiceAccountToken=false.
+func (b *KubeBackend) ensureServiceAccount(ctx context.Context, ns string) error {
+	no := false
+	sa := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      tenantServiceAccount,
+			Namespace: ns,
+			Labels:    map[string]string{"app.kubernetes.io/managed-by": "vortex"},
+		},
+		AutomountServiceAccountToken: &no,
+	}
+	return upsert(ctx,
+		func() error {
+			_, err := b.client.CoreV1().ServiceAccounts(ns).Create(ctx, sa, metav1.CreateOptions{})
+			return err
+		},
+		func() error {
+			cur, err := b.client.CoreV1().ServiceAccounts(ns).Get(ctx, sa.Name, metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+			cur.AutomountServiceAccountToken = &no
+			_, err = b.client.CoreV1().ServiceAccounts(ns).Update(ctx, cur, metav1.UpdateOptions{})
+			return err
+		},
+	)
+}
+
+// ensureNetworkPolicy installs a default-deny-ingress + scoped-egress policy on
+// the tenant namespace. It (a) denies cross-tenant ingress (only intra-namespace
+// + the shared Gateway namespace may reach the workload), (b) allows DNS and
+// general external egress, and (c) BLOCKS egress to the control-plane Postgres /
+// other tenant namespaces by excluding the cluster-internal RFC1918 ranges from
+// the broad egress allowance while still permitting public internet egress.
+func (b *KubeBackend) ensureNetworkPolicy(ctx context.Context, ns string) error {
+	tcp := corev1.ProtocolTCP
+	udp := corev1.ProtocolUDP
+	dnsPort := intstrPtr(53)
+
+	// Ingress: intra-namespace (same tenant) + the shared Gateway namespace.
+	ingressFrom := []netv1.NetworkPolicyPeer{
+		{PodSelector: &metav1.LabelSelector{}}, // same namespace
+	}
+	if gwNS := b.cfg.GatewayNamespace; gwNS != "" {
+		ingressFrom = append(ingressFrom, netv1.NetworkPolicyPeer{
+			NamespaceSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"kubernetes.io/metadata.name": gwNS},
+			},
+		})
+	}
+
+	// Egress: DNS to kube-dns, intra-namespace, and external (non-cluster) IPs.
+	// The except blocks carve the private/cluster ranges OUT of the external
+	// allowance so a tenant pod cannot reach the control-plane Postgres or other
+	// tenant pods/services by IP — only the public internet.
+	externalEgress := &netv1.IPBlock{
+		CIDR: "0.0.0.0/0",
+		Except: []string{
+			"10.0.0.0/8",
+			"172.16.0.0/12",
+			"192.168.0.0/16",
+		},
+	}
+
+	np := &netv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "vortex-tenant-isolation",
+			Namespace: ns,
+			Labels:    map[string]string{"app.kubernetes.io/managed-by": "vortex"},
+		},
+		Spec: netv1.NetworkPolicySpec{
+			// Empty pod selector => applies to ALL pods in the namespace.
+			PodSelector: metav1.LabelSelector{},
+			PolicyTypes: []netv1.PolicyType{netv1.PolicyTypeIngress, netv1.PolicyTypeEgress},
+			Ingress: []netv1.NetworkPolicyIngressRule{
+				{From: ingressFrom},
+			},
+			Egress: []netv1.NetworkPolicyEgressRule{
+				// DNS resolution (UDP+TCP/53) to anywhere in-cluster.
+				{
+					Ports: []netv1.NetworkPolicyPort{
+						{Protocol: &udp, Port: dnsPort},
+						{Protocol: &tcp, Port: dnsPort},
+					},
+				},
+				// Intra-namespace (same tenant: app <-> its own database).
+				{To: []netv1.NetworkPolicyPeer{{PodSelector: &metav1.LabelSelector{}}}},
+				// External internet egress, excluding cluster-internal ranges so the
+				// control-plane datastore and other tenants are unreachable by IP.
+				{To: []netv1.NetworkPolicyPeer{{IPBlock: externalEgress}}},
+			},
+		},
+	}
+	return upsert(ctx,
+		func() error {
+			_, err := b.client.NetworkingV1().NetworkPolicies(ns).Create(ctx, np, metav1.CreateOptions{})
+			return err
+		},
+		func() error {
+			cur, err := b.client.NetworkingV1().NetworkPolicies(ns).Get(ctx, np.Name, metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+			cur.Spec = np.Spec
+			_, err = b.client.NetworkingV1().NetworkPolicies(ns).Update(ctx, cur, metav1.UpdateOptions{})
+			return err
+		},
+	)
+}
+
+// EnsureAppSecret creates/updates the per-app Opaque Secret holding the
+// workload's SECRET env (already-decrypted plaintext values). When data is empty
+// it deletes the Secret so no stale secret material lingers after the last
+// secret key is removed. The chart wires it via envFrom secretRef.
+func (b *KubeBackend) EnsureAppSecret(ctx context.Context, ns, name string, data map[string]string) error {
+	if name == "" {
+		return nil
+	}
+	if len(data) == 0 {
+		err := b.client.CoreV1().Secrets(ns).Delete(ctx, name, metav1.DeleteOptions{})
+		if err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("kube: delete app secret %s/%s: %w", ns, name, err)
+		}
+		return nil
+	}
+	sd := make(map[string]string, len(data))
+	for k, v := range data {
+		sd[k] = v
+	}
+	sec := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: ns,
+			Labels:    map[string]string{"app.kubernetes.io/managed-by": "vortex"},
+		},
+		Type:       corev1.SecretTypeOpaque,
+		StringData: sd,
+	}
+	return upsert(ctx,
+		func() error {
+			_, err := b.client.CoreV1().Secrets(ns).Create(ctx, sec, metav1.CreateOptions{})
+			return err
+		},
+		func() error {
+			cur, err := b.client.CoreV1().Secrets(ns).Get(ctx, name, metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+			cur.Type = corev1.SecretTypeOpaque
+			cur.StringData = sd
+			cur.Data = nil // replace wholesale so removed keys don't linger
+			_, err = b.client.CoreV1().Secrets(ns).Update(ctx, cur, metav1.UpdateOptions{})
+			return err
+		},
+	)
+}
+
+// intstrPtr returns a pointer to an IntOrString port value.
+func intstrPtr(p int32) *intstr.IntOrString {
+	v := intstr.FromInt32(p)
+	return &v
 }
 
 // EnsureImagePullSecret upserts a kubernetes.io/dockerconfigjson Secret named
@@ -466,6 +648,15 @@ func (b *KubeBackend) buildValues(w Workload, h string) map[string]any {
 		deployment["imagePullSecrets"] = []map[string]any{{"name": w.ImagePullSecret}}
 	}
 
+	// SECRET env injection: reference the per-app Kubernetes Secret via envFrom so
+	// secret values are delivered from the Secret at runtime and are NOT baked into
+	// the helm release values. Non-secret config still flows through deployment.env.
+	if w.EnvSecretName != "" {
+		deployment["envFrom"] = []map[string]any{{
+			"secretRef": map[string]any{"name": w.EnvSecretName},
+		}}
+	}
+
 	// StatefulSet reads container ports from deployment.ports; Deployment reads
 	// them from service.ports. Set both so either controller renders correctly.
 	deployment["ports"] = []map[string]any{{
@@ -586,6 +777,19 @@ func (b *KubeBackend) buildValues(w Workload, h string) map[string]any {
 		"service":          service,
 		"keda":             keda,
 		"gateway":          gateway,
+		// Bind every workload to the per-tenant ServiceAccount (created
+		// imperatively by EnsureTenant with API-token auto-mount disabled) rather
+		// than the namespace default SA. create=false so the chart does NOT render
+		// its own ServiceAccount of the same name — that would collide with and
+		// override the locked-down imperative SA, re-enabling the auto-mounted API
+		// token. The pod additionally sets automountServiceAccountToken=false as
+		// defense-in-depth so no API token is mounted even if the SA default drifts.
+		"serviceAccount": map[string]any{
+			"enabled":                      true,
+			"create":                       false,
+			"name":                         tenantServiceAccount,
+			"automountServiceAccountToken": false,
+		},
 	}
 	for k, v := range persistence {
 		values[k] = v

@@ -491,6 +491,32 @@ func (s *Service) AuthorizeProject(ctx context.Context, userID, orgID, projectID
 	return nil
 }
 
+// AccessibleProjectIDs returns the set of project ids in the org the user may
+// access: ALL projects when the user is an org admin/owner, otherwise only the
+// projects the user has a direct project membership in. The bool isOrgAdmin lets
+// callers fast-path "see everything" without consulting the set. A user with no
+// org membership gets an empty set (and isOrgAdmin=false).
+func (s *Service) AccessibleProjectIDs(ctx context.Context, userID, orgID string) (ids map[string]bool, isOrgAdmin bool, err error) {
+	ids = map[string]bool{}
+	if m, mErr := s.store.GetMembership(ctx, orgID, userID); mErr == nil && m.Role.AtLeast(domain.RoleAdmin) {
+		return ids, true, nil
+	} else if mErr != nil && !errors.Is(mErr, store.ErrNotFound) {
+		return nil, false, mErr
+	}
+	projects, err := s.store.ListProjectsByOrg(ctx, orgID)
+	if err != nil {
+		return nil, false, err
+	}
+	for i := range projects {
+		if _, pErr := s.store.GetProjectMembership(ctx, projects[i].ID, userID); pErr == nil {
+			ids[projects[i].ID] = true
+		} else if !errors.Is(pErr, store.ErrNotFound) {
+			return nil, false, pErr
+		}
+	}
+	return ids, false, nil
+}
+
 // ---- Invitations (invite to an org, or to a specific project) ----
 
 // ListMembers returns the org's memberships (caller must be a member).

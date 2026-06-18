@@ -21,7 +21,7 @@ func TestDeployReAppliesWithEnvAndDomains(t *testing.T) {
 	}
 
 	// Set env + a custom domain after create.
-	if err := svc.store.SetAppEnv(ctx, app.ID, "FOO", "bar"); err != nil {
+	if err := svc.store.SetAppEnv(ctx, app.ID, "FOO", "bar", false); err != nil {
 		t.Fatalf("set env: %v", err)
 	}
 	if err := svc.store.CreateDomain(ctx, &domain.Domain{

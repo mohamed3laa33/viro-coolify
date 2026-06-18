@@ -254,3 +254,67 @@ func TestMemoryStoreBuilds(t *testing.T) {
 		t.Fatalf("update missing: expected ErrNotFound, got %v", err)
 	}
 }
+
+func TestMemoryStoreAppEnvSecretFlag(t *testing.T) {
+	s := NewMemoryStore()
+	ctx := context.Background()
+
+	if err := s.SetAppEnv(ctx, "app1", "PLAIN", "v", false); err != nil {
+		t.Fatalf("set plain: %v", err)
+	}
+	if err := s.SetAppEnv(ctx, "app1", "SECRET", "enc", true); err != nil {
+		t.Fatalf("set secret: %v", err)
+	}
+	entries, err := s.ListAppEnv(ctx, "app1")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("want 2 entries, got %d", len(entries))
+	}
+	// Sorted by key: PLAIN, SECRET.
+	if entries[0].Key != "PLAIN" || entries[0].Secret {
+		t.Fatalf("plain entry wrong: %+v", entries[0])
+	}
+	if entries[1].Key != "SECRET" || !entries[1].Secret || entries[1].Value != "enc" {
+		t.Fatalf("secret entry wrong: %+v", entries[1])
+	}
+	// GetAppEnv returns the at-rest values keyed by name.
+	raw, _ := s.GetAppEnv(ctx, "app1")
+	if raw["SECRET"] != "enc" || raw["PLAIN"] != "v" {
+		t.Fatalf("get app env: %+v", raw)
+	}
+}
+
+func TestMemoryStoreAuditLog(t *testing.T) {
+	s := NewMemoryStore()
+	ctx := context.Background()
+
+	for i, a := range []string{"plan.create", "secret.set", "auth.login"} {
+		e := &domain.AuditEvent{
+			ID: string(rune('a' + i)), OrgID: "org1", Action: a,
+			At: time.Now().Add(time.Duration(i) * time.Second),
+		}
+		if err := s.CreateAuditEvent(ctx, e); err != nil {
+			t.Fatalf("create audit: %v", err)
+		}
+	}
+	// Platform-level event (no org).
+	_ = s.CreateAuditEvent(ctx, &domain.AuditEvent{ID: "p1", OrgID: "", Action: "settings.update", At: time.Now()})
+
+	orgEvents, err := s.ListAuditEvents(ctx, domain.AuditFilter{OrgID: "org1", Limit: 10})
+	if err != nil {
+		t.Fatalf("list audit: %v", err)
+	}
+	if len(orgEvents) != 3 {
+		t.Fatalf("want 3 org events, got %d", len(orgEvents))
+	}
+	// Most-recent-first.
+	if orgEvents[0].Action != "auth.login" {
+		t.Fatalf("expected newest first, got %q", orgEvents[0].Action)
+	}
+	platEvents, _ := s.ListAuditEvents(ctx, domain.AuditFilter{OrgID: "", Limit: 10})
+	if len(platEvents) != 1 || platEvents[0].Action != "settings.update" {
+		t.Fatalf("platform events wrong: %+v", platEvents)
+	}
+}

@@ -85,6 +85,11 @@ type Config struct {
 
 	// Super-admin: emails (normalized) that are granted platform-wide admin.
 	AdminEmails []string
+
+	// SecretEncryptionKey is the AES-256-GCM key (base64 or hex, 32 bytes) used to
+	// encrypt SECRET app env values at rest. Empty in dev falls back to no
+	// encryption (a logged warning) — never a panic.
+	SecretEncryptionKey string
 }
 
 // Load reads configuration from environment variables, applying development defaults.
@@ -125,9 +130,17 @@ func Load() (*Config, error) {
 		BillingEnabled:              getenvBool("BILLING_ENABLED", false),
 		CORSAllowedOrigins:          splitAndTrim(getenv("CORS_ORIGINS", "http://localhost:3000,https://app.vortex.v60ai.com")),
 		AdminEmails:                 splitAndTrim(strings.ToLower(getenv("ADMIN_EMAILS", ""))),
+		SecretEncryptionKey:         getenv("SECRET_ENCRYPTION_KEY", ""),
 	}
 	if cfg.IsProduction() && (cfg.JWTSecret == "" || cfg.JWTSecret == defaultDevJWTSecret) {
 		return nil, errors.New("VORTEX_JWT_SECRET must be set to a strong value in production")
+	}
+	// In production a missing encryption key would silently fall back to the
+	// NoopCipher and store app secrets PLAINTEXT. Hard-fail like the JWT guard so
+	// a forgotten key is an explicit startup error, not a silent downgrade. Dev
+	// still allows an empty key (NoopCipher with the existing warning).
+	if cfg.IsProduction() && strings.TrimSpace(cfg.SecretEncryptionKey) == "" {
+		return nil, errors.New("VORTEX_SECRET_ENCRYPTION_KEY must be set in production")
 	}
 	return cfg, nil
 }

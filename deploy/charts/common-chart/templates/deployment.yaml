@@ -48,6 +48,7 @@ spec:
       {{- else }}
       serviceAccountName: {{ template "common-chart.name" $ }}
       {{- end }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
       {{- end }}
       {{- if .Values.deployment.terminationGracePeriodSeconds }}
       terminationGracePeriodSeconds: {{ .Values.deployment.terminationGracePeriodSeconds }}

@@ -134,11 +134,33 @@ func (s *Server) handleStripeWebhook(w http.ResponseWriter, r *http.Request) {
 		SubscriptionItemID:   itemID,
 		ItemCurrentPeriodEnd: itemPeriodEnd,
 	}
-	if _, err := s.billing.ProcessEvent(r.Context(), evt); err != nil {
+	processed, err := s.billing.ProcessEvent(r.Context(), evt)
+	if err != nil {
 		// Genuine store failure: 5xx so Stripe retries (don't swallow).
 		s.logger.Error("stripe webhook", "type", evt.Type, "err", err)
 		writeError(w, http.StatusInternalServerError, "failed to process event")
 		return
 	}
+	// AUDIT: record subscription status changes applied by the webhook. The actor
+	// is the billing provider (no request user); platform-level (no org in the
+	// webhook context). Metadata carries the mapped status — never any secret.
+	if processed && isSubscriptionEvent(evt.Type) {
+		s.auditAs(r.Context(), "", "stripe-webhook", "", "subscription.update", "subscription",
+			evt.Subscription, "type="+evt.Type+",status="+evt.Status)
+	}
 	w.WriteHeader(http.StatusOK)
+}
+
+// isSubscriptionEvent reports whether a Stripe event type changes an org's
+// subscription state (and so should be recorded in the audit trail).
+func isSubscriptionEvent(t string) bool {
+	switch t {
+	case "checkout.session.completed",
+		"customer.subscription.created",
+		"customer.subscription.updated",
+		"customer.subscription.deleted":
+		return true
+	default:
+		return false
+	}
 }

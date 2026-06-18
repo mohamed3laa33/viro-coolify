@@ -26,7 +26,8 @@ type MemoryStore struct {
 	projectMembers map[string]domain.ProjectMembership // key: projectID + "\x00" + userID
 	invitations    map[string]domain.Invitation        // by id
 	services       map[string]domain.Service           // by id
-	appEnv         map[string]map[string]string        // appID -> key -> value
+	appEnv         map[string]map[string]envEntry      // appID -> key -> entry
+	auditEvents    []domain.AuditEvent                 // append-only audit log
 	domains        map[string]domain.Domain            // by id
 	plans          map[string]domain.Plan              // by id
 	templates      map[string]domain.ServiceTemplate   // by key
@@ -54,7 +55,7 @@ func NewMemoryStore() *MemoryStore {
 		projectMembers: make(map[string]domain.ProjectMembership),
 		invitations:    make(map[string]domain.Invitation),
 		services:       make(map[string]domain.Service),
-		appEnv:         make(map[string]map[string]string),
+		appEnv:         make(map[string]map[string]envEntry),
 		domains:        make(map[string]domain.Domain),
 		plans:          make(map[string]domain.Plan),
 		templates:      make(map[string]domain.ServiceTemplate),
@@ -840,23 +841,40 @@ func (s *MemoryStore) DeleteService(_ context.Context, id string) error {
 	return nil
 }
 
+// envEntry is the in-memory app_env record: the at-rest value plus its secret flag.
+type envEntry struct {
+	value  string
+	secret bool
+}
+
 func (s *MemoryStore) GetAppEnv(_ context.Context, appID string) (map[string]string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make(map[string]string, len(s.appEnv[appID]))
 	for k, v := range s.appEnv[appID] {
-		out[k] = v
+		out[k] = v.value
 	}
 	return out, nil
 }
 
-func (s *MemoryStore) SetAppEnv(_ context.Context, appID, key, value string) error {
+func (s *MemoryStore) ListAppEnv(_ context.Context, appID string) ([]domain.AppEnvEntry, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]domain.AppEnvEntry, 0, len(s.appEnv[appID]))
+	for k, v := range s.appEnv[appID] {
+		out = append(out, domain.AppEnvEntry{Key: k, Value: v.value, Secret: v.secret})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out, nil
+}
+
+func (s *MemoryStore) SetAppEnv(_ context.Context, appID, key, value string, secret bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.appEnv[appID] == nil {
-		s.appEnv[appID] = make(map[string]string)
+		s.appEnv[appID] = make(map[string]envEntry)
 	}
-	s.appEnv[appID][key] = value
+	s.appEnv[appID][key] = envEntry{value: value, secret: secret}
 	return nil
 }
 
@@ -867,6 +885,34 @@ func (s *MemoryStore) DeleteAppEnv(_ context.Context, appID, key string) error {
 		delete(m, key)
 	}
 	return nil
+}
+
+func (s *MemoryStore) CreateAuditEvent(_ context.Context, e *domain.AuditEvent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.auditEvents = append(s.auditEvents, *e)
+	return nil
+}
+
+func (s *MemoryStore) ListAuditEvents(_ context.Context, f domain.AuditFilter) ([]domain.AuditEvent, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	limit := f.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	out := make([]domain.AuditEvent, 0, limit)
+	// Most-recent-first: iterate the append-only slice in reverse.
+	for i := len(s.auditEvents) - 1; i >= 0; i-- {
+		if s.auditEvents[i].OrgID != f.OrgID {
+			continue
+		}
+		out = append(out, s.auditEvents[i])
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
 }
 
 func (s *MemoryStore) CreateDomain(_ context.Context, d *domain.Domain) error {

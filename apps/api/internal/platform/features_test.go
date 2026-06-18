@@ -246,10 +246,10 @@ func TestEnvSetGetDelete(t *testing.T) {
 	ctx := context.Background()
 	app, _ := svc.CreateApp(ctx, "org-1", CreateAppInput{Name: "web"})
 
-	if _, err := svc.SetEnv(ctx, "org-1", app.ID, "FOO", "bar"); err != nil {
+	if _, err := svc.SetEnv(ctx, "org-1", app.ID, "FOO", "bar", false); err != nil {
 		t.Fatalf("set env: %v", err)
 	}
-	if _, err := svc.SetEnv(ctx, "org-1", app.ID, "BAZ", "qux"); err != nil {
+	if _, err := svc.SetEnv(ctx, "org-1", app.ID, "BAZ", "qux", false); err != nil {
 		t.Fatalf("set env 2: %v", err)
 	}
 	env, _ := svc.ListEnv(ctx, "org-1", app.ID)
@@ -265,7 +265,7 @@ func TestEnvSetGetDelete(t *testing.T) {
 	}
 
 	// Tenant isolation.
-	if _, err := svc.SetEnv(ctx, "org-2", app.ID, "X", "y"); !errors.Is(err, ErrNotFound) {
+	if _, err := svc.SetEnv(ctx, "org-2", app.ID, "X", "y", false); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("cross-tenant env: %v", err)
 	}
 }

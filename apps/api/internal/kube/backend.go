@@ -66,6 +66,13 @@ type Workload struct {
 	// this for git-built apps (the per-tenant copy of the registry pull secret);
 	// it is empty for public catalog images.
 	ImagePullSecret string
+
+	// EnvSecretName, when set, names a per-app Kubernetes Secret in the tenant
+	// namespace whose keys are injected into the container via envFrom secretRef.
+	// SECRET env values are delivered this way (never baked into the helm release
+	// values), while non-secret config still flows through Env. The platform
+	// creates/updates this Secret via EnsureAppSecret before Apply.
+	EnvSecretName string
 }
 
 // Status is the observed runtime state of a workload's controller.
@@ -89,6 +96,14 @@ type Backend interface {
 	// pulled. When no registry pull secret source is configured (local/dev) it is
 	// a no-op (returns nil) so non-registry flows keep working.
 	EnsureImagePullSecret(ctx context.Context, ns, name string) error
+
+	// EnsureAppSecret creates/updates an Opaque Kubernetes Secret named "name" in
+	// tenant namespace "ns" holding the workload's SECRET env (key -> plaintext
+	// value, supplied already-decrypted by the platform). The chart references it
+	// via envFrom secretRef, so secret values are never baked into the helm
+	// release values. An empty data map deletes the Secret (no stale secrets
+	// linger after the last secret is removed).
+	EnsureAppSecret(ctx context.Context, ns, name string, data map[string]string) error
 
 	// Apply renders chart values for the workload and runs `helm upgrade
 	// --install`, returning the Helm release name and the generated public host.

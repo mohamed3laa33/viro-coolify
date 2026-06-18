@@ -16,8 +16,9 @@ func (s *Server) handleListAppEnv(w http.ResponseWriter, r *http.Request) {
 }
 
 type setEnvRequest struct {
-	Key   string `json:"key"`
-	Value string `json:"value"`
+	Key    string `json:"key"`
+	Value  string `json:"value"`
+	Secret bool   `json:"secret"`
 }
 
 func (s *Server) handleSetAppEnv(w http.ResponseWriter, r *http.Request) {
@@ -29,19 +30,28 @@ func (s *Server) handleSetAppEnv(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "key is required")
 		return
 	}
-	env, err := s.platform.SetEnv(r.Context(), chi.URLParam(r, "orgID"), chi.URLParam(r, "appID"), req.Key, req.Value)
+	orgID, appID := chi.URLParam(r, "orgID"), chi.URLParam(r, "appID")
+	env, err := s.platform.SetEnv(r.Context(), orgID, appID, req.Key, req.Value, req.Secret)
 	if err != nil {
 		s.writePlatformError(w, "set app env", err)
 		return
 	}
+	// AUDIT: record the KEY only — never the value (secret or plain).
+	action := "env.set"
+	if req.Secret {
+		action = "secret.set"
+	}
+	s.audit(r.Context(), orgID, action, "app_env", appID+"/"+req.Key, "")
 	writeJSON(w, http.StatusOK, env)
 }
 
 func (s *Server) handleDeleteAppEnv(w http.ResponseWriter, r *http.Request) {
-	if err := s.platform.DeleteEnv(r.Context(), chi.URLParam(r, "orgID"), chi.URLParam(r, "appID"), chi.URLParam(r, "key")); err != nil {
+	orgID, appID, key := chi.URLParam(r, "orgID"), chi.URLParam(r, "appID"), chi.URLParam(r, "key")
+	if err := s.platform.DeleteEnv(r.Context(), orgID, appID, key); err != nil {
 		s.writePlatformError(w, "delete app env", err)
 		return
 	}
+	s.audit(r.Context(), orgID, "secret.delete", "app_env", appID+"/"+key, "")
 	w.WriteHeader(http.StatusNoContent)
 }
 

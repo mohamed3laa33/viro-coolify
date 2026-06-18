@@ -44,6 +44,7 @@ spec:
       {{- else }}
       serviceAccountName: {{ template "common-chart.name" $ }}
       {{- end }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
       {{- end }}
       securityContext:
         {{- toYaml .Values.deployment.podSecurityContext | nindent 8 }}

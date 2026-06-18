@@ -249,7 +249,15 @@ extraBackendConfigs: []
 # Service Account to use by pods
 serviceAccount:
   enabled: false
+  # -- Whether the chart should CREATE/own the ServiceAccount object. Set false
+  # to bind the pod to a ServiceAccount managed outside the chart (e.g. a
+  # per-tenant SA created imperatively with token auto-mount disabled) without
+  # the chart rendering a colliding ServiceAccount.
+  create: true
   name: ""
+  # -- automountServiceAccountToken on the POD spec. Default false so tenant
+  # workloads never receive an auto-mounted Kubernetes API token.
+  automountServiceAccountToken: false
 
   # Additional Labels on service account
   additionalLabels:

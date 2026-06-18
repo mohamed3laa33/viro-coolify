@@ -68,10 +68,30 @@ type createAppRequest struct {
 }
 
 func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
-	apps, err := s.platform.ListApps(r.Context(), chi.URLParam(r, "orgID"))
+	user, ok := s.currentUser(w, r)
+	if !ok {
+		return
+	}
+	orgID := chi.URLParam(r, "orgID")
+	apps, err := s.platform.ListApps(r.Context(), orgID)
 	if err != nil {
 		s.writePlatformError(w, "list apps", err)
 		return
+	}
+	ids, isAdmin, err := s.identity.AccessibleProjectIDs(r.Context(), user.ID, orgID)
+	if err != nil {
+		s.logger.Error("list apps: accessible projects", "err", err)
+		writeError(w, http.StatusInternalServerError, "authorization error")
+		return
+	}
+	if !isAdmin {
+		filtered := apps[:0:0]
+		for _, a := range apps {
+			if ids[a.ProjectID] {
+				filtered = append(filtered, a)
+			}
+		}
+		apps = filtered
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": apps})
 }
@@ -194,10 +214,30 @@ type createDatabaseRequest struct {
 }
 
 func (s *Server) handleListDatabases(w http.ResponseWriter, r *http.Request) {
-	dbs, err := s.platform.ListDatabases(r.Context(), chi.URLParam(r, "orgID"))
+	user, ok := s.currentUser(w, r)
+	if !ok {
+		return
+	}
+	orgID := chi.URLParam(r, "orgID")
+	dbs, err := s.platform.ListDatabases(r.Context(), orgID)
 	if err != nil {
 		s.writePlatformError(w, "list databases", err)
 		return
+	}
+	ids, isAdmin, err := s.identity.AccessibleProjectIDs(r.Context(), user.ID, orgID)
+	if err != nil {
+		s.logger.Error("list databases: accessible projects", "err", err)
+		writeError(w, http.StatusInternalServerError, "authorization error")
+		return
+	}
+	if !isAdmin {
+		filtered := dbs[:0:0]
+		for _, d := range dbs {
+			if ids[d.ProjectID] {
+				filtered = append(filtered, d)
+			}
+		}
+		dbs = filtered
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": dbs})
 }

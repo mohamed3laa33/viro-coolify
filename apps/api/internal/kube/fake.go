@@ -28,6 +28,9 @@ type FakeBackend struct {
 	Replicas map[string]int
 	// PullSecrets records every EnsureImagePullSecret call as "<namespace>/<name>".
 	PullSecrets map[string]bool
+	// AppSecrets records the latest EnsureAppSecret data keyed by "<namespace>/<name>".
+	// A nil/empty data map records the deletion (entry removed).
+	AppSecrets map[string]map[string]string
 	// LogLines is the canned log output returned by Logs.
 	LogLines string
 }
@@ -43,6 +46,7 @@ func NewFakeBackend() *FakeBackend {
 		Hosts:       map[string]string{},
 		Replicas:    map[string]int{},
 		PullSecrets: map[string]bool{},
+		AppSecrets:  map[string]map[string]string{},
 		LogLines:    "fake log line\n",
 	}
 }
@@ -68,6 +72,22 @@ func (f *FakeBackend) EnsureImagePullSecret(_ context.Context, ns, name string) 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.PullSecrets[ns+"/"+name] = true
+	return nil
+}
+
+func (f *FakeBackend) EnsureAppSecret(_ context.Context, ns, name string, data map[string]string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k := ns + "/" + name
+	if len(data) == 0 {
+		delete(f.AppSecrets, k)
+		return nil
+	}
+	cp := make(map[string]string, len(data))
+	for dk, dv := range data {
+		cp[dk] = dv
+	}
+	f.AppSecrets[k] = cp
 	return nil
 }
 

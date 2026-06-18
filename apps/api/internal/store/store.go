@@ -67,10 +67,21 @@ type Store interface {
 	UpdateService(ctx context.Context, svc *domain.Service) error
 	DeleteService(ctx context.Context, id string) error
 
-	// App environment variables (per app; key -> value).
+	// App environment variables (per app; key -> value). GetAppEnv returns the
+	// stored values (secret entries are the AT-REST/encrypted value; the deploy
+	// path decrypts). ListAppEnv returns each entry with its secret flag so the
+	// API can mask secret values. SetAppEnv records whether the entry is a secret
+	// (the value passed in is already encrypted-at-rest for secrets).
 	GetAppEnv(ctx context.Context, appID string) (map[string]string, error)
-	SetAppEnv(ctx context.Context, appID, key, value string) error
+	ListAppEnv(ctx context.Context, appID string) ([]domain.AppEnvEntry, error)
+	SetAppEnv(ctx context.Context, appID, key, value string, secret bool) error
 	DeleteAppEnv(ctx context.Context, appID, key string) error
+
+	// Audit log (append-only). CreateAuditEvent appends one event; ListAuditEvents
+	// returns the most-recent-first events matching the filter (org-scoped, or
+	// platform-level when OrgID is empty).
+	CreateAuditEvent(ctx context.Context, e *domain.AuditEvent) error
+	ListAuditEvents(ctx context.Context, f domain.AuditFilter) ([]domain.AuditEvent, error)
 
 	// App domains.
 	CreateDomain(ctx context.Context, d *domain.Domain) error

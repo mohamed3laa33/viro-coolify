@@ -45,6 +45,7 @@ func (s *Server) handleAdminCreatePlan(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to create plan")
 		return
 	}
+	s.audit(r.Context(), "", "plan.create", "plan", p.ID, "")
 	writeJSON(w, http.StatusCreated, p)
 }
 
@@ -71,6 +72,7 @@ func (s *Server) handleAdminUpdatePlan(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to update plan")
 		return
 	}
+	s.audit(r.Context(), "", "plan.update", "plan", plan.ID, "")
 	writeJSON(w, http.StatusOK, plan)
 }
 
@@ -85,6 +87,7 @@ func (s *Server) handleAdminDeletePlan(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to delete plan")
 		return
 	}
+	s.audit(r.Context(), "", "plan.delete", "plan", chi.URLParam(r, "id"), "")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -127,6 +130,7 @@ func (s *Server) handleAdminCreatePricing(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, "failed to create pricing")
 		return
 	}
+	s.audit(r.Context(), "", "pricing.create", "pricing", p.Key, "")
 	writeJSON(w, http.StatusCreated, p)
 }
 
@@ -156,6 +160,7 @@ func (s *Server) handleAdminUpdatePricing(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, "failed to update pricing")
 		return
 	}
+	s.audit(r.Context(), "", "pricing.update", "pricing", comp.Key, "")
 	writeJSON(w, http.StatusOK, comp)
 }
 
@@ -170,6 +175,7 @@ func (s *Server) handleAdminDeletePricing(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, "failed to delete pricing")
 		return
 	}
+	s.audit(r.Context(), "", "pricing.delete", "pricing", chi.URLParam(r, "key"), "")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -208,6 +214,7 @@ func (s *Server) handleAdminCreateTemplate(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, "failed to create template")
 		return
 	}
+	s.audit(r.Context(), "", "template.create", "template", t.Key, "")
 	writeJSON(w, http.StatusCreated, t)
 }
 
@@ -233,6 +240,7 @@ func (s *Server) handleAdminUpdateTemplate(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, "failed to update template")
 		return
 	}
+	s.audit(r.Context(), "", "template.update", "template", tmpl.Key, "")
 	writeJSON(w, http.StatusOK, tmpl)
 }
 
@@ -247,6 +255,7 @@ func (s *Server) handleAdminDeleteTemplate(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, "failed to delete template")
 		return
 	}
+	s.audit(r.Context(), "", "template.delete", "template", chi.URLParam(r, "key"), "")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -278,6 +287,7 @@ func (s *Server) handleAdminUpdateSettings(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, "failed to update settings")
 		return
 	}
+	s.audit(r.Context(), "", "settings.update", "settings", "platform", "")
 	writeJSON(w, http.StatusOK, set)
 }
 

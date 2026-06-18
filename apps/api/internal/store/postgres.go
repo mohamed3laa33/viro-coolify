@@ -692,11 +692,29 @@ func (s *PostgresStore) GetAppEnv(ctx context.Context, appID string) (map[string
 	return out, mapErr(rows.Err())
 }
 
-func (s *PostgresStore) SetAppEnv(ctx context.Context, appID, key, value string) error {
+func (s *PostgresStore) ListAppEnv(ctx context.Context, appID string) ([]domain.AppEnvEntry, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT key, value, secret FROM app_env WHERE app_id = $1 ORDER BY key`, appID)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+	out := make([]domain.AppEnvEntry, 0)
+	for rows.Next() {
+		var e domain.AppEnvEntry
+		if err := rows.Scan(&e.Key, &e.Value, &e.Secret); err != nil {
+			return nil, mapErr(err)
+		}
+		out = append(out, e)
+	}
+	return out, mapErr(rows.Err())
+}
+
+func (s *PostgresStore) SetAppEnv(ctx context.Context, appID, key, value string, secret bool) error {
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO app_env (app_id, key, value) VALUES ($1, $2, $3)
-		 ON CONFLICT (app_id, key) DO UPDATE SET value = EXCLUDED.value`,
-		appID, key, value,
+		`INSERT INTO app_env (app_id, key, value, secret) VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (app_id, key) DO UPDATE SET value = EXCLUDED.value, secret = EXCLUDED.secret`,
+		appID, key, value, secret,
 	)
 	return mapErr(err)
 }
@@ -704,6 +722,41 @@ func (s *PostgresStore) SetAppEnv(ctx context.Context, appID, key, value string)
 func (s *PostgresStore) DeleteAppEnv(ctx context.Context, appID, key string) error {
 	_, err := s.pool.Exec(ctx, `DELETE FROM app_env WHERE app_id = $1 AND key = $2`, appID, key)
 	return mapErr(err)
+}
+
+// ---- Audit log ----
+
+func (s *PostgresStore) CreateAuditEvent(ctx context.Context, e *domain.AuditEvent) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO audit_events (id, org_id, actor_user_id, actor_email, action, target_type, target_id, metadata, at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		e.ID, e.OrgID, e.ActorUserID, e.ActorEmail, e.Action, e.TargetType, e.TargetID, e.Metadata, e.At,
+	)
+	return mapErr(err)
+}
+
+func (s *PostgresStore) ListAuditEvents(ctx context.Context, f domain.AuditFilter) ([]domain.AuditEvent, error) {
+	limit := f.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, org_id, actor_user_id, actor_email, action, target_type, target_id, metadata, at
+		   FROM audit_events WHERE org_id = $1 ORDER BY at DESC, id DESC LIMIT $2`, f.OrgID, limit)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+	out := make([]domain.AuditEvent, 0)
+	for rows.Next() {
+		var e domain.AuditEvent
+		if err := rows.Scan(&e.ID, &e.OrgID, &e.ActorUserID, &e.ActorEmail,
+			&e.Action, &e.TargetType, &e.TargetID, &e.Metadata, &e.At); err != nil {
+			return nil, mapErr(err)
+		}
+		out = append(out, e)
+	}
+	return out, mapErr(rows.Err())
 }
 
 // ---- Domains ----

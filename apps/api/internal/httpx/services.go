@@ -13,10 +13,30 @@ func (s *Server) handleServiceCatalog(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListServices(w http.ResponseWriter, r *http.Request) {
-	svcs, err := s.platform.ListServices(r.Context(), chi.URLParam(r, "orgID"))
+	user, ok := s.currentUser(w, r)
+	if !ok {
+		return
+	}
+	orgID := chi.URLParam(r, "orgID")
+	svcs, err := s.platform.ListServices(r.Context(), orgID)
 	if err != nil {
 		s.writePlatformError(w, "list services", err)
 		return
+	}
+	ids, isAdmin, err := s.identity.AccessibleProjectIDs(r.Context(), user.ID, orgID)
+	if err != nil {
+		s.logger.Error("list services: accessible projects", "err", err)
+		writeError(w, http.StatusInternalServerError, "authorization error")
+		return
+	}
+	if !isAdmin {
+		filtered := svcs[:0:0]
+		for _, sv := range svcs {
+			if ids[sv.ProjectID] {
+				filtered = append(filtered, sv)
+			}
+		}
+		svcs = filtered
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": svcs})
 }
