@@ -90,12 +90,27 @@ func userFromContext(ctx context.Context) (*domain.User, bool) {
 	return u, ok
 }
 
-// authMiddleware requires a valid access token and loads the user into the context.
+// authMiddleware requires a valid credential and loads the user into the context.
+// It accepts EITHER a personal access token ("Authorization: Bearer vrt_<token>")
+// or the existing JWT/cookie session. A bearer value carrying the PAT scheme
+// prefix is resolved by hash to its owner; anything else is verified as a JWT.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := accessTokenFromRequest(r)
 		if token == "" {
 			writeError(w, http.StatusUnauthorized, "missing bearer token")
+			return
+		}
+		// Personal access token path: a "vrt_"-prefixed bearer authenticates as the
+		// token's owner. A missing/expired/revoked token is a 401, exactly like a bad
+		// JWT, so the two credential types are indistinguishable to a client.
+		if isApiToken(token) {
+			user, err := s.authViaApiToken(r.Context(), token)
+			if err != nil {
+				writeError(w, http.StatusUnauthorized, "invalid or expired token")
+				return
+			}
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userCtxKey, user)))
 			return
 		}
 		claims, err := s.tokens.Verify(token, auth.AccessToken)

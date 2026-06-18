@@ -74,6 +74,7 @@ type MemoryStore struct {
 	pricing        map[string]domain.PricingComponent   // by key
 	refreshTokens  map[string]domain.RefreshToken       // by jti
 	resetTokens    map[string]domain.PasswordResetToken // by id
+	apiTokens      map[string]domain.ApiToken           // by id
 	settings       domain.PlatformSettings              // singleton
 	processedEvts  map[string]struct{}                  // stripe event id dedupe
 	meterState     *domain.MeterState                   // metering progress (singleton)
@@ -104,6 +105,7 @@ func NewMemoryStore() *MemoryStore {
 		pricing:        make(map[string]domain.PricingComponent),
 		refreshTokens:  make(map[string]domain.RefreshToken),
 		resetTokens:    make(map[string]domain.PasswordResetToken),
+		apiTokens:      make(map[string]domain.ApiToken),
 		processedEvts:  make(map[string]struct{}),
 	}
 	s.seed()
@@ -890,6 +892,78 @@ func (s *MemoryStore) ConsumePasswordResetToken(_ context.Context, id string, us
 	t.UsedAt = usedAt
 	s.resetTokens[id] = t
 	return true, nil
+}
+
+// ---- API tokens (personal access tokens; hashed at rest) ----
+
+func (s *MemoryStore) CreateApiToken(_ context.Context, t *domain.ApiToken) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.apiTokens[t.ID]; exists {
+		return ErrConflict
+	}
+	for _, existing := range s.apiTokens {
+		if existing.TokenHash == t.TokenHash {
+			return ErrConflict
+		}
+	}
+	cp := *t
+	cp.Scopes = append([]string(nil), t.Scopes...)
+	s.apiTokens[t.ID] = cp
+	return nil
+}
+
+func (s *MemoryStore) GetApiTokenByHash(_ context.Context, tokenHash string) (*domain.ApiToken, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, t := range s.apiTokens {
+		if t.TokenHash == tokenHash {
+			cp := t
+			cp.Scopes = append([]string(nil), t.Scopes...)
+			return &cp, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+func (s *MemoryStore) ListApiTokensByUser(_ context.Context, userID string) ([]domain.ApiToken, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []domain.ApiToken
+	for _, t := range s.apiTokens {
+		if t.UserID == userID {
+			cp := t
+			cp.Scopes = append([]string(nil), t.Scopes...)
+			out = append(out, cp)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	return out, nil
+}
+
+// DeleteApiToken removes a token scoped to its owner, so one user can never
+// delete another user's token by id. ErrNotFound when no matching row exists.
+func (s *MemoryStore) DeleteApiToken(_ context.Context, userID, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t, ok := s.apiTokens[id]
+	if !ok || t.UserID != userID {
+		return ErrNotFound
+	}
+	delete(s.apiTokens, id)
+	return nil
+}
+
+func (s *MemoryStore) TouchApiToken(_ context.Context, id string, lastUsedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t, ok := s.apiTokens[id]
+	if !ok {
+		return ErrNotFound
+	}
+	t.LastUsedAt = lastUsedAt
+	s.apiTokens[id] = t
+	return nil
 }
 
 func (s *MemoryStore) UpsertSubscription(_ context.Context, sub *domain.Subscription) error {

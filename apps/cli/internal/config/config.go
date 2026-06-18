@@ -16,13 +16,21 @@ import (
 // DefaultAPIURL is the control-plane base URL used when none is configured.
 const DefaultAPIURL = "http://localhost:8080"
 
+// PATPrefix is the personal-access-token prefix. A stored token beginning with
+// it is sent verbatim as "Authorization: Bearer vrt_..." and never refreshed.
+const PATPrefix = "vrt_"
+
 // Config is the on-disk CLI configuration.
 type Config struct {
 	APIURL       string `yaml:"api_url"`
 	AccessToken  string `yaml:"access_token,omitempty"`
 	RefreshToken string `yaml:"refresh_token,omitempty"`
-	CurrentOrg   string `yaml:"current_org,omitempty"`
-	CurrentProj  string `yaml:"current_project,omitempty"`
+	// Token is a personal access token ("vrt_..."), stored for non-interactive /
+	// CI use (`vortex auth login --token`). When set it authenticates as the
+	// token's owner and takes precedence over the JWT access token.
+	Token       string `yaml:"token,omitempty"`
+	CurrentOrg  string `yaml:"current_org,omitempty"`
+	CurrentProj string `yaml:"current_project,omitempty"`
 
 	// path is the file the config was loaded from / will be saved to. It is not
 	// serialized.
@@ -108,13 +116,23 @@ func (c *Config) SetTokens(access, refresh string) error {
 	return c.Save()
 }
 
-// Clear removes auth tokens (logout) and persists the config. Context (org/
-// project) and the API URL are preserved.
-func (c *Config) Clear() error {
+// SetPAT records a personal access token (e.g. after `vortex auth login
+// --token`) and clears any JWT session so the two never coexist, then persists.
+func (c *Config) SetPAT(token string) error {
+	c.Token = token
 	c.AccessToken = ""
 	c.RefreshToken = ""
 	return c.Save()
 }
 
-// LoggedIn reports whether an access token is present.
-func (c *Config) LoggedIn() bool { return c.AccessToken != "" }
+// Clear removes auth credentials (logout) and persists the config. Context (org/
+// project) and the API URL are preserved.
+func (c *Config) Clear() error {
+	c.AccessToken = ""
+	c.RefreshToken = ""
+	c.Token = ""
+	return c.Save()
+}
+
+// LoggedIn reports whether any credential (PAT or JWT access token) is present.
+func (c *Config) LoggedIn() bool { return c.Token != "" || c.AccessToken != "" }

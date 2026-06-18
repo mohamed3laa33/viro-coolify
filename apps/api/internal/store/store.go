@@ -170,6 +170,20 @@ type Store interface {
 	// the row does not exist.
 	ConsumePasswordResetToken(ctx context.Context, id string, usedAt time.Time) (consumed bool, err error)
 
+	// API tokens (personal access tokens; "vrt_<random>"). Only the SHA-256 hash
+	// of the full token is stored — never the plaintext. CreateApiToken persists a
+	// new token; GetApiTokenByHash resolves a token by its hash for Bearer auth (it
+	// returns the row regardless of expiry — the caller enforces expiry so it can
+	// distinguish "unknown" from "expired"); ListApiTokensByUser returns a user's
+	// tokens newest-first (never the secret); DeleteApiToken revokes a token scoped
+	// to its owner (ErrNotFound when no matching token exists for the user);
+	// TouchApiToken records the last-used time best-effort.
+	CreateApiToken(ctx context.Context, t *domain.ApiToken) error
+	GetApiTokenByHash(ctx context.Context, tokenHash string) (*domain.ApiToken, error)
+	ListApiTokensByUser(ctx context.Context, userID string) ([]domain.ApiToken, error)
+	DeleteApiToken(ctx context.Context, userID, id string) error
+	TouchApiToken(ctx context.Context, id string, lastUsedAt time.Time) error
+
 	// Billing.
 	UpsertSubscription(ctx context.Context, s *domain.Subscription) error
 	GetSubscription(ctx context.Context, orgID string) (*domain.Subscription, error)

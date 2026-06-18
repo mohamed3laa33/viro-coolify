@@ -37,9 +37,13 @@ func (a *App) newSecretsListCmd() *cobra.Command {
 			return a.emit(cmd.OutOrStdout(), env, func() {
 				rows := make([][]string, 0, len(env))
 				for _, e := range env {
-					rows = append(rows, []string{e.Key, e.Value})
+					secret := "no"
+					if e.Secret {
+						secret = "yes"
+					}
+					rows = append(rows, []string{e.Key, e.Value, secret})
 				}
-				table(cmd.OutOrStdout(), []string{"KEY", "VALUE"}, rows)
+				table(cmd.OutOrStdout(), []string{"KEY", "VALUE", "SECRET"}, rows)
 			})
 		},
 	}
@@ -49,10 +53,13 @@ func (a *App) newSecretsListCmd() *cobra.Command {
 }
 
 func (a *App) newSecretsSetCmd() *cobra.Command {
-	var appID string
+	var (
+		appID  string
+		secret bool
+	)
 	cmd := &cobra.Command{
 		Use:   "set KEY=VALUE [KEY=VALUE ...]",
-		Short: "Set one or more environment variables on an app",
+		Short: "Set one or more environment variables on an app (--secret to encrypt + mask)",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.requireAuth(); err != nil {
@@ -67,15 +74,20 @@ func (a *App) newSecretsSetCmd() *cobra.Command {
 				if !ok || key == "" {
 					return fmt.Errorf("invalid KEY=VALUE pair: %q", kv)
 				}
-				if _, err := a.client.SetEnv(ctx(cmd), orgID, appID, key, value); err != nil {
+				if _, err := a.client.SetEnvSecret(ctx(cmd), orgID, appID, key, value, secret); err != nil {
 					return err
 				}
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Set %d secret(s) on app %s. Redeploy to apply.\n", len(args), appID)
+			kind := "variable(s)"
+			if secret {
+				kind = "secret(s)"
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Set %d %s on app %s. Redeploy to apply.\n", len(args), kind, appID)
 			return nil
 		},
 	}
 	cmd.Flags().StringVarP(&appID, "app", "a", "", "app id (required)")
+	cmd.Flags().BoolVar(&secret, "secret", false, "store the value as a secret (encrypted at rest, masked on read)")
 	_ = cmd.MarkFlagRequired("app")
 	return cmd
 }

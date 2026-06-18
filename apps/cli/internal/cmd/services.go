@@ -14,7 +14,78 @@ func (a *App) newServicesCmd() *cobra.Command {
 		Aliases: []string{"service"},
 		Short:   "Manage one-click services",
 	}
-	cmd.AddCommand(a.newServicesCatalogCmd(), a.newServicesListCmd(), a.newServicesCreateCmd())
+	cmd.AddCommand(
+		a.newServicesCatalogCmd(),
+		a.newServicesListCmd(),
+		a.newServicesCreateCmd(),
+		a.newServiceActionCmd("deploy", "Deploy (or redeploy) a service", func(cmd *cobra.Command, o, id string) (*client.Service, error) {
+			return a.client.DeployService(ctx(cmd), o, id)
+		}),
+		a.newServiceActionCmd("stop", "Stop a service", func(cmd *cobra.Command, o, id string) (*client.Service, error) {
+			return a.client.StopService(ctx(cmd), o, id)
+		}),
+		a.newServiceActionCmd("restart", "Restart a service", func(cmd *cobra.Command, o, id string) (*client.Service, error) {
+			return a.client.RestartService(ctx(cmd), o, id)
+		}),
+		a.newServicesDestroyCmd(),
+	)
+	return cmd
+}
+
+func (a *App) newServiceActionCmd(use, short string, fn func(cmd *cobra.Command, orgID, svcID string) (*client.Service, error)) *cobra.Command {
+	return &cobra.Command{
+		Use:   use + " <service-id>",
+		Short: short,
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := a.requireAuth(); err != nil {
+				return err
+			}
+			orgID, err := a.orgID()
+			if err != nil {
+				return err
+			}
+			svc, err := fn(cmd, orgID, args[0])
+			if err != nil {
+				return err
+			}
+			return a.emit(cmd.OutOrStdout(), svc, func() {
+				fmt.Fprintf(cmd.OutOrStdout(), "%s: status %s\n", svc.Name, svc.Status)
+			})
+		},
+	}
+}
+
+func (a *App) newServicesDestroyCmd() *cobra.Command {
+	var yes bool
+	cmd := &cobra.Command{
+		Use:     "destroy <service-id>",
+		Aliases: []string{"delete", "rm"},
+		Short:   "Destroy a service",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := a.requireAuth(); err != nil {
+				return err
+			}
+			orgID, err := a.orgID()
+			if err != nil {
+				return err
+			}
+			if !yes {
+				ans := prompt(fmt.Sprintf("Destroy service %s? This cannot be undone. [y/N]: ", args[0]))
+				if ans != "y" && ans != "Y" && ans != "yes" {
+					fmt.Fprintln(cmd.OutOrStdout(), "Aborted.")
+					return nil
+				}
+			}
+			if err := a.client.DestroyService(ctx(cmd), orgID, args[0]); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Destroyed service %s\n", args[0])
+			return nil
+		},
+	}
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "skip confirmation")
 	return cmd
 }
 

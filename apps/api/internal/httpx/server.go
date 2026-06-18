@@ -701,6 +701,12 @@ func (s *Server) routes() chi.Router {
 			r.Get("/me", s.handleMe)
 			r.Post("/auth/logout", s.handleLogout)
 
+			// Personal access tokens (PAT). The plaintext token is returned ONCE on
+			// create and never again; listing never leaks the secret.
+			r.Post("/tokens", s.handleCreateToken)
+			r.Get("/tokens", s.handleListTokens)
+			r.Delete("/tokens/{id}", s.handleDeleteToken)
+
 			// Accept an invitation (to an org or a project) as the current user.
 			r.Post("/invitations/accept", s.handleAcceptInvitation)
 

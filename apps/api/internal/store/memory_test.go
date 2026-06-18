@@ -318,3 +318,66 @@ func TestMemoryStoreAuditLog(t *testing.T) {
 		t.Fatalf("platform events wrong: %+v", platEvents)
 	}
 }
+
+func TestMemoryStoreApiTokens(t *testing.T) {
+	s := NewMemoryStore()
+	ctx := context.Background()
+
+	if err := s.CreateUser(ctx, &domain.User{ID: "u1", Email: "a@example.com", Name: "A"}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	tok := &domain.ApiToken{
+		ID: "t1", UserID: "u1", Name: "ci",
+		TokenHash: "hash1", Prefix: "vrt_ab12",
+		Scopes:    []string{"read"},
+		CreatedAt: time.Now(),
+	}
+	if err := s.CreateApiToken(ctx, tok); err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	// Duplicate hash conflicts.
+	if err := s.CreateApiToken(ctx, &domain.ApiToken{ID: "t2", UserID: "u1", TokenHash: "hash1"}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("dup hash = %v, want ErrConflict", err)
+	}
+
+	got, err := s.GetApiTokenByHash(ctx, "hash1")
+	if err != nil {
+		t.Fatalf("get by hash: %v", err)
+	}
+	if got.ID != "t1" || got.UserID != "u1" {
+		t.Fatalf("unexpected token: %+v", got)
+	}
+	// Mutating the returned slice must not affect stored state.
+	got.Scopes[0] = "mutated"
+	again, _ := s.GetApiTokenByHash(ctx, "hash1")
+	if again.Scopes[0] != "read" {
+		t.Fatalf("stored scopes were mutated via returned copy: %v", again.Scopes)
+	}
+
+	// Touch updates last-used.
+	now := time.Now()
+	if err := s.TouchApiToken(ctx, "t1", now); err != nil {
+		t.Fatalf("touch: %v", err)
+	}
+	touched, _ := s.GetApiTokenByHash(ctx, "hash1")
+	if touched.LastUsedAt.IsZero() {
+		t.Fatalf("last-used not updated")
+	}
+
+	list, err := s.ListApiTokensByUser(ctx, "u1")
+	if err != nil || len(list) != 1 {
+		t.Fatalf("list = %v, err = %v", list, err)
+	}
+
+	// Cross-user delete is a no-op (ErrNotFound).
+	if err := s.DeleteApiToken(ctx, "other", "t1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-user delete = %v, want ErrNotFound", err)
+	}
+	if err := s.DeleteApiToken(ctx, "u1", "t1"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := s.GetApiTokenByHash(ctx, "hash1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("get after delete = %v, want ErrNotFound", err)
+	}
+}

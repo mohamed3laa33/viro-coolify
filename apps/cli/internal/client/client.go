@@ -5,6 +5,7 @@
 package client
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -16,12 +17,47 @@ import (
 	"time"
 )
 
+// PATPrefix is the personal-access-token prefix. A bearer value beginning with
+// it is a PAT (authenticates as the token owner) rather than a short-lived JWT.
+const PATPrefix = "vrt_"
+
 // TokenStore abstracts persistence of the access/refresh tokens so the client
 // can update them after a refresh without depending on the config package.
+//
+// A store MAY also expose a personal access token (PAT) via the optional
+// PATStore interface; when present and non-empty the client sends it verbatim as
+// the bearer and never attempts a refresh.
 type TokenStore interface {
 	Access() string
 	Refresh() string
 	Save(access, refresh string) error
+}
+
+// PATStore is optionally implemented by a TokenStore that holds a personal
+// access token. When PAT() returns a non-empty "vrt_..." value it is used as the
+// Authorization bearer in preference to the JWT access token.
+type PATStore interface {
+	PAT() string
+}
+
+// bearer returns the credential the client should send: the PAT when the store
+// has one, else the JWT access token.
+func (c *Client) bearer() string {
+	if ps, ok := c.tokens.(PATStore); ok {
+		if pat := ps.PAT(); pat != "" {
+			return pat
+		}
+	}
+	return c.tokens.Access()
+}
+
+// hasPAT reports whether the store is authenticating with a PAT (which must not
+// be refreshed on a 401).
+func (c *Client) hasPAT() bool {
+	if ps, ok := c.tokens.(PATStore); ok {
+		return ps.PAT() != ""
+	}
+	return false
 }
 
 // Client talks to the Vortex API.
@@ -95,7 +131,8 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any, aut
 	}
 
 	// On 401 for an authenticated request, try a one-shot refresh then retry.
-	if auth && resp.StatusCode == http.StatusUnauthorized && c.tokens != nil && c.tokens.Refresh() != "" {
+	// A PAT-authenticated client never refreshes (PATs are long-lived).
+	if auth && resp.StatusCode == http.StatusUnauthorized && c.tokens != nil && !c.hasPAT() && c.tokens.Refresh() != "" {
 		resp.Body.Close()
 		if refreshErr := c.refresh(ctx); refreshErr != nil {
 			return refreshErr
@@ -119,6 +156,44 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any, aut
 	return nil
 }
 
+// stream issues a GET to path expecting a Server-Sent Events response and calls
+// onLine for every `data:` payload until the stream ends or ctx is cancelled. It
+// bypasses the JSON decode path in do(). A non-2xx response is decoded as an
+// APIError. PAT and JWT bearer auth are attached the same way as request().
+func (c *Client) stream(ctx context.Context, path string, onLine func(string)) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	if c.tokens != nil {
+		if b := c.bearer(); b != "" {
+			req.Header.Set("Authorization", "Bearer "+b)
+		}
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("request GET %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return decodeError(resp)
+	}
+	sc := bufio.NewScanner(resp.Body)
+	// Allow long log lines (default bufio scan token cap is 64KB).
+	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	for sc.Scan() {
+		line := sc.Text()
+		if strings.HasPrefix(line, "data:") {
+			onLine(strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " "))
+		}
+	}
+	if err := sc.Err(); err != nil && ctx.Err() == nil {
+		return fmt.Errorf("read log stream: %w", err)
+	}
+	return nil
+}
+
 func (c *Client) send(ctx context.Context, method, path string, body any, auth bool) (*http.Response, error) {
 	var reader io.Reader
 	if body != nil {
@@ -136,8 +211,10 @@ func (c *Client) send(ctx context.Context, method, path string, body any, auth b
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set("Accept", "application/json")
-	if auth && c.tokens != nil && c.tokens.Access() != "" {
-		req.Header.Set("Authorization", "Bearer "+c.tokens.Access())
+	if auth && c.tokens != nil {
+		if b := c.bearer(); b != "" {
+			req.Header.Set("Authorization", "Bearer "+b)
+		}
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {

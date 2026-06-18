@@ -1290,6 +1290,81 @@ func nullTime(t time.Time) *time.Time {
 	return &t
 }
 
+// ---- API tokens (personal access tokens; hashed at rest) ----
+
+func (s *PostgresStore) CreateApiToken(ctx context.Context, t *domain.ApiToken) error {
+	scopes := t.Scopes
+	if scopes == nil {
+		scopes = []string{}
+	}
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO api_tokens (id, user_id, name, token_hash, prefix, scopes, expires_at, last_used_at, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		t.ID, t.UserID, t.Name, t.TokenHash, t.Prefix, scopes,
+		nullTime(t.ExpiresAt), nullTime(t.LastUsedAt), t.CreatedAt,
+	)
+	return mapErr(err)
+}
+
+func (s *PostgresStore) scanApiToken(row pgx.Row) (*domain.ApiToken, error) {
+	var t domain.ApiToken
+	var expiresAt, lastUsedAt *time.Time
+	if err := row.Scan(&t.ID, &t.UserID, &t.Name, &t.TokenHash, &t.Prefix,
+		&t.Scopes, &expiresAt, &lastUsedAt, &t.CreatedAt); err != nil {
+		return nil, mapErr(err)
+	}
+	if expiresAt != nil {
+		t.ExpiresAt = *expiresAt
+	}
+	if lastUsedAt != nil {
+		t.LastUsedAt = *lastUsedAt
+	}
+	return &t, nil
+}
+
+func (s *PostgresStore) GetApiTokenByHash(ctx context.Context, tokenHash string) (*domain.ApiToken, error) {
+	return s.scanApiToken(s.pool.QueryRow(ctx,
+		`SELECT id, user_id, name, token_hash, prefix, scopes, expires_at, last_used_at, created_at
+		 FROM api_tokens WHERE token_hash = $1`, tokenHash))
+}
+
+func (s *PostgresStore) ListApiTokensByUser(ctx context.Context, userID string) ([]domain.ApiToken, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, user_id, name, token_hash, prefix, scopes, expires_at, last_used_at, created_at
+		 FROM api_tokens WHERE user_id = $1 ORDER BY created_at DESC`, userID)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+	var out []domain.ApiToken
+	for rows.Next() {
+		t, err := s.scanApiToken(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *t)
+	}
+	return out, mapErr(rows.Err())
+}
+
+// DeleteApiToken removes a token scoped to its owner, so one user can never
+// delete another user's token by id. ErrNotFound when no matching row exists.
+func (s *PostgresStore) DeleteApiToken(ctx context.Context, userID, id string) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM api_tokens WHERE id = $1 AND user_id = $2`, id, userID)
+	if err != nil {
+		return mapErr(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *PostgresStore) TouchApiToken(ctx context.Context, id string, lastUsedAt time.Time) error {
+	_, err := s.pool.Exec(ctx, `UPDATE api_tokens SET last_used_at = $2 WHERE id = $1`, id, lastUsedAt)
+	return mapErr(err)
+}
+
 // ---- Billing: subscriptions & usage ----
 
 func (s *PostgresStore) UpsertSubscription(ctx context.Context, sub *domain.Subscription) error {

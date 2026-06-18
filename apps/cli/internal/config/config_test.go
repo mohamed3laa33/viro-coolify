@@ -81,6 +81,34 @@ func TestClearPreservesContext(t *testing.T) {
 	}
 }
 
+func TestSetPATPersistsAndClearsJWT(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	cfg, _ := Load(path)
+	_ = cfg.SetTokens("acc", "ref")
+
+	if err := cfg.SetPAT("vrt_abc123"); err != nil {
+		t.Fatalf("SetPAT: %v", err)
+	}
+	// SetPAT must clear any JWT session so the two never coexist.
+	if cfg.AccessToken != "" || cfg.RefreshToken != "" {
+		t.Fatalf("SetPAT should clear JWT tokens: %+v", cfg)
+	}
+	if !cfg.LoggedIn() {
+		t.Fatal("a stored PAT should count as logged in")
+	}
+	reloaded, _ := Load(path)
+	if reloaded.Token != "vrt_abc123" {
+		t.Fatalf("PAT not persisted: %q", reloaded.Token)
+	}
+	// Clear must remove the PAT too.
+	if err := reloaded.Clear(); err != nil {
+		t.Fatalf("Clear: %v", err)
+	}
+	if reloaded.LoggedIn() || reloaded.Token != "" {
+		t.Fatalf("Clear should remove the PAT: %+v", reloaded)
+	}
+}
+
 func TestDefaultPathRespectsEnv(t *testing.T) {
 	t.Setenv("VORTEX_CONFIG", "/tmp/custom/vortex.yaml")
 	p, err := DefaultPath()

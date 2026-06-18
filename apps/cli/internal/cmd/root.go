@@ -32,6 +32,10 @@ type tokenStore struct{ cfg *config.Config }
 
 func (t tokenStore) Access() string  { return t.cfg.AccessToken }
 func (t tokenStore) Refresh() string { return t.cfg.RefreshToken }
+
+// PAT implements client.PATStore: a stored personal access token authenticates
+// as its owner and is sent verbatim as the bearer (never refreshed).
+func (t tokenStore) PAT() string { return t.cfg.Token }
 func (t tokenStore) Save(access, refresh string) error {
 	return t.cfg.SetTokens(access, refresh)
 }
@@ -81,8 +85,10 @@ func (a *App) newRootCmd() *cobra.Command {
 		a.newProjectsCmd(),
 		a.newAppsCmd(),
 		a.newServicesCmd(),
+		a.newDatabasesCmd(),
 		a.newSecretsCmd(),
 		a.newPlansCmd(),
+		a.newPricingCmd(),
 		a.newConfigCmd(),
 		a.newVersionCmd(),
 	)

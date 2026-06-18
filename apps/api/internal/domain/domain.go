@@ -527,6 +527,32 @@ type RefreshToken struct {
 	ExpiresAt time.Time `json:"expiresAt,omitempty"`
 }
 
+// ApiToken is a personal access token (PAT): a long-lived credential a user
+// issues to authenticate API/CLI requests without a browser session. The
+// plaintext token ("vrt_<random>") is shown to the user EXACTLY ONCE at
+// creation and never stored; only its SHA-256 hash (TokenHash) is persisted, so
+// a database leak yields no usable tokens. A request bearing "Authorization:
+// Bearer vrt_<token>" authenticates as the token's owner (UserID). The token is
+// valid while it exists and is unexpired (ExpiresAt zero => never expires).
+type ApiToken struct {
+	ID        string `json:"id"`
+	UserID    string `json:"userId"`
+	Name      string `json:"name"`
+	TokenHash string `json:"-"` // SHA-256 hex of the full token; NEVER the plaintext
+	// Prefix is the first 8 chars of the plaintext token (e.g. "vrt_ab12"),
+	// stored for display so a user can recognize a token in a listing without
+	// the secret ever being revealed.
+	Prefix string   `json:"prefix"`
+	Scopes []string `json:"scopes"`
+	// ExpiresAt is when the token can no longer authenticate. A zero value means
+	// "never expires".
+	ExpiresAt time.Time `json:"expiresAt,omitempty"`
+	// LastUsedAt is a best-effort record of the last time the token authenticated
+	// a request, updated asynchronously. Zero until first use.
+	LastUsedAt time.Time `json:"lastUsedAt,omitempty"`
+	CreatedAt  time.Time `json:"createdAt"`
+}
+
 // PasswordResetToken is a persisted, single-use, time-limited credential backing
 // the password-reset flow. The plaintext token is emailed to the user and never
 // stored; only its SHA-256 hash (TokenHash) is persisted, so a database leak does

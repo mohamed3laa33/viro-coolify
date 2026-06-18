@@ -38,6 +38,31 @@ func (a *App) newPlansCmd() *cobra.Command {
 	}
 }
 
+func (a *App) newPricingCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "pricing",
+		Short: "List the hourly resource price list",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Public endpoint — no auth required.
+			comps, err := a.client.Pricing(ctx(cmd))
+			if err != nil {
+				return err
+			}
+			return a.emit(cmd.OutOrStdout(), comps, func() {
+				rows := make([][]string, 0, len(comps))
+				for _, p := range comps {
+					rows = append(rows, []string{
+						p.Key, p.Name, dash(p.Unit),
+						fmt.Sprintf("%.4f", p.PricePerHour), strings.ToUpper(p.Currency),
+					})
+				}
+				table(cmd.OutOrStdout(),
+					[]string{"KEY", "NAME", "UNIT", "PRICE/HR", "CURRENCY"}, rows)
+			})
+		},
+	}
+}
+
 // money formats cents in the given currency, e.g. 1500/"usd" -> "$15.00".
 func money(cents int, currency string) string {
 	sym := ""
