@@ -378,12 +378,14 @@ ensure_external_dns_secret() {
 
   ensure_namespace "${EXTERNAL_DNS_NS}"
   if [ "${DRY_RUN}" -eq 1 ]; then
-    info "--dry-run: would create secret 'external-dns-credentials' in ns/${EXTERNAL_DNS_NS}"
+    info "--dry-run: would create secret 'external-dns-do' in ns/${EXTERNAL_DNS_NS}"
     return 0
   fi
+  # Name/key MUST match the helmfile external-dns release env (secretKeyRef
+  # name: external-dns-do, key: token) and deploy/helm-values/external-dns.yaml.
   log "Creating/refreshing external-dns credentials secret in ns/${EXTERNAL_DNS_NS}"
-  kubectl -n "${EXTERNAL_DNS_NS}" create secret generic external-dns-credentials \
-    --from-literal=DO_TOKEN="${token}" \
+  kubectl -n "${EXTERNAL_DNS_NS}" create secret generic external-dns-do \
+    --from-literal=token="${token}" \
     --dry-run=client -o yaml | kubectl apply -f -
 }
 

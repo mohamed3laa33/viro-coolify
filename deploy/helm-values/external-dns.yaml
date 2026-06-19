@@ -1,0 +1,121 @@
+# external-dns release values — automated DNS for platform-owned zones.
+#
+# Maintained community chart (kubernetes-sigs/external-dns):
+#   helm repo add external-dns https://kubernetes-sigs.github.io/external-dns/
+#   chart: external-dns/external-dns
+# Consumed by the `external-dns` release block in deploy/helmfile.yaml, which layers
+# env-driven overrides on top (domainFilters, txtOwnerId, the DO_TOKEN secret env).
+# The release is gated by VORTEX_EXTERNAL_DNS_ENABLED — when false it is NOT
+# installed and DNS stays fully manual (no fake-success path, invariant #6).
+#
+# What this does
+# --------------
+# external-dns WATCHES the Gateway API HTTPRoutes Vortex renders for every tenant
+# app/service and AUTOMATICALLY publishes the matching DNS records — pointing at the
+# shared Gateway's LoadBalancer address (read from the Gateway's status.addresses; no
+# manual target wiring needed). It removes the manual DNS step for every zone the
+# platform controls:
+#
+#   * the wildcard tenant domain  <app>.<project>.<org>.vortex.v60ai.com
+#   * platform-owned VERIFIED custom domains (apex inside `domainFilters`)
+#
+# It NEVER touches a zone the tenant owns: those fall outside `domainFilters`, so the
+# existing TXT-challenge verify flow + the user-published A/CNAME stay authoritative
+# for custom domains in customer zones. The control plane gates this the same way
+# (kube.Config.ExternalDNSZones must mirror `domainFilters`; both are fed from
+# VORTEX_EXTERNAL_DNS_ZONES so they cannot drift).
+
+# Provider: DigitalOcean managed DNS (matches the rest of the deploy — cert-manager
+# already uses a DO DNS-01 token). The API token is read from DO_TOKEN, injected by
+# the helmfile from the `external-dns-do` Secret (key `token`). Swap `provider.name`
+# and the helmfile `env` block for another provider (Route 53, Cloudflare, …).
+provider:
+  name: digitalocean
+
+# Sources: Gateway API HTTPRoutes (primary) + Services. Vortex routes everything
+# through the shared Gateway via per-app HTTPRoutes; the retired ingress-nginx is
+# intentionally unused. The `service` source lets external-dns also publish records
+# for any LoadBalancer/annotated Service (e.g. the shared Gateway's own LB), while
+# `gateway-httproute` derives each tenant record's target from the parent Gateway's
+# status.addresses (the single shared LB).
+sources:
+  - gateway-httproute
+  - service
+
+# Zones the platform controls and external-dns is ALLOWED to write into. This MUST
+# mirror kube.Config.ExternalDNSZones (the API always includes BaseDomain). The
+# helmfile overrides this from VORTEX_EXTERNAL_DNS_ZONES (default: the base platform
+# domain) so the two stay in lock-step. Anything NOT listed here is a tenant-owned
+# zone and is left to the manual flow.
+domainFilters:
+  - vortex.v60ai.com
+
+# Reconciliation policy. `sync` lets external-dns create, update AND delete records
+# it owns, so a deleted app / removed custom domain has its record cleaned up.
+# (Use `upsert-only` if you prefer external-dns to never delete records.)
+policy: sync
+
+# Registry: TXT ownership records keyed by this owner id prevent external-dns from
+# fighting another controller (or another cluster) over the same zone. The prefix
+# keeps the bookkeeping TXT records out of the way of real names. The helmfile sets
+# `txtOwnerId` to the platform base domain so it is UNIQUE per deployment; override
+# if multiple clusters share a single managed zone.
+registry: txt
+txtOwnerId: vortex
+txtPrefix: _vortex-edns.
+
+# How often to reconcile against the provider.
+interval: 1m
+
+# DigitalOcean API token. The chart injects DO_TOKEN from an existing Secret so the
+# token is NEVER committed. The helmfile supplies the `env` block referencing the
+# `external-dns-do` Secret (key `token`) in this namespace; create it out-of-band —
+# the installer (deploy/install.sh) does this from VORTEX_DO_TOKEN, e.g.:
+#   kubectl -n external-dns create secret generic external-dns-do \
+#     --from-literal=token="$VORTEX_DO_TOKEN"
+# A separate, read/write DNS-scoped token is recommended over reusing the
+# cert-manager DNS-01 token (least privilege).
+env:
+  - name: DO_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: external-dns-do
+        key: token
+
+# RBAC: the chart's ClusterRole must additionally allow watching Gateway API objects
+# for the gateway-httproute source (gateways + httproutes, plus namespaces).
+rbac:
+  create: true
+  additionalPermissions:
+    - apiGroups: ["gateway.networking.k8s.io"]
+      resources: ["gateways", "httproutes"]
+      verbs: ["get", "watch", "list"]
+
+serviceAccount:
+  create: true
+  name: external-dns
+
+# Modest footprint — external-dns is a single low-traffic controller.
+resources:
+  requests:
+    cpu: 25m
+    memory: 64Mi
+  limits:
+    cpu: 100m
+    memory: 128Mi
+
+# Run as a hardened, non-root, read-only container (matches the platform's posture).
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+  seccompProfile:
+    type: RuntimeDefault
+
+# Optional: surface its own metrics for the platform metrics pipeline (Prometheus).
+# Disabled by default to avoid assuming a ServiceMonitor CRD is present.
+serviceMonitor:
+  enabled: false
