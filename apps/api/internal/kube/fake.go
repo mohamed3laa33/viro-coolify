@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"time"
 )
 
 // FakeBackend is an in-memory Backend test double for unit tests in OTHER
@@ -58,6 +59,24 @@ type FakeBackend struct {
 	// paths the replica-count derivation can't otherwise produce.
 	PhaseOverride map[string]string
 
+	// RolloutOverride, when set for a "<namespace>/<release>" key, forces
+	// AppRolloutStatus to return that RolloutStatus verbatim, letting tests drive
+	// the UI/handler down the progressing/degraded paths the replica-count
+	// derivation can't otherwise produce.
+	RolloutOverride map[string]RolloutStatus
+
+	// Backups records every database backup created via BackupDatabase, keyed by
+	// "<namespace>/<release>" (newest appended last). ListDatabaseBackups returns
+	// them newest first. It is an HONEST in-memory record, not a fake-success
+	// path: a backup only appears here because BackupDatabase was actually called.
+	Backups map[string][]DatabaseBackup
+	// BackupSchedules records the latest EnsureBackupSchedule schedule per
+	// "<namespace>/<release>" (empty schedule removes the entry).
+	BackupSchedules map[string]string
+	// Restores records every RestoreDatabase call as a "<namespace>/<release>" ->
+	// list of restored backup names, so tests can assert a restore was requested.
+	Restores map[string][]string
+
 	// MetricsAvailable controls whether Metrics reports live data. When false the
 	// fake mimics a cluster without a metrics-server (honest "unavailable").
 	MetricsAvailable bool
@@ -83,6 +102,10 @@ func NewFakeBackend() *FakeBackend {
 		GatewayListeners: map[string]string{},
 		OrgWildcards:     map[string][]string{},
 		PhaseOverride:    map[string]string{},
+		RolloutOverride:  map[string]RolloutStatus{},
+		Backups:          map[string][]DatabaseBackup{},
+		BackupSchedules:  map[string]string{},
+		Restores:         map[string][]string{},
 		LogLines:         "fake log line\n",
 		// Deterministic test values: a deployed workload reports a fixed live usage
 		// so platform/handler tests can assert REAL (non-synthetic) numbers.
@@ -316,4 +339,117 @@ func (f *FakeBackend) Status(_ context.Context, namespace, release string) (Stat
 		phase = "Scaled to zero"
 	}
 	return Status{Phase: phase, Replicas: n, ReadyReplicas: n}, nil
+}
+
+// AppRolloutStatus returns a deterministic rollout view for a deployed release
+// derived from its recorded replica count (every desired replica is ready/updated
+// — the fake double has no real rollout in flight), or a test-supplied override.
+func (f *FakeBackend) AppRolloutStatus(_ context.Context, namespace, release string) (RolloutStatus, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k := key(namespace, release)
+	if _, ok := f.Applied[k]; !ok {
+		return RolloutStatus{Health: healthUnknown, Phase: "Unknown"},
+			fmt.Errorf("kube(fake): no release %q in %q", release, namespace)
+	}
+	if rs, ok := f.RolloutOverride[k]; ok {
+		return rs, nil
+	}
+	n := f.Replicas[k]
+	rs := RolloutStatus{
+		Desired:            n,
+		Ready:              n,
+		Updated:            n,
+		Available:          n,
+		ObservedGeneration: 1,
+		Generation:         1,
+	}
+	rs.Phase = rolloutPhase(rs)
+	rs.Health = deriveHealth(rs)
+	return rs, nil
+}
+
+// BackupDatabase records an honest in-memory backup for the database and returns
+// its descriptor. It does not run a dump (no cluster) — it records that a backup
+// was requested, with phase "Succeeded" so platform/handler tests can assert the
+// backup history surface. A release that was never applied errors (no fake
+// success for a non-existent database).
+func (f *FakeBackend) BackupDatabase(_ context.Context, spec BackupSpec) (DatabaseBackup, error) {
+	if dbEngine(spec.Engine) == "" {
+		return DatabaseBackup{}, fmt.Errorf("kube(fake): unsupported backup engine %q", spec.Engine)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k := key(spec.Namespace, spec.Release)
+	if _, ok := f.Applied[k]; !ok {
+		return DatabaseBackup{}, fmt.Errorf("kube(fake): no release %q in %q", spec.Release, spec.Namespace)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	b := DatabaseBackup{
+		Name:        fmt.Sprintf("bkp-%s-%d", sanitize(spec.Release), len(f.Backups[k])+1),
+		Phase:       "Succeeded",
+		CreatedAt:   now,
+		CompletedAt: now,
+		Engine:      dbEngine(spec.Engine),
+	}
+	f.Backups[k] = append(f.Backups[k], b)
+	return b, nil
+}
+
+// EnsureBackupSchedule records (or, for an empty schedule, clears) the backup
+// schedule for the database.
+func (f *FakeBackend) EnsureBackupSchedule(_ context.Context, spec BackupSpec) error {
+	if dbEngine(spec.Engine) == "" {
+		return fmt.Errorf("kube(fake): unsupported backup engine %q", spec.Engine)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k := key(spec.Namespace, spec.Release)
+	if strings.TrimSpace(spec.Schedule) == "" {
+		delete(f.BackupSchedules, k)
+		return nil
+	}
+	f.BackupSchedules[k] = spec.Schedule
+	return nil
+}
+
+// ListDatabaseBackups returns the recorded backups for the database, newest
+// first. An unknown release returns an empty slice (no error) — the same
+// "no backups yet" shape the real backend returns.
+func (f *FakeBackend) ListDatabaseBackups(_ context.Context, namespace, release string) ([]DatabaseBackup, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	recorded := f.Backups[key(namespace, release)]
+	out := make([]DatabaseBackup, 0, len(recorded))
+	for i := len(recorded) - 1; i >= 0; i-- {
+		out = append(out, recorded[i])
+	}
+	return out, nil
+}
+
+// RestoreDatabase records a restore request for the named backup. It errors when
+// the backup name is unknown for the release (no fake-success restore of a
+// non-existent backup).
+func (f *FakeBackend) RestoreDatabase(_ context.Context, spec RestoreSpec) error {
+	if dbEngine(spec.Engine) == "" {
+		return fmt.Errorf("kube(fake): unsupported restore engine %q", spec.Engine)
+	}
+	if strings.TrimSpace(spec.BackupName) == "" {
+		return fmt.Errorf("kube(fake): restore requires a backup name")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k := key(spec.Namespace, spec.Release)
+	found := false
+	for _, b := range f.Backups[k] {
+		if b.Name == spec.BackupName {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("kube(fake): no backup %q for release %q in %q", spec.BackupName, spec.Release, spec.Namespace)
+	}
+	f.Restores[k] = append(f.Restores[k], spec.BackupName)
+	return nil
 }

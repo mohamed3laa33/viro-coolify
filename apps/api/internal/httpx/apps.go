@@ -293,6 +293,47 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, app)
 }
 
+// handleAppStatus returns the live deploy/rollout status for an app so the UI can
+// render deploy progress (rollout phase, desired/updated/ready/available replica
+// counts, health). It resolves the app org-scoped (cross-tenant access is hidden
+// as 404 by GetApp) and then reads the live status from the kube backend.
+//
+// HONESTY (invariant #6): an app that has never been deployed has no Helm release,
+// so there is nothing to observe — we return an explicit not-deployed status
+// rather than calling the backend (which would fabricate an empty "rollout"). The
+// stored app status (e.g. "deploying", "build_failed") is surfaced alongside so a
+// client can distinguish a never-deployed app from a failed/in-flight one.
+func (s *Server) handleAppStatus(w http.ResponseWriter, r *http.Request) {
+	orgID, appID := chi.URLParam(r, "orgID"), chi.URLParam(r, "appID")
+	app, err := s.platform.GetApp(r.Context(), orgID, appID)
+	if err != nil {
+		s.writePlatformError(w, "app status", err)
+		return
+	}
+	if app.Release == "" {
+		// No release yet: report the stored intent honestly, with empty replica
+		// counts, instead of asking the backend about a release that doesn't exist.
+		writeJSON(w, http.StatusOK, map[string]any{
+			"deployed": false,
+			"status":   app.Status,
+		})
+		return
+	}
+	st, err := s.backend.AppRolloutStatus(r.Context(), app.Namespace, app.Release)
+	if err != nil {
+		// A backend read failure is an upstream/dependency fault, not a 404 — surface
+		// it as a bad-gateway so the client knows the status is unknown (never faked).
+		s.logger.Error("app status", "org", orgID, "app", appID, "err", err)
+		writeError(w, http.StatusBadGateway, "could not read rollout status from deploy backend")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"deployed": true,
+		"status":   app.Status,
+		"rollout":  st,
+	})
+}
+
 func (s *Server) handleAppLogs(w http.ResponseWriter, r *http.Request) {
 	orgID, appID := chi.URLParam(r, "orgID"), chi.URLParam(r, "appID")
 	// ?follow=true upgrades to a live Server-Sent Events stream; otherwise the
