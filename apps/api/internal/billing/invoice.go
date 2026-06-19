@@ -37,17 +37,39 @@ type Invoice struct {
 	ChargeCents     int64
 }
 
-// usageSoFarCents sums the period's metered compute cost (in micro-cents) and
-// converts to whole cents. This is the single, size-aware source of truth for
-// usage: each record already reflects a workload's resource size at the live rate.
+// usageSoFarCents sums the period's metered cost across EVERY priced dimension
+// (compute + storage + egress, all in micro-cents) and converts to whole cents.
+// This is the single, size-aware source of truth for usage: each record already
+// reflects a workload's resource size (or measured egress) at the live rate, so the
+// total is the real cost-to-serve for the period.
 func usageSoFarCents(records []domain.UsageRecord) int64 {
 	var microCents int64
 	for _, r := range records {
-		if r.Metric == MeterMetric {
+		if isCostMetric(r.Metric) {
 			microCents += r.Quantity
 		}
 	}
 	return microCents / 1000
+}
+
+// usageByDimensionCents returns the period cost (whole cents) of each priced
+// dimension keyed by metric, so an invoice can present per-line-item amounts. Only
+// dimensions with non-zero cost are included. The summed values equal
+// usageSoFarCents for the same records.
+func usageByDimensionCents(records []domain.UsageRecord) map[string]int64 {
+	micro := map[string]int64{}
+	for _, r := range records {
+		if isCostMetric(r.Metric) {
+			micro[r.Metric] += r.Quantity
+		}
+	}
+	out := map[string]int64{}
+	for metric, mc := range micro {
+		if cents := mc / 1000; cents > 0 {
+			out[metric] = cents
+		}
+	}
+	return out
 }
 
 // invoiceFromRecords computes the current-period invoice from the plan and the

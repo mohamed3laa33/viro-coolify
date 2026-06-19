@@ -51,6 +51,27 @@ func (s *Server) handleGetBilling(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, sum)
 }
 
+// handleListInvoices returns an org's invoice history (newest period first) with
+// per-line-item breakdowns. The ?limit= query bounds how many periods are returned
+// (clamped by the service). Members may read it (same authz as the billing summary).
+func (s *Server) handleListInvoices(w http.ResponseWriter, r *http.Request) {
+	limit := 0
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			limit = n
+		}
+	}
+	invoices, err := s.billing.InvoiceHistory(r.Context(), chi.URLParam(r, "orgID"), limit)
+	if err != nil {
+		s.logger.Error("list invoices", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to load invoices")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"data": invoices,
+	})
+}
+
 type subscribeRequest struct {
 	PlanID string `json:"planId"`
 }
@@ -218,13 +239,16 @@ func (s *Server) handleStripeWebhook(w http.ResponseWriter, r *http.Request) {
 }
 
 // isSubscriptionEvent reports whether a Stripe event type changes an org's
-// subscription state (and so should be recorded in the audit trail).
+// subscription state (and so should be recorded in the audit trail). It includes
+// the invoice payment events because they drive the dunning (past_due) state.
 func isSubscriptionEvent(t string) bool {
 	switch t {
 	case "checkout.session.completed",
 		"customer.subscription.created",
 		"customer.subscription.updated",
-		"customer.subscription.deleted":
+		"customer.subscription.deleted",
+		"invoice.payment_failed",
+		"invoice.payment_succeeded":
 		return true
 	default:
 		return false

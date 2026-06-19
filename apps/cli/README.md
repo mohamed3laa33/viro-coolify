@@ -83,9 +83,57 @@ vortex auth login --token vrt_xxxxxxxxxxxxxxxx
 `POST /v1/tokens` returns the plaintext token only on create; `GET /v1/tokens`
 and the listing command never reveal it.
 
+## Names, not UUIDs
+
+Every command that targets an org, project or app accepts a **name, slug, or
+id** and resolves it to the canonical id via the API — you never have to copy a
+UUID. Resolution prefers an exact id match (so existing id-based scripts keep
+working), then a slug, then a case-insensitive name; an unknown or ambiguous
+name is a clear error rather than a silent guess. `--json` output is unaffected.
+
+```bash
+vortex config set-context --org acme --project staging   # by name
+vortex apps deploy web                                    # app by name
+vortex --org acme apps status api                         # one-off override by name
+```
+
+## One-command launch
+
+`vortex launch` is the flyctl-style on-ramp. From a directory it:
+
+1. **detects** the app — a `Dockerfile` selects the image/build path; a git
+   remote (`.git`) is offered as the build source; otherwise it prompts for a
+   container image or git repo;
+2. **scaffolds** a minimal `vortex.yaml` manifest capturing your choices;
+3. **creates** the app in your current org/project via the API (re-running is
+   idempotent — it reuses an existing app + manifest instead of recreating); and
+4. **deploys** it with a real API deploy (pass `--no-deploy` to skip).
+
+It never bakes in business values: `cpu`/`memoryMb` are left unset so the
+control plane applies your plan's admin-configured defaults.
+
+```bash
+cd ./my-service
+vortex launch                        # interactive: detect, confirm, deploy
+vortex launch --image nginx:1.27 -y  # non-interactive (CI): explicit image, no prompts
+vortex launch --git-repo https://github.com/me/api --git-branch main -y
+vortex launch --no-deploy            # scaffold + create only
+```
+
+The generated `vortex.yaml`:
+
+```yaml
+app: my-service
+build:
+  image: nginx:1.27        # or gitRepository/gitBranch for source builds
+# cpu / memoryMb omitted on purpose — defaults come from your plan via the API
+```
+
 ## Commands
 
 ```
+vortex launch [path] [--name --image | --git-repo --git-branch] [--no-deploy] [-y]
+
 vortex auth signup|login|logout|whoami
 vortex auth login --token vrt_...             # store a PAT for CI / non-interactive use
 vortex auth token create <name> [--scope ... --expires-in-days N]
@@ -94,21 +142,21 @@ vortex auth token list|revoke <token-id>
 vortex orgs list|create <name>
 vortex projects list|create <name>            # within the current org
 
-vortex apps list
+vortex apps list                              # <app> below = app name or id
 vortex apps create <name> [--image IMG | --git-repo URL --git-branch B] [--cpu --memory]
-vortex apps status <id>
-vortex apps update <id> [--image --cpu --memory --git-repo --git-branch]
-vortex apps scale <id> --min N --max N
-vortex apps deploy|restart|stop|destroy <id>
-vortex apps rollback <id> [--revision N]
-vortex apps releases <id>
-vortex apps builds <id> [--logs <build-id>]
-vortex apps metrics <id>
-vortex apps logs <id> [--follow [--all] | --since SUBSTR --tail N]
-vortex apps domains add <id> <domain>
-vortex apps domains verify <id> <domain-id>
-vortex apps domains list <id>
-vortex apps domains remove <id> <domain-id>
+vortex apps status <app>
+vortex apps update <app> [--image --cpu --memory --git-repo --git-branch]
+vortex apps scale <app> --min N --max N
+vortex apps deploy|restart|stop|destroy <app>
+vortex apps rollback <app> [--revision N]
+vortex apps releases <app>
+vortex apps builds <app> [--logs <build-id>]
+vortex apps metrics <app>
+vortex apps logs <app> [--follow [--all] | --since SUBSTR --tail N]
+vortex apps domains add <app> <domain>
+vortex apps domains verify <app> <domain-id>
+vortex apps domains list <app>
+vortex apps domains remove <app> <domain-id>
 
 vortex services catalog|list
 vortex services create <template-key> [--name --cpu --memory]
@@ -120,7 +168,7 @@ vortex databases get <id>                     # shows host/port/db/user/password
 vortex databases deploy|start|stop|restart <id>
 vortex databases delete <id>
 
-vortex secrets list|set KEY=VALUE...[--secret]|unset KEY...   (--app <id>)
+vortex secrets list|set KEY=VALUE...[--secret]|unset KEY...   (--app <app>)
 vortex plans                                  # billing plan catalog
 vortex pricing                                # hourly resource price list
 vortex config set-context|show
@@ -130,26 +178,29 @@ vortex version [--server]
 ### Examples
 
 ```bash
-# Pick a working context
+# Zero-to-deployed in one command
+vortex launch                          # from the current directory
+
+# Pick a working context (by name or id)
 vortex orgs list
-vortex config set-context --org org_123
+vortex config set-context --org acme
 vortex projects list
 
 # Deploy an app — directly from a container image, or build from git
 vortex apps create web --image nginx:1.27 --cpu 0.5 --memory 512
 vortex apps create api --git-repo https://github.com/me/api --git-branch main
 vortex apps list
-vortex apps deploy <app-id>
-vortex apps status <app-id>            # includes the current release
-vortex apps logs <app-id> --follow    # live SSE stream
-vortex apps logs <app-id> --tail 100 --since ERROR
+vortex apps deploy web                 # by name (or id)
+vortex apps status web                 # includes the current release
+vortex apps logs web --follow          # live SSE stream
+vortex apps logs web --tail 100 --since ERROR
 
 # Update, scale, roll back
-vortex apps update <app-id> --image nginx:1.28 --memory 1024
-vortex apps scale <app-id> --min 1 --max 5
-vortex apps releases <app-id>
-vortex apps rollback <app-id> --revision 3
-vortex apps metrics <app-id>
+vortex apps update web --image nginx:1.28 --memory 1024
+vortex apps scale web --min 1 --max 5
+vortex apps releases web
+vortex apps rollback web --revision 3
+vortex apps metrics web
 
 # Builds (git-source)
 vortex apps builds <app-id>
@@ -196,8 +247,14 @@ apps/cli/
 │   ├── config/                 # ~/.vortex/config.yaml load/save
 │   │   ├── config.go
 │   │   └── config_test.go
+│   ├── manifest/               # per-directory vortex.yaml (launch)
+│   │   ├── manifest.go         # read/write the manifest (no business values)
+│   │   ├── detect.go           # Dockerfile / git / language detection
+│   │   └── manifest_test.go
 │   ├── cmd/                    # cobra command groups (one file per group)
 │   │   ├── root.go output.go auth.go orgs.go projects.go
+│   │   ├── launch.go           # `vortex launch` one-command on-ramp
+│   │   ├── resolve.go          # name/slug/id → id resolution (+resolve_test.go)
 │   │   ├── apps.go domains.go databases.go services.go
 │   │   ├── secrets.go plans.go config.go version.go
 │   └── version/version.go      # build-stamped version

@@ -872,6 +872,7 @@ func (s *Server) routes() chi.Router {
 					})
 
 					r.With(s.orgAuthz(domain.RoleMember)).Get("/billing", s.handleGetBilling)
+					r.With(s.orgAuthz(domain.RoleMember)).Get("/billing/invoices", s.handleListInvoices)
 					r.With(s.orgAuthz(domain.RoleAdmin)).Post("/billing/subscribe", s.handleSubscribe)
 					// Per-org spend cap (the org's own budget; admin+). The cap exists on
 					// the org model + store but had no write route until now.
