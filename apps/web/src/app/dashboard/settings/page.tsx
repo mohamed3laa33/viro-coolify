@@ -911,10 +911,10 @@ function SpendCapCard({ billing }: { billing: BillingResponse }) {
       <CardHeader>
         <CardTitle>Spend cap</CardTitle>
         <CardDescription>
-          A hard ceiling on this period&apos;s charges. When the projected charge
-          reaches the cap, new and oversized workloads are blocked — no surprise
-          bills. Set it to $0 to remove the per-org cap and fall back to the
-          platform default.
+          A hard ceiling on this period&apos;s charges. When the projected
+          charge reaches the cap, new and oversized workloads are blocked — no
+          surprise bills. Set it to $0 to remove the per-org cap and fall back
+          to the platform default.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -1013,8 +1013,8 @@ function SpendCapCard({ billing }: { billing: BillingResponse }) {
             </p>
           ) : (
             <p id="spend-cap-hint" className="text-xs text-muted-foreground">
-              Enter $0 to remove the per-org cap. The cap is enforced against the
-              projected charge above.
+              Enter $0 to remove the per-org cap. The cap is enforced against
+              the projected charge above.
             </p>
           )}
         </form>
@@ -1022,7 +1022,9 @@ function SpendCapCard({ billing }: { billing: BillingResponse }) {
 
       <ConfirmDialog
         open={pendingCapCents !== null}
-        title={pendingCapCents === 0 ? "Remove spend cap?" : "Update spend cap?"}
+        title={
+          pendingCapCents === 0 ? "Remove spend cap?" : "Update spend cap?"
+        }
         description={
           pendingCapCents === null
             ? undefined
