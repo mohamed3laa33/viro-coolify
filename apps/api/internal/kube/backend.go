@@ -55,9 +55,15 @@ type Workload struct {
 
 	// Region is the (already-validated) placement region for this workload. It is
 	// plumbed onto the rendered objects as a label (vortex.v60ai.com/region) and a
-	// pod annotation so a FUTURE multi-cluster router can place/route by region. A
-	// single cluster IGNORES it (no scheduling effect today). Empty leaves the
-	// region label/annotation off entirely.
+	// pod annotation, AND translated into real in-cluster scheduling
+	// (nodeSelector/affinity + an optional regional-pool toleration; see
+	// regionScheduling in values.go) so the pod lands on the node pool matching the
+	// region within THIS cluster. Empty leaves the region label/annotation and all
+	// scheduling constraints off entirely.
+	//
+	// Cross-CLUSTER multi-region (a separate cluster per physical region with
+	// region-aware routing) is a documented from-scratch follow-up and is NOT done
+	// here — this only steers placement within the single cluster.
 	Region string
 
 	// StorageGB is the persistent volume size (GiB) for a stateful (database)
@@ -360,12 +366,15 @@ type Backend interface {
 	// by cert-manager). Idempotent; called on domain delete.
 	RemoveDomainCertificate(ctx context.Context, host string) error
 	// EnsureGatewayListener adds (idempotently) a dedicated HTTPS listener for the
-	// custom host to the SHARED Gateway, terminating TLS with certSecret. It merges
-	// into spec.listeners without clobbering other tenants' listeners. Called when a
-	// domain becomes verified.
+	// custom host to a Gateway in the SHARD POOL, terminating TLS with certSecret.
+	// It merges into spec.listeners without clobbering other tenants' listeners and
+	// AUTO-SHARDS across additional Gateways once the primary fills up (so the
+	// platform scales past one Gateway's 64-listener ceiling without manual
+	// intervention). Called when a domain becomes verified.
 	EnsureGatewayListener(ctx context.Context, host, certSecret string) error
-	// RemoveGatewayListener removes the per-domain listener from the shared Gateway,
-	// preserving all others. Idempotent; called on domain delete.
+	// RemoveGatewayListener removes the per-domain listener from whichever shard in
+	// the pool holds it, preserving all others (and GC'ing an emptied overflow
+	// shard). Idempotent; called on domain delete.
 	RemoveGatewayListener(ctx context.Context, host string) error
 
 	// EnsureOrgWildcard provisions (idempotently) a per-org wildcard so the

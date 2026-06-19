@@ -18,6 +18,26 @@ gateway:
   # operator pre-seed known orgs. Each entry: { name, hostname, certSecret }.
   # hostname is "*.<org>.<baseDomain>" or "*.<project>.<org>.<baseDomain>".
   extraOrgWildcards: []
+  # Custom-domain listener SHARDING (scale past one Gateway's 64-listener ceiling).
+  # The control plane auto-creates "<name>-shard-<n>" Gateways as the primary fills
+  # up; these knobs tune how the shard pool is provisioned and whether shards share
+  # the primary LoadBalancer. See templates/gateway.yaml and deploy/KUBERNETES.md.
+  shards:
+    # count pre-provisions a STATIC pool of this many empty shard Gateways at
+    # bootstrap. 0 (default) means the backend creates shards dynamically, only
+    # when the primary fills up — the cheapest default. Set >0 only if you want
+    # shards declared up front.
+    count: 0
+  # merge enables Envoy-Gateway "mergeGateways" so the primary + every shard share
+  # ONE Envoy fleet / ONE LoadBalancer (preserves the single-LB cost model past 64
+  # listeners). Requires envoyProxy: true and the Envoy Gateway controller. When
+  # false, each shard provisions its own LoadBalancer (honest extra cost only at
+  # very large custom-domain counts).
+  merge: true
+  # envoyProxy renders the EnvoyProxy CR that mergeGateways needs. Set false if your
+  # Gateway controller is NOT Envoy Gateway (then leave merge handling to that
+  # controller's own mechanism, or accept per-shard LoadBalancers).
+  envoyProxy: true
 
 tls:
   enabled: true

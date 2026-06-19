@@ -2,7 +2,6 @@ package kube
 
 import (
 	"context"
-	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -259,23 +258,68 @@ func TestRemoveGatewayListenerKeepsOthers(t *testing.T) {
 	}
 }
 
-func TestEnsureGatewayListenerRefusesAtLimit(t *testing.T) {
+// TestEnsureGatewayListenerShardsPastLimit replaces the old "refuses at the
+// 64-listener limit" behavior: instead of erroring and asking the operator to move
+// a tenant by hand, a full primary Gateway now OVERFLOWS to an auto-created shard
+// Gateway (gateway_shard.go). This asserts the host lands on "vortex-shard-1" and
+// that the primary is left untouched.
+func TestEnsureGatewayListenerShardsPastLimit(t *testing.T) {
 	cs := k8sfake.NewSimpleClientset()
 	gw := sharedGateway("vortex-system", "vortex")
-	// Fill the Gateway to the 64-listener limit.
-	listeners := make([]any, 0, maxGatewayListeners)
-	for i := 0; i < maxGatewayListeners; i++ {
+	// Fill the primary Gateway to its custom-domain capacity (the 64-listener hard
+	// ceiling; the wildcard listener already present counts toward it).
+	listeners, _, _ := unstructured.NestedSlice(gw.Object, "spec", "listeners")
+	for len(listeners) < maxGatewayListeners {
 		listeners = append(listeners, map[string]any{
-			"name": "filler-" + string(rune('a'+i%26)) + string(rune('a'+i/26)), "protocol": "HTTP", "port": int64(80),
+			"name":     "filler-" + string(rune('a'+len(listeners)%26)) + string(rune('a'+len(listeners)/26)),
+			"protocol": "HTTP", "port": int64(80),
 		})
 	}
 	_ = unstructured.SetNestedSlice(gw.Object, listeners, "spec", "listeners")
 	dc := newDomainDyn(t, gw)
 	b := NewWithClients(domainTestConfig(), cs, dc, &mockHelm{})
 
-	err := b.EnsureGatewayListener(context.Background(), "over.acme.io", "")
-	if err == nil || !strings.Contains(err.Error(), "limit") {
-		t.Fatalf("expected a 64-listener-limit error, got %v", err)
+	host := "over.acme.io"
+	if err := b.EnsureGatewayListener(context.Background(), host, ""); err != nil {
+		t.Fatalf("EnsureGatewayListener should auto-shard past the limit, got error: %v", err)
+	}
+
+	// The primary Gateway must be UNCHANGED (still at the ceiling, no new listener).
+	primary, _ := dc.Resource(gatewayGVR).Namespace("vortex-system").Get(context.Background(), "vortex", metav1.GetOptions{})
+	pl, _, _ := unstructured.NestedSlice(primary.Object, "spec", "listeners")
+	if len(pl) != maxGatewayListeners {
+		t.Fatalf("primary gateway listener count changed: got %d, want %d", len(pl), maxGatewayListeners)
+	}
+
+	// A shard Gateway "vortex-shard-1" must now exist holding the new listener.
+	shard, err := dc.Resource(gatewayGVR).Namespace("vortex-system").Get(context.Background(), "vortex-shard-1", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("expected shard gateway vortex-shard-1 to be created: %v", err)
+	}
+	sl, _, _ := unstructured.NestedSlice(shard.Object, "spec", "listeners")
+	if len(sl) != 1 {
+		t.Fatalf("shard gateway should hold exactly the overflow listener, got %d", len(sl))
+	}
+	if n, _ := sl[0].(map[string]any)["name"].(string); n != DomainListenerName(host) {
+		t.Errorf("shard listener name = %q, want %q", n, DomainListenerName(host))
+	}
+
+	// shardForHost must resolve the host to the shard so the HTTPRoute parentRef can
+	// be pointed at it.
+	gwName, found, err := b.shardForHost(context.Background(), host)
+	if err != nil || !found {
+		t.Fatalf("shardForHost(%q) = (%q, %v, %v), want it found on a shard", host, gwName, found, err)
+	}
+	if gwName != "vortex-shard-1" {
+		t.Errorf("shardForHost = %q, want vortex-shard-1", gwName)
+	}
+
+	// Removing the listener empties the overflow shard, which is then GC'd.
+	if err := b.RemoveGatewayListener(context.Background(), host); err != nil {
+		t.Fatalf("RemoveGatewayListener: %v", err)
+	}
+	if _, err := dc.Resource(gatewayGVR).Namespace("vortex-system").Get(context.Background(), "vortex-shard-1", metav1.GetOptions{}); err == nil {
+		t.Error("expected emptied overflow shard vortex-shard-1 to be garbage-collected")
 	}
 }
 

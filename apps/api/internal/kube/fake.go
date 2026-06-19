@@ -53,6 +53,21 @@ type FakeBackend struct {
 	// covered).
 	OrgWildcards map[string][]string
 
+	// GatewayShardOf records which Gateway SHARD each attached custom-domain host
+	// landed on (host -> Gateway name), mirroring the real backend's auto-sharding
+	// (gateway_shard.go). Shard 0 is the primary Gateway (FakeGatewayName); once a
+	// shard reaches FakeShardBudget custom-domain listeners, the next host overflows
+	// to a freshly-named "<primary>-shard-<n>" Gateway. Tests assert that the pool
+	// scales past one Gateway's listener ceiling without error.
+	GatewayShardOf map[string]string
+	// FakeGatewayName is the primary (shard 0) Gateway name used when simulating
+	// sharding. Defaults to "vortex" when empty.
+	FakeGatewayName string
+	// FakeShardBudget is the per-shard custom-domain listener capacity the fake
+	// simulates before overflowing to a new shard. Defaults to maxGatewayListeners
+	// (minus the primary's reserved base listeners on shard 0) when <= 0.
+	FakeShardBudget int
+
 	// PhaseOverride, when set for a "<namespace>/<release>" key, forces Status to
 	// report that Phase verbatim (e.g. "Failed") instead of deriving it from the
 	// replica count. It lets tests drive the reconciler down the failed/pending
@@ -101,6 +116,8 @@ func NewFakeBackend() *FakeBackend {
 		DomainCerts:      map[string]bool{},
 		GatewayListeners: map[string]string{},
 		OrgWildcards:     map[string][]string{},
+		GatewayShardOf:   map[string]string{},
+		FakeGatewayName:  "vortex",
 		PhaseOverride:    map[string]string{},
 		RolloutOverride:  map[string]RolloutStatus{},
 		Backups:          map[string][]DatabaseBackup{},
@@ -277,8 +294,12 @@ func (f *FakeBackend) RemoveDomainCertificate(_ context.Context, host string) er
 	return nil
 }
 
-// EnsureGatewayListener records that host was attached to the shared Gateway with
-// the given cert Secret (defaulting to the derived per-domain Secret name).
+// EnsureGatewayListener records that host was attached to a Gateway in the shard
+// pool with the given cert Secret (defaulting to the derived per-domain Secret
+// name), simulating the real backend's auto-sharding: it places the host on the
+// first shard with capacity, overflowing to a new "<primary>-shard-<n>" Gateway
+// once each is full, so the fake NEVER errors at a 64-listener ceiling. Idempotent
+// per host (re-attaching keeps the existing placement).
 func (f *FakeBackend) EnsureGatewayListener(_ context.Context, host, certSecret string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -286,15 +307,81 @@ func (f *FakeBackend) EnsureGatewayListener(_ context.Context, host, certSecret 
 	if certSecret == "" {
 		certSecret = DomainCertSecret(host)
 	}
+	if _, ok := f.GatewayListeners[host]; !ok {
+		// New host: allocate it to a shard.
+		f.GatewayShardOf[host] = f.allocateFakeShard()
+	}
 	f.GatewayListeners[host] = certSecret
 	return nil
 }
 
-// RemoveGatewayListener clears the recorded shared-Gateway listener for host.
+// fakePrimaryGateway returns the configured primary (shard 0) Gateway name.
+func (f *FakeBackend) fakePrimaryGateway() string {
+	if f.FakeGatewayName == "" {
+		return "vortex"
+	}
+	return f.FakeGatewayName
+}
+
+// fakeShardBudget is the simulated per-shard custom-domain listener capacity.
+func (f *FakeBackend) fakeShardBudget() int {
+	if f.FakeShardBudget > 0 {
+		return f.FakeShardBudget
+	}
+	return maxGatewayListeners
+}
+
+// allocateFakeShard returns the Gateway name the next NEW custom-domain host
+// should land on, mirroring allocateListenerShard: the lowest-index shard with
+// remaining capacity, else a brand-new shard. The primary (shard 0) reserves
+// baseListenerReserve slots for its wildcard/http listeners. The fake counts only
+// custom-domain placements (it does not model the primary's wildcard listener
+// object), so its budget is approximate vs the real backend — it models the
+// BEHAVIOR (overflow without error, monotonic shard growth), not byte-exact
+// counts. Caller holds f.mu.
+func (f *FakeBackend) allocateFakeShard() string {
+	primary := f.fakePrimaryGateway()
+	budget := f.fakeShardBudget()
+
+	// Count current custom-domain listeners per shard.
+	counts := map[string]int{}
+	for _, gw := range f.GatewayShardOf {
+		counts[gw]++
+	}
+	// Highest existing shard index (to know where the next new shard goes).
+	maxIdx := 0
+	for gw := range counts {
+		if idx, ok := gatewayShardIndex(primary, gw); ok && idx > maxIdx {
+			maxIdx = idx
+		}
+	}
+	// Walk shards 0..maxIdx looking for free capacity.
+	for idx := 0; idx <= maxIdx; idx++ {
+		name := gatewayShardName(primary, idx)
+		shardCap := budget
+		if idx == 0 {
+			shardCap -= baseListenerReserve
+		}
+		if counts[name] < shardCap {
+			return name
+		}
+	}
+	// All full (or pool empty): the next shard. When the pool is empty this is the
+	// primary (idx 0); otherwise it is maxIdx+1.
+	if len(counts) == 0 {
+		return primary
+	}
+	return gatewayShardName(primary, maxIdx+1)
+}
+
+// RemoveGatewayListener clears the recorded shard-pool listener for host (and its
+// shard placement). Idempotent.
 func (f *FakeBackend) RemoveGatewayListener(_ context.Context, host string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	delete(f.GatewayListeners, strings.ToLower(strings.TrimSpace(host)))
+	host = strings.ToLower(strings.TrimSpace(host))
+	delete(f.GatewayListeners, host)
+	delete(f.GatewayShardOf, host)
 	return nil
 }
 

@@ -62,13 +62,27 @@ spec:
     # org (*.<org>.vortex.v60ai.com) on org creation, or use a wildcard CNAME +
     # per-host certs. The control plane manages these certs as orgs are created.
 ---
-# The single shared Gateway. allowedRoutes: All lets per-tenant-namespace
+# The PRIMARY shared Gateway (shard 0). allowedRoutes: All lets per-tenant-namespace
 # HTTPRoutes attach, so one LB fronts every app.
+#
+# Custom-domain HTTPS listeners auto-shard PAST this Gateway's 64-listener ceiling:
+# the control plane creates "vortex-shard-<n>" Gateways on demand (see
+# apps/api/internal/kube + deploy/KUBERNETES.md). This minimal manual manifest only
+# declares the primary; for the merged-single-LB shard pool (Envoy Gateway
+# mergeGateways) and any pre-provisioned shards, use the automated
+# charts/vortex-bootstrap path (the canonical, no-manual-kubectl install).
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
   name: vortex
+  # CANONICAL NAMESPACE = "vortex" (matches the helmfile / vortex-bootstrap chart
+  # and the Namespace declared at the top of this manifest). The shard-primary
+  # labels come from the sharding work so the control plane can discover this
+  # Gateway as shard 0 of the auto-sharding pool.
   namespace: vortex
+  labels:
+    app.kubernetes.io/managed-by: vortex
+    vortex.v60ai.com/gateway-shard-primary: "true"
 spec:
   gatewayClassName: vortex
   listeners:
