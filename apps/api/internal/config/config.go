@@ -59,6 +59,32 @@ type Config struct {
 	BuildKanikoImage string // pinned kaniko executor image
 	BuildTimeoutSec  int    // per-build deadline (seconds)
 
+	// Cloud Native Buildpacks (CNB) builder. BuildpacksBuilderImage is the CNB
+	// builder image used to detect+build app source without a Dockerfile (e.g.
+	// "paketobuildpacks/builder-jammy-base"). BuildBuildpacksImage is the optional
+	// lifecycle/runner image used to drive the build, when the pipeline needs one.
+	BuildpacksBuilderImage string // VORTEX_BUILDPACKS_BUILDER
+	BuildBuildpacksImage   string // VORTEX_BUILD_BUILDPACKS_IMAGE
+
+	// ExternalDNS automation. When ExternalDNSEnabled is true the platform manages
+	// per-tenant DNS records (within ExternalDNSZones) instead of asking the
+	// operator to set them manually; DNSRecordTTL is the TTL (seconds) on those
+	// records.
+	ExternalDNSEnabled bool     // VORTEX_EXTERNAL_DNS_ENABLED
+	ExternalDNSZones   []string // VORTEX_EXTERNAL_DNS_ZONES (comma list of managed zones)
+	DNSRecordTTL       int      // VORTEX_DNS_RECORD_TTL (seconds)
+
+	// Gateway sharding. GatewayShardMaxListeners bounds how many listeners a single
+	// shared Gateway carries before a new shard is provisioned; GatewayShardLBSharing
+	// lets multiple shards share one LoadBalancer.
+	GatewayShardMaxListeners int  // VORTEX_GATEWAY_SHARD_MAX_LISTENERS
+	GatewayShardLBSharing    bool // VORTEX_GATEWAY_SHARD_LB_SHARING
+
+	// Velero managed-backup target (object storage for database backups/restores).
+	VeleroBucket string // VORTEX_VELERO_BUCKET
+	VeleroRegion string // VORTEX_VELERO_REGION
+	VeleroS3URL  string // VORTEX_VELERO_S3_URL
+
 	// Registry pull secret: the per-tenant imagePullSecret name attached to built
 	// apps, and the control-plane SOURCE secret (+ namespace) copied into each
 	// tenant namespace so a private built image can be pulled.
@@ -151,6 +177,20 @@ func Load() (*Config, error) {
 		BuildGitCreds:      getenv("BUILD_GIT_CREDS_SECRET", ""),
 		BuildKanikoImage:   getenv("BUILD_KANIKO_IMAGE", "gcr.io/kaniko-project/executor:v1.23.2"),
 		BuildTimeoutSec:    getenvInt("BUILD_TIMEOUT_SEC", 600),
+
+		BuildpacksBuilderImage: getenv("BUILDPACKS_BUILDER", ""),
+		BuildBuildpacksImage:   getenv("BUILD_BUILDPACKS_IMAGE", ""),
+
+		ExternalDNSEnabled: getenvBool("EXTERNAL_DNS_ENABLED", false),
+		ExternalDNSZones:   splitAndTrim(getenv("EXTERNAL_DNS_ZONES", "")),
+		DNSRecordTTL:       getenvInt("DNS_RECORD_TTL", 300),
+
+		GatewayShardMaxListeners: getenvInt("GATEWAY_SHARD_MAX_LISTENERS", 64),
+		GatewayShardLBSharing:    getenvBool("GATEWAY_SHARD_LB_SHARING", false),
+
+		VeleroBucket: getenv("VELERO_BUCKET", ""),
+		VeleroRegion: getenv("VELERO_REGION", ""),
+		VeleroS3URL:  getenv("VELERO_S3_URL", ""),
 
 		RegistryPullSecret:          getenv("REGISTRY_PULL_SECRET", "vortex-registry-pull"),
 		RegistryPullSecretSource:    getenv("REGISTRY_PULL_SECRET_SOURCE", ""),

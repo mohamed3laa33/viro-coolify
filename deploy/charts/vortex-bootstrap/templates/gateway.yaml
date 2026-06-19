@@ -16,14 +16,26 @@
 #
 # SINGLE-LB PRESERVATION: by default each Gateway maps to its own LoadBalancer
 # Service, so overflow shards would each cost an extra LB. To KEEP the single-LB
-# model past 64 listeners, enable gateway.merge (Envoy Gateway only): it installs
-# an EnvoyProxy with mergeGateways=true referenced by the GatewayClass, so every
-# Gateway of this class is merged onto ONE Envoy fleet behind ONE Service/LB. The
-# backend clones the primary's spec.infrastructure onto each shard so the merge
-# applies to dynamically-created shards too. See deploy/KUBERNETES.md for the
-# tradeoffs (merged: cheapest, shares one data plane / blast radius; unmerged: a
-# few extra LBs only at very large custom-domain counts, with isolation per shard).
-{{- if and .Values.gateway.merge .Values.gateway.envoyProxy }}
+# model past 64 listeners the chart MERGES Gateways (Envoy Gateway only): it
+# installs an EnvoyProxy with mergeGateways=true referenced by the GatewayClass, so
+# every Gateway of this class is merged onto ONE Envoy fleet behind ONE Service/LB.
+# This is driven by gateway.shards.lbSharing (the operator's cost intent, default
+# true); gateway.merge may override it explicitly. The backend clones the primary's
+# spec.infrastructure onto each shard so the merge applies to dynamically-created
+# shards too. See deploy/KUBERNETES.md for the tradeoffs (merged: cheapest, shares
+# one data plane / blast radius; unmerged: a few extra LBs only at very large
+# custom-domain counts, with isolation per shard).
+{{- /*
+  effectiveMerge: whether shards share ONE Envoy fleet / one LoadBalancer. The
+  explicit gateway.merge wins when set; otherwise it follows the operator's
+  cost intent gateway.shards.lbSharing. kindIs "bool" distinguishes an explicit
+  false from an unset (null) value so "merge: false" is honoured.
+*/}}
+{{- $effectiveMerge := .Values.gateway.shards.lbSharing }}
+{{- if kindIs "bool" .Values.gateway.merge }}
+{{- $effectiveMerge = .Values.gateway.merge }}
+{{- end }}
+{{- if and $effectiveMerge .Values.gateway.envoyProxy }}
 apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: EnvoyProxy
 metadata:
@@ -44,7 +56,7 @@ metadata:
   name: {{ .Values.gateway.className }}
 spec:
   controllerName: {{ .Values.gateway.controllerName }}
-  {{- if and .Values.gateway.merge .Values.gateway.envoyProxy }}
+  {{- if and $effectiveMerge .Values.gateway.envoyProxy }}
   # Point the class at the merged-data-plane EnvoyProxy so all Gateways of this
   # class (primary + every shard) share one Envoy fleet / one LoadBalancer.
   parametersRef:
@@ -76,6 +88,23 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: vortex
     vortex.v60ai.com/gateway-shard-primary: "true"
+  annotations:
+    # Shard knobs surfaced on the primary Gateway so the running per-shard listener
+    # budget and the LB-sharing intent are discoverable from cluster state and stay
+    # consistent with the control plane's kube.Config (VORTEX_GATEWAY_SHARD_*).
+    vortex.v60ai.com/gateway-shard-max-listeners: {{ .Values.gateway.shards.maxListeners | quote }}
+    vortex.v60ai.com/gateway-shard-lb-sharing: {{ $effectiveMerge | quote }}
+    {{- if .Values.externalDns.enabled }}
+    # external-dns publishes the wildcard tenant DNS records for the shared Gateway,
+    # pointing them at the Gateway's LoadBalancer address. Hostnames default to the
+    # apex + platform wildcard "*.<baseDomain>"; ttl mirrors VORTEX_DNS_RECORD_TTL.
+    {{- $hostnames := .Values.externalDns.hostnames }}
+    {{- if not $hostnames }}
+    {{- $hostnames = list .Values.baseDomain (printf "*.%s" .Values.baseDomain) }}
+    {{- end }}
+    external-dns.alpha.kubernetes.io/hostname: {{ join "," $hostnames | quote }}
+    external-dns.alpha.kubernetes.io/ttl: {{ .Values.externalDns.ttl | quote }}
+    {{- end }}
 spec:
   gatewayClassName: {{ .Values.gateway.className }}
   listeners:

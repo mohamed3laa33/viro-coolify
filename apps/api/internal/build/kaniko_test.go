@@ -26,15 +26,20 @@ func testCfg() Config {
 
 func sampleReq() Request {
 	return Request{
-		AppID:      "app-123",
-		BuildID:    "build-456",
-		OrgSlug:    "acme",
-		AppName:    "web",
-		GitRepo:    "https://github.com/acme/web.git",
-		GitRef:     "main",
-		Dockerfile: "Dockerfile",
-		ImageRef:   "ghcr.io/acme/acme-web:main-app123",
-		BuildArgs:  map[string]string{"VERSION": "1.2.3"},
+		AppID:   "app-123",
+		BuildID: "build-456",
+		OrgSlug: "acme",
+		AppName: "web",
+		GitRepo: "https://github.com/acme/web.git",
+		GitRef:  "main",
+		// This is a Dockerfile build: pin the strategy so Build() routes to the
+		// kaniko path (an empty strategy with HasDockerfile=false would resolve to
+		// buildpacks).
+		Strategy:      StrategyDockerfile,
+		HasDockerfile: true,
+		Dockerfile:    "Dockerfile",
+		ImageRef:      "ghcr.io/acme/acme-web:main-app123",
+		BuildArgs:     map[string]string{"VERSION": "1.2.3"},
 	}
 }
 
@@ -324,6 +329,129 @@ func TestBuildRejectsBadRepo(t *testing.T) {
 	}
 }
 
+// TestDetectStrategy asserts the single detection point routes a Dockerfile
+// source to the Kaniko strategy and a no-Dockerfile source to buildpacks.
+func TestDetectStrategy(t *testing.T) {
+	if got := DetectStrategy(true); got != StrategyDockerfile {
+		t.Errorf("DetectStrategy(true) = %q, want %q", got, StrategyDockerfile)
+	}
+	if got := DetectStrategy(false); got != StrategyBuildpacks {
+		t.Errorf("DetectStrategy(false) = %q, want %q", got, StrategyBuildpacks)
+	}
+}
+
+// TestResolveStrategy asserts an explicit Strategy wins, and an empty Strategy
+// falls back to HasDockerfile-based detection.
+func TestResolveStrategy(t *testing.T) {
+	cases := []struct {
+		name string
+		req  Request
+		want Strategy
+	}{
+		{"explicit dockerfile", Request{Strategy: StrategyDockerfile}, StrategyDockerfile},
+		{"explicit buildpacks", Request{Strategy: StrategyBuildpacks, HasDockerfile: true}, StrategyBuildpacks},
+		{"detect dockerfile", Request{HasDockerfile: true}, StrategyDockerfile},
+		{"detect buildpacks", Request{HasDockerfile: false}, StrategyBuildpacks},
+	}
+	for _, c := range cases {
+		if got := c.req.resolveStrategy(); got != c.want {
+			t.Errorf("%s: resolveStrategy() = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// TestBuildBuildpacksStrategyRoutesToLifecycle asserts a no-Dockerfile build is
+// dispatched to the Cloud Native Buildpacks lifecycle Job (delegated to the kube
+// builder) rather than the kaniko executor, and honors the configured builder
+// image. This is the end-to-end no-Dockerfile wiring.
+func TestBuildBuildpacksStrategyRoutesToLifecycle(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	cfg := testCfg()
+	cfg.BuildpacksBuilderImage = "paketobuildpacks/builder-jammy-base:latest"
+	b := NewKanikoBuilder(cfg, cs)
+
+	req := sampleReq()
+	req.Strategy = StrategyBuildpacks
+	req.HasDockerfile = false
+	req.Builder = "paketobuildpacks/builder-jammy-tiny:latest"
+
+	// Report the build Job complete on every Get so the delegated builder returns.
+	cs.PrependReactor("get", "jobs", func(action ktesting.Action) (bool, runtime.Object, error) {
+		ga := action.(ktesting.GetAction)
+		return true, &batchv1.Job{
+			ObjectMeta: metav1.ObjectMeta{Name: ga.GetName(), Namespace: ga.GetNamespace()},
+			Status: batchv1.JobStatus{
+				Conditions: []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}},
+			},
+		}, nil
+	})
+
+	res, err := b.Build(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Build (buildpacks): %v", err)
+	}
+	if res.Strategy != StrategyBuildpacks {
+		t.Fatalf("result strategy = %q, want %q", res.Strategy, StrategyBuildpacks)
+	}
+	if res.Image != req.ImageRef {
+		t.Fatalf("image = %q, want %q", res.Image, req.ImageRef)
+	}
+
+	// The created Job must be the buildpacks lifecycle (a git-clone init container +
+	// a "lifecycle" build container), NOT kaniko.
+	jobs, err := cs.BatchV1().Jobs(cfg.Namespace).List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	if len(jobs.Items) != 1 {
+		t.Fatalf("want exactly 1 build job, got %d", len(jobs.Items))
+	}
+	spec := jobs.Items[0].Spec.Template.Spec
+	if len(spec.Containers) != 1 || spec.Containers[0].Name != "lifecycle" {
+		t.Fatalf("expected a single 'lifecycle' container, got %+v", spec.Containers)
+	}
+	if len(spec.InitContainers) != 1 || spec.InitContainers[0].Name != "git-clone" {
+		t.Fatalf("expected a 'git-clone' init container, got %+v", spec.InitContainers)
+	}
+	args := strings.Join(spec.Containers[0].Args, " ")
+	if !strings.Contains(args, "paketobuildpacks/builder-jammy-tiny:latest") {
+		t.Fatalf("buildpacks args missing per-request builder image: %v", spec.Containers[0].Args)
+	}
+}
+
+// TestBuildDefaultsToDockerfileStrategy asserts an unset strategy WITH a detected
+// Dockerfile routes to the kaniko path (back-compat for callers that set
+// HasDockerfile from a probe but leave Strategy empty).
+func TestBuildDefaultsToDockerfileStrategy(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	b := NewKanikoBuilder(testCfg(), cs)
+	req := sampleReq()
+	req.Strategy = "" // rely on detection
+	req.HasDockerfile = true
+
+	cs.PrependReactor("get", "jobs", func(action ktesting.Action) (bool, runtime.Object, error) {
+		ga := action.(ktesting.GetAction)
+		return true, &batchv1.Job{
+			ObjectMeta: metav1.ObjectMeta{Name: ga.GetName(), Namespace: ga.GetNamespace()},
+			Status: batchv1.JobStatus{
+				Conditions: []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}},
+			},
+		}, nil
+	})
+
+	res, err := b.Build(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if res.Strategy != StrategyDockerfile {
+		t.Fatalf("result strategy = %q, want %q", res.Strategy, StrategyDockerfile)
+	}
+	jobs, _ := cs.BatchV1().Jobs(testCfg().Namespace).List(context.Background(), metav1.ListOptions{})
+	if len(jobs.Items) != 1 || jobs.Items[0].Spec.Template.Spec.Containers[0].Name != "kaniko" {
+		t.Fatalf("expected a single kaniko Job, got %+v", jobs.Items)
+	}
+}
+
 // TestFakeBuilderRecordsAndReturns asserts the FakeBuilder double records
 // requests and honors override/error.
 func TestFakeBuilderRecordsAndReturns(t *testing.T) {
@@ -336,8 +464,19 @@ func TestFakeBuilderRecordsAndReturns(t *testing.T) {
 	if res.Image != req.ImageRef {
 		t.Fatalf("default image = %q, want ImageRef echo", res.Image)
 	}
+	if res.Strategy != StrategyDockerfile {
+		t.Fatalf("fake result strategy = %q, want %q", res.Strategy, StrategyDockerfile)
+	}
 	if calls := f.Calls(); len(calls) != 1 || calls[0].AppID != "app-123" {
 		t.Fatalf("unexpected recorded calls: %+v", calls)
+	}
+
+	// A no-Dockerfile request resolves to buildpacks even through the fake.
+	bp := sampleReq()
+	bp.Strategy = ""
+	bp.HasDockerfile = false
+	if res, _ := f.Build(context.Background(), bp); res.Strategy != StrategyBuildpacks {
+		t.Fatalf("fake buildpacks strategy = %q, want %q", res.Strategy, StrategyBuildpacks)
 	}
 
 	f.ImageOverride = "registry/x:tag"

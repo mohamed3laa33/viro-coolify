@@ -28,16 +28,52 @@ gateway:
     # when the primary fills up — the cheapest default. Set >0 only if you want
     # shards declared up front.
     count: 0
+    # maxListeners is the per-shard custom-domain listener budget the control plane
+    # uses before overflowing to the next shard. It must match the API's
+    # VORTEX_GATEWAY_SHARD_MAX_LISTENERS (kube.Config.GatewayShardMaxListeners) so
+    # the declarative pool and the dynamic allocator agree on capacity. Surfaced on
+    # the primary Gateway as the vortex.v60ai.com/gateway-shard-max-listeners
+    # annotation so the running budget is discoverable from cluster state. The
+    # Gateway API hard ceiling is 64; the control plane clamps to it. Default 64.
+    maxListeners: 64
+    # lbSharing records the operator's intent that shards SHARE the primary
+    # LoadBalancer (one LB for everything, the single-LB cost model preserved past
+    # 64 listeners). It maps to the EnvoyProxy mergeGateways behaviour below and is
+    # surfaced on the primary Gateway as the
+    # vortex.v60ai.com/gateway-shard-lb-sharing annotation; keep it in sync with the
+    # API's VORTEX_GATEWAY_SHARD_LB_SHARING (kube.Config.GatewayShardLBSharing).
+    lbSharing: true
   # merge enables Envoy-Gateway "mergeGateways" so the primary + every shard share
   # ONE Envoy fleet / ONE LoadBalancer (preserves the single-LB cost model past 64
-  # listeners). Requires envoyProxy: true and the Envoy Gateway controller. When
-  # false, each shard provisions its own LoadBalancer (honest extra cost only at
-  # very large custom-domain counts).
-  merge: true
+  # listeners). Requires envoyProxy: true and the Envoy Gateway controller. Defaults
+  # to shards.lbSharing (the cost intent) when left null; set explicitly to override.
+  # When effectively false, each shard provisions its own LoadBalancer (honest extra
+  # cost only at very large custom-domain counts).
+  merge: null
   # envoyProxy renders the EnvoyProxy CR that mergeGateways needs. Set false if your
   # Gateway controller is NOT Envoy Gateway (then leave merge handling to that
   # controller's own mechanism, or accept per-shard LoadBalancers).
   envoyProxy: true
+
+# external-dns integration for the STATIC shared Gateway. When enabled, the chart
+# stamps external-dns annotations on the primary Gateway so external-dns publishes
+# the wildcard tenant DNS records (the apex + "*.<baseDomain>") to the managed zone,
+# pointing them at the Gateway's LoadBalancer address. Per-org/per-project wildcard
+# records the control plane manages imperatively are annotated by the control plane
+# itself (kube.Backend) — annotations need no RBAC. Keep enabled/zones in sync with
+# the API's VORTEX_EXTERNAL_DNS_ENABLED / VORTEX_EXTERNAL_DNS_ZONES.
+externalDns:
+  # enabled gates whether the external-dns annotations are rendered at all. Off by
+  # default: operators who set wildcard DNS manually (the install.sh prints the
+  # records) need no external-dns. Turn on only when external-dns is installed.
+  enabled: false
+  # hostnames published for the shared Gateway. Defaults (when empty) to the apex
+  # and the platform wildcard "*.<baseDomain>" so api./app./<org>. and all
+  # one-label-deep hosts resolve. Override to pin a specific set.
+  hostnames: []
+  # ttl is the DNS record TTL in seconds external-dns applies. Keep in sync with the
+  # API's VORTEX_DNS_RECORD_TTL (kube.Config.DNSRecordTTL). Default 300.
+  ttl: 300
 
 tls:
   enabled: true

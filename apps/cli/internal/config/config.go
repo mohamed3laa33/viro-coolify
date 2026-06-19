@@ -54,7 +54,9 @@ func DefaultPath() (string, error) {
 // (with defaults applied) rather than an error, so first-run works.
 func Load(path string) (*Config, error) {
 	cfg := &Config{path: path}
-	data, err := os.ReadFile(path)
+	// The config path is supplied by the user (flag/$VORTEX_CONFIG) or our own
+	// DefaultPath; reading it is the entire purpose of this loader.
+	data, err := os.ReadFile(path) // #nosec G304 -- user-controlled CLI config path by design
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			cfg.applyDefaults()
@@ -98,7 +100,9 @@ func (c *Config) Save() error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
-	data, err := yaml.Marshal(c)
+	// The config intentionally persists bearer/refresh tokens for non-interactive
+	// reuse; the file is written 0600 below to keep them owner-only.
+	data, err := yaml.Marshal(c) // #nosec G117 -- tokens are persisted by design and the file is 0600
 	if err != nil {
 		return fmt.Errorf("encode config: %w", err)
 	}

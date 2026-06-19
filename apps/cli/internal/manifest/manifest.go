@@ -61,7 +61,9 @@ func PathIn(dir string) string { return filepath.Join(dir, Filename) }
 // Load reads the manifest at path. A missing file yields ErrNotFound so callers
 // can distinguish "not initialised" from a real parse/IO error.
 func Load(path string) (*Manifest, error) {
-	data, err := os.ReadFile(path)
+	// The manifest path is the user's project file (flag or vortex.yaml in the
+	// working dir); reading it is the entire purpose of this loader.
+	data, err := os.ReadFile(path) // #nosec G304 -- user-controlled project manifest path by design
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, ErrNotFound
@@ -102,7 +104,9 @@ func (m *Manifest) Save(path string) error {
 	header := "# Vortex app manifest — see `vortex launch`.\n" +
 		"# Resource defaults (cpu/memory/quota) come from your plan via the API;\n" +
 		"# leave cpu/memoryMb unset to use the admin-configured defaults.\n"
-	if err := os.WriteFile(path, append([]byte(header), data...), 0o644); err != nil {
+	// 0644 is intentional: the manifest carries no secrets and is meant to be
+	// committed to the repo and readable in CI, like a Dockerfile or package.json.
+	if err := os.WriteFile(path, append([]byte(header), data...), 0o644); err != nil { // #nosec G306 -- non-secret, committable project manifest
 		return fmt.Errorf("write manifest %s: %w", path, err)
 	}
 	m.path = path

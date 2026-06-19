@@ -24,9 +24,18 @@ releases. A **Next.js dashboard** (`apps/web`) mirrors the backend. The `vortex`
    (default CPU ×0.2, memory ×0.35), `limits = full requested`. Factors are admin-configurable
    platform settings (`store.DefaultSettings()` seeds them). Overcommit math lives in
    `apps/api/internal/kube/values.go`.
-4. **Routing = Gateway API, not ingress-nginx** (ingress-nginx is retired upstream). One shared
-   Gateway / one LoadBalancer for everything; **namespace per org-project**. Tenant URL pattern is
-   `<app>.<project>.<org>.vortex.v60ai.com`.
+4. **Routing = Gateway API, not ingress-nginx** (ingress-nginx is retired upstream). A shared
+   **Gateway pool** fronts everything; **namespace per org-project**. Tenant URL pattern is
+   `<app>.<project>.<org>.vortex.v60ai.com`. The primary `vortex` Gateway carries the wildcard +
+   http listeners and the first batch of verified-custom-domain listeners; past
+   `GatewayShardMaxListeners` (env `VORTEX_GATEWAY_SHARD_MAX_LISTENERS`, default 64 — the per-Gateway
+   ceiling) the control plane auto-shards custom-domain listeners across `vortex-shard-N` Gateways it
+   creates/garbage-collects on demand. With `GatewayShardLBSharing`
+   (`VORTEX_GATEWAY_SHARD_LB_SHARING`, the bootstrap chart's `gateway.merge: true`) the whole pool
+   shares **one Envoy fleet / one LoadBalancer** via `mergeGateways` — the single-LB cost model is
+   preserved by default; only with merge off does each shard get its own LB. These config fields ride
+   `kube.Config` (threaded in `httpx/server.go newKubeBackend`) — do not re-read env in `kube`
+   (invariant #7).
 5. **No manual kubectl in the deploy path.** Everything installs via `deploy/helmfile.yaml` and the
    bootstrap chart. Cluster comes from `deploy/terraform`.
 6. **No demo / fake-success paths.** `kube.FakeBackend` is a real in-memory **test double** so the
@@ -119,13 +128,27 @@ Local dev: `make dev-up` (Postgres/Redis), `make api-run`, `make web-dev`. Set
 - `.github/workflows/deploy.yml` — deploys GHCR images to DOKS via Helm; creates an in-cluster
   `ghcr-pull` secret from `GHCR_PULL_TOKEN` (a PAT with `read:packages`) for private packages.
 
-## Known gaps / roadmap (see PROGRESS.md and the audit reports)
+## Delivered (deploy-readiness waves) — see PROGRESS.md
 
-- **Security:** add rate limiting / lockout on auth endpoints; consider refresh-token rotation +
-  revocation (today refresh tokens are stateless for up to 30 days) and a logout path.
-- **Platform:** code-to-image builder (Kaniko/BuildKit), real metrics/logs pipeline (Prometheus/
-  Loki), scale-to-zero idle detection + KEDA HTTP wake, multi-region (deferred).
+- **Security:** auth rate limiting + lockout, HttpOnly cookie auth, refresh-token rotation +
+  revocation and a logout path are shipped.
+- **Platform:** buildpacks (CNB) builds with **no Dockerfile** (`VORTEX_BUILDPACKS_BUILDER` /
+  `VORTEX_BUILD_BUILDPACKS_IMAGE`), KEDA **HTTP** scale-to-zero **wake-from-zero** (KEDA HTTP
+  add-on + interceptor), observability stack (Prometheus + Grafana + Loki/promtail), DB backups
+  (Velero, gated on `VORTEX_VELERO_BUCKET`), external-dns (`VORTEX_EXTERNAL_DNS_*`,
+  `VORTEX_DNS_RECORD_TTL`) for wildcard/custom-domain records, Gateway listener sharding, and
+  region-aware scheduling.
+- **Install:** `deploy/install.sh` is the single env-driven, idempotent entrypoint
+  (prereqs → optional terraform → namespaces+secrets → `helmfile apply` → wait → print LB IP /
+  DNS records / dashboard URL).
 - **CLI:** `apps/cli` (`vortex`) exists (auth, orgs/projects/apps, services, secrets, plans, config
   context, `--json`). Keep its API client in sync with `httpx` routes when endpoints change.
+
+## Known gaps / roadmap
+
+- **Live-cluster end-to-end proof** is the one remaining manual exit criterion: a real DOKS run
+  through `deploy/install.sh` (DNS + wildcard TLS + a tenant app reachable at its
+  `<app>.<project>.<org>` host). Everything else is in-tree and tested with the FakeBackend.
+- Multi-region is deferred (scheduling is region-aware; the cluster fabric is still single-region).
 
 When you finish a feature, update `PROGRESS.md` and this file if an invariant or structure changed.

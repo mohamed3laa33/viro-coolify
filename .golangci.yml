@@ -13,6 +13,14 @@ linters:
     - bodyclose
     - nilerr
   settings:
+    errcheck:
+      # Writes to a CLI's stdout/terminal writer (fmt.Fprint* on cmd.OutOrStdout,
+      # a tabwriter, etc.) can't be meaningfully recovered from and are noise, not
+      # signal. Real I/O sinks (files, network, Close) are still checked.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
     dupl:
       # Parallel resource-CRUD handlers (plans/templates) are idiomatic, not
       # copy-paste bloat; this catches larger genuine duplication.

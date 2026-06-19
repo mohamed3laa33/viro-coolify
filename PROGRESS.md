@@ -1,4 +1,4 @@
-# Viro — build progress
+# Vortex — build progress
 
 Live checklist for the overnight build. Each milestone is committed and pushed.
 
@@ -76,3 +76,39 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
 - ✅ Judge agent after each milestone (M1 PASS, M2→P0 found+fixed, M3 PASS, web PASS)
 - ✅ Deprecation audits (backend CLEAN; web flagged Next CVE → upgraded to 15.5.19)
 - 🚧 Final end-to-end sweep + frontend build verification
+
+## Deploy-readiness waves — delivered ✅
+Hardening + platform completeness to make Vortex deploy-ready. All in-tree and tested with the
+`kube.FakeBackend`/in-memory store; the one item still pending is a live-cluster run (see below).
+
+- ✅ **One-shot installer** — `deploy/install.sh` is the single env-driven, idempotent entrypoint:
+  prereq checks → optional terraform provision → create namespaces + secrets from env →
+  `helmfile -f deploy/helmfile.yaml apply` (all addons + `vortex-bootstrap` + control plane) →
+  wait for rollouts → print the Gateway LB IP, the wildcard DNS records to set, and the dashboard URL.
+- ✅ **Buildpacks (no-Dockerfile) builds** — Cloud Native Buildpacks build source apps without a
+  Dockerfile (`VORTEX_BUILDPACKS_BUILDER` → `BuildpacksBuilderImage`,
+  `VORTEX_BUILD_BUILDPACKS_IMAGE` → `BuildBuildpacksImage`; threaded onto the builder config in
+  `httpx/server.go newBuilder`).
+- ✅ **KEDA HTTP wake-from-zero** — KEDA HTTP add-on (interceptor + external scaler) installed via
+  helmfile; an app's `http` ScaledObject now actually wakes a 0-replica workload on the first request.
+- ✅ **external-dns** — wildcard/custom-domain records published automatically
+  (`VORTEX_EXTERNAL_DNS_ENABLED` → `ExternalDNSEnabled`, `VORTEX_EXTERNAL_DNS_ZONES` →
+  `ExternalDNSZones`, `VORTEX_DNS_RECORD_TTL` → `DNSRecordTTL`; threaded onto `kube.Config`).
+- ✅ **Observability stack** — Prometheus + Grafana (+ Prometheus Operator for the tenant
+  common-chart ServiceMonitors) and Loki + promtail, installed by helmfile into `monitoring`.
+- ✅ **DB backups** — Velero, installed only when a backup bucket is configured
+  (`VORTEX_VELERO_BUCKET` / `VORTEX_VELERO_REGION` / `VORTEX_VELERO_S3_URL`) so we never ship a
+  backup tool with nowhere to back up to (invariant #6).
+- ✅ **Billing maturity** — admin-set hourly per-component pricing + metering and the public catalog
+  flow are wired (still DB/admin-driven, invariant #1).
+- ✅ **Gateway sharding** — custom-domain HTTPS listeners auto-shard across a Gateway pool past
+  `VORTEX_GATEWAY_SHARD_MAX_LISTENERS` (`GatewayShardMaxListeners`, default 64); with
+  `VORTEX_GATEWAY_SHARD_LB_SHARING` (`GatewayShardLBSharing`, bootstrap `gateway.merge: true`) the
+  pool shares one Envoy fleet / one LoadBalancer. Config rides `kube.Config`.
+- ✅ **Region-aware scheduling** — workloads are scheduled with region awareness (single cluster
+  today; multi-region cluster fabric remains deferred).
+
+### Remaining manual exit criterion ⬜
+- ⬜ **Live-cluster end-to-end proof** — run `deploy/install.sh` against a real DOKS cluster and
+  confirm DNS + wildcard TLS resolve and a tenant app is reachable at its
+  `<app>.<project>.<org>.<baseDomain>` host. This is the single step that cannot be proven in-tree.

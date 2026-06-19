@@ -447,8 +447,8 @@ func TestAddAndVerifyDomain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("VerifyDomain: %v", err)
 	}
-	if ver.Domain.Status != "verified" {
-		t.Fatalf("expected verified, got %q", ver.Domain.Status)
+	if ver.Status != "verified" {
+		t.Fatalf("expected verified, got %q", ver.Status)
 	}
 }
 

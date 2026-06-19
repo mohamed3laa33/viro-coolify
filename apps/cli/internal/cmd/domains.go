@@ -104,8 +104,8 @@ func (a *App) newDomainsVerifyCmd() *cobra.Command {
 				return err
 			}
 			return a.emit(cmd.OutOrStdout(), res, func() {
-				fmt.Fprintf(cmd.OutOrStdout(), "%s: status %s\n", res.Domain.Domain, dash(res.Domain.Status))
-				if res.Domain.Status != "verified" {
+				fmt.Fprintf(cmd.OutOrStdout(), "%s: status %s\n", res.Domain.Domain, dash(res.Status))
+				if res.Status != "verified" {
 					printDomainResult(cmd, res)
 				}
 			})
@@ -145,9 +145,9 @@ func (a *App) newDomainsRemoveCmd() *cobra.Command {
 func printDomainResult(cmd *cobra.Command, res *client.DomainResult) {
 	ins := res.Instructions
 	rows := [][]string{
-		{"Domain ID", res.Domain.ID},
+		{"Domain ID", res.ID},
 		{"Domain", res.Domain.Domain},
-		{"Status", dash(res.Domain.Status)},
+		{"Status", dash(res.Status)},
 		{"TXT name", dash(ins.TXTName)},
 		{"TXT value", dash(ins.TXTValue)},
 		{ins.TargetType + " target", dash(ins.TargetValue)},

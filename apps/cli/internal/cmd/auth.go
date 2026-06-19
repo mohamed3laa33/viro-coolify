@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"syscall"
 
 	"github.com/mohamed3laa33/viro-coolify/apps/cli/internal/client"
 	"github.com/mohamed3laa33/viro-coolify/apps/cli/internal/config"
@@ -287,7 +286,7 @@ func prompt(label string) string {
 // stdin is not a terminal (e.g. piped input), it falls back to a plain line.
 func promptPassword(label string) (string, error) {
 	fmt.Fprint(os.Stderr, label)
-	fd := int(syscall.Stdin)
+	fd := int(os.Stdin.Fd())
 	if term.IsTerminal(fd) {
 		b, err := term.ReadPassword(fd)
 		fmt.Fprintln(os.Stderr)

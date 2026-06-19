@@ -40,8 +40,7 @@ func toAuthResult(out authResponse) *AuthResult {
 // ONLY here (shown once) on the result's Token field.
 func (c *Client) CreateToken(ctx context.Context, in CreateTokenInput) (*ApiToken, error) {
 	var tok ApiToken
-	err := c.request(ctx, http.MethodPost, "/v1/tokens",
-		createTokenRequest{Name: in.Name, Scopes: in.Scopes, ExpiresInDays: in.ExpiresInDays}, &tok)
+	err := c.request(ctx, http.MethodPost, "/v1/tokens", createTokenRequest(in), &tok)
 	if err != nil {
 		return nil, err
 	}
@@ -150,16 +149,7 @@ func (c *Client) ListProjectApps(ctx context.Context, orgID, projectID string) (
 // CreateApp creates an app in an org. When in.ProjectID is set, it is sent in
 // the body and the org-level endpoint routes it to that project.
 func (c *Client) CreateApp(ctx context.Context, orgID string, in CreateAppInput) (*App, error) {
-	body := createAppRequest{
-		Name:          in.Name,
-		ProjectID:     in.ProjectID,
-		Image:         in.Image,
-		GitRepository: in.GitRepository,
-		GitBranch:     in.GitBranch,
-		BuildPack:     in.BuildPack,
-		CPU:           in.CPU,
-		MemoryMB:      in.MemoryMB,
-	}
+	body := createAppRequest(in)
 	var app App
 	if err := c.request(ctx, http.MethodPost, "/v1/orgs/"+url.PathEscape(orgID)+"/apps", body, &app); err != nil {
 		return nil, err
@@ -179,13 +169,7 @@ func (c *Client) GetApp(ctx context.Context, orgID, appID string) (*AppDetail, e
 // UpdateApp patches an app's image / resources / git source. A nil input field
 // is omitted (left unchanged).
 func (c *Client) UpdateApp(ctx context.Context, orgID, appID string, in UpdateAppInput) (*App, error) {
-	body := updateAppRequest{
-		Image:         in.Image,
-		CPU:           in.CPU,
-		MemoryMB:      in.MemoryMB,
-		GitRepository: in.GitRepository,
-		GitBranch:     in.GitBranch,
-	}
+	body := updateAppRequest(in)
 	var app App
 	if err := c.request(ctx, http.MethodPatch, appPath(orgID, appID), body, &app); err != nil {
 		return nil, err
@@ -196,8 +180,7 @@ func (c *Client) UpdateApp(ctx context.Context, orgID, appID string, in UpdateAp
 // ScaleApp sets an app's autoscaling bounds. A nil bound is left unchanged.
 func (c *Client) ScaleApp(ctx context.Context, orgID, appID string, in ScaleAppInput) (*App, error) {
 	var app App
-	err := c.request(ctx, http.MethodPost, appPath(orgID, appID)+"/scale",
-		scaleAppRequest{MinReplicas: in.MinReplicas, MaxReplicas: in.MaxReplicas}, &app)
+	err := c.request(ctx, http.MethodPost, appPath(orgID, appID)+"/scale", scaleAppRequest(in), &app)
 	if err != nil {
 		return nil, err
 	}
@@ -399,14 +382,7 @@ func (c *Client) ListDatabases(ctx context.Context, orgID string) ([]Database, e
 // CreateDatabase provisions a managed database in an org (defaults to the org's
 // default project when ProjectID is empty).
 func (c *Client) CreateDatabase(ctx context.Context, orgID string, in CreateDatabaseInput) (*Database, error) {
-	body := createDatabaseRequest{
-		Name:      in.Name,
-		Engine:    in.Engine,
-		ProjectID: in.ProjectID,
-		CPU:       in.CPU,
-		MemoryMB:  in.MemoryMB,
-		StorageGB: in.StorageGB,
-	}
+	body := createDatabaseRequest(in)
 	var db Database
 	if err := c.request(ctx, http.MethodPost, "/v1/orgs/"+url.PathEscape(orgID)+"/databases", body, &db); err != nil {
 		return nil, err
@@ -474,12 +450,7 @@ func (c *Client) ListServices(ctx context.Context, orgID string) ([]Service, err
 
 // CreateService provisions a one-click service in a project within an org.
 func (c *Client) CreateService(ctx context.Context, orgID, projectID string, in CreateServiceInput) (*Service, error) {
-	body := createServiceRequest{
-		TemplateKey: in.TemplateKey,
-		Name:        in.Name,
-		CPU:         in.CPU,
-		MemoryMB:    in.MemoryMB,
-	}
+	body := createServiceRequest(in)
 	path := "/v1/orgs/" + url.PathEscape(orgID) + "/projects/" + url.PathEscape(projectID) + "/services"
 	var svc Service
 	if err := c.request(ctx, http.MethodPost, path, body, &svc); err != nil {

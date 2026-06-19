@@ -53,6 +53,15 @@ type FakeBackend struct {
 	// covered).
 	OrgWildcards map[string][]string
 
+	// HTTPWakes records, per "<namespace>/<release>", the FQDN host(s) an HTTP
+	// scale-to-zero app was wired for WAKE via a keda-add-ons-http HTTPScaledObject
+	// (set by Apply when the workload opts into HTTP wake, cleared when it does not),
+	// so platform/handler tests can assert that an HTTP/web app with scale-to-zero
+	// got the interceptor-driven wake wiring (and a worker / non-zero-floor app did
+	// NOT). It is an HONEST record — an entry only appears because Apply saw a
+	// wake-eligible workload, never a fabricated success.
+	HTTPWakes map[string][]string
+
 	// GatewayShardOf records which Gateway SHARD each attached custom-domain host
 	// landed on (host -> Gateway name), mirroring the real backend's auto-sharding
 	// (gateway_shard.go). Shard 0 is the primary Gateway (FakeGatewayName); once a
@@ -116,6 +125,7 @@ func NewFakeBackend() *FakeBackend {
 		DomainCerts:      map[string]bool{},
 		GatewayListeners: map[string]string{},
 		OrgWildcards:     map[string][]string{},
+		HTTPWakes:        map[string][]string{},
 		GatewayShardOf:   map[string]string{},
 		FakeGatewayName:  "vortex",
 		PhaseOverride:    map[string]string{},
@@ -182,6 +192,17 @@ func (f *FakeBackend) Apply(_ context.Context, w Workload) (string, string, erro
 	f.Applied[k] = w
 	f.Hosts[k] = h
 	f.Replicas[k] = 1
+
+	// Mirror the real backend's HTTP scale-to-zero WAKE decision: an HTTP/web app
+	// that opts in and scales to zero gets a keda-add-ons-http HTTPScaledObject keyed
+	// on its FQDN(s); every other workload has any stale wake wiring removed. Record
+	// the host set (or clear it) so tests can assert the wiring honestly.
+	stateful := strings.EqualFold(w.Kind, "database")
+	if wantsHTTPWake(w, stateful) {
+		f.HTTPWakes[k] = append([]string{h}, sanitizeDomains(w.Domains)...)
+	} else {
+		delete(f.HTTPWakes, k)
+	}
 	return rel, h, nil
 }
 
@@ -209,6 +230,7 @@ func (f *FakeBackend) Delete(_ context.Context, namespace, release string) error
 	delete(f.Applied, k)
 	delete(f.Hosts, k)
 	delete(f.Replicas, k)
+	delete(f.HTTPWakes, k)
 	return nil
 }
 

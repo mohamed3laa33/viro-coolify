@@ -133,7 +133,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any, aut
 	// On 401 for an authenticated request, try a one-shot refresh then retry.
 	// A PAT-authenticated client never refreshes (PATs are long-lived).
 	if auth && resp.StatusCode == http.StatusUnauthorized && c.tokens != nil && !c.hasPAT() && c.tokens.Refresh() != "" {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if refreshErr := c.refresh(ctx); refreshErr != nil {
 			return refreshErr
 		}
@@ -142,7 +142,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any, aut
 			return err
 		}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return decodeError(resp)
@@ -175,7 +175,7 @@ func (c *Client) stream(ctx context.Context, path string, onLine func(string)) e
 	if err != nil {
 		return fmt.Errorf("request GET %s: %w", path, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return decodeError(resp)
 	}

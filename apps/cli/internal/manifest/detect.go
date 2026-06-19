@@ -92,7 +92,7 @@ func gitInfo(dir string) (remote, branch string) {
 
 // originURL parses the [remote "origin"] url from a git config file.
 func originURL(configPath string) string {
-	data, err := os.ReadFile(configPath)
+	data, err := os.ReadFile(configPath) // #nosec G304 -- local .git/config path derived from the project dir
 	if err != nil {
 		return ""
 	}
@@ -114,7 +114,7 @@ func originURL(configPath string) string {
 
 // headBranch extracts the branch name from a .git/HEAD ref pointer.
 func headBranch(headPath string) string {
-	data, err := os.ReadFile(headPath)
+	data, err := os.ReadFile(headPath) // #nosec G304 -- local .git/HEAD path derived from the project dir
 	if err != nil {
 		return ""
 	}

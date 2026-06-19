@@ -60,6 +60,38 @@ type Config struct {
 	// custom-domain certificates (e.g. "vortex-letsencrypt"). Empty disables
 	// per-domain TLS issuance (EnsureDomainCertificate then no-ops).
 	ClusterIssuer string
+
+	// ExternalDNSEnabled turns on external-dns publishing for tenant + verified
+	// custom domains: when set, the backend stamps external-dns annotations
+	// (hostname + ttl) onto the dynamically-created HTTPRoute / Gateway / Service so
+	// the in-cluster external-dns controller creates the matching DNS records
+	// automatically (no manual record entry). Off (the default) leaves DNS to be set
+	// by hand / by the wildcard, preserving the current behavior.
+	ExternalDNSEnabled bool
+	// ExternalDNSZones is the set of DNS zones the platform manages (e.g.
+	// "vortex.v60ai.com", "acme.io"). external-dns annotations are only emitted for a
+	// hostname that falls under one of these zones, so the controller never tries to
+	// publish a record into a zone it does not own (a verified custom domain whose
+	// zone the operator does NOT manage gets no annotation — the tenant points DNS at
+	// the Gateway LB themselves). An empty list with ExternalDNSEnabled true treats
+	// the platform BaseDomain as the only managed zone.
+	ExternalDNSZones []string
+	// DNSRecordTTL is the TTL (seconds) stamped via the
+	// external-dns.alpha.kubernetes.io/ttl annotation on published records. Zero
+	// falls back to defaultDNSRecordTTL.
+	DNSRecordTTL int
+
+	// HTTPInterceptorService / HTTPInterceptorNamespace / HTTPInterceptorPort
+	// identify the keda-add-ons-http interceptor proxy Service that buffers an
+	// inbound request while a scaled-to-zero HTTP app wakes (0->1). For an HTTP/web
+	// app with scale-to-zero the tenant HTTPRoute backendRef is pointed at this
+	// Service (not the app's own Service) so a request actually WAKES the app via the
+	// HTTPScaledObject. Empty values fall back to the keda-add-ons-http chart
+	// defaults (defaultHTTPInterceptorService / Namespace / Port) — these are
+	// fixed infrastructure names from that chart, not business values.
+	HTTPInterceptorService   string
+	HTTPInterceptorNamespace string
+	HTTPInterceptorPort      int
 	// CPUOvercommitFactor / MemoryOvercommitFactor scale requested size down to the
 	// scheduler requests (e.g. 0.2 and 0.35). Limits stay at the full requested size.
 	CPUOvercommitFactor    float64
@@ -639,6 +671,31 @@ func (b *KubeBackend) Apply(ctx context.Context, w Workload) (string, string, er
 	if _, err := b.helm.Run(helmCtx, args...); err != nil {
 		return "", "", err
 	}
+
+	// HTTP scale-to-zero WAKE: for an HTTP/web app that opts into scale-to-zero the
+	// chart's CPU ScaledObject was disabled (buildValues) in favor of a
+	// keda-add-ons-http HTTPScaledObject that wakes the app on an inbound request via
+	// the interceptor proxy. The HTTPScaledObject is not a chart template (the
+	// add-on owns its CRD), so render + apply it here via the dynamic client, keyed
+	// on the app's FQDN(s). For every other workload, remove any stale
+	// HTTPScaledObject so a path switched OFF HTTP wake (e.g. HTTPTrigger cleared or
+	// a non-zero floor set) stops routing through the interceptor and hands scaling
+	// back to the (now re-enabled) chart CPU ScaledObject. With no dynamic client
+	// (local/dev) both calls no-op.
+	stateful := strings.EqualFold(w.Kind, "database")
+	if wantsHTTPWake(w, stateful) {
+		hostnames := append([]string{h}, sanitizeDomains(w.Domains)...)
+		bp := w.Port
+		if bp <= 0 {
+			bp = defaultPort(w)
+		}
+		if err := b.ensureHTTPScaledObject(ctx, ns, rel, bp, hostnames, w.Scaling); err != nil {
+			return "", "", err
+		}
+	} else if err := b.removeHTTPScaledObject(ctx, ns, rel); err != nil {
+		return "", "", err
+	}
+
 	return rel, h, nil
 }
 
@@ -790,9 +847,23 @@ func (b *KubeBackend) buildValues(w Workload, h string) map[string]any {
 	// hardcoded constants. A STATELESS workload may scale to ZERO (min/idle = 0 — the
 	// core cost lever); a stateful (database) workload is floored to 1 here so a
 	// database never scales to zero. The CPU trigger is always present (it needs no
-	// extra add-on); an HTTP-concurrency trigger is added only when explicitly gated
-	// on (it requires the keda-http-add-on to actually wake the workload).
+	// extra add-on).
+	//
+	// HTTP WAKE: for an HTTP/web app that opts into scale-to-zero (HTTPTrigger +
+	// MinReplicas<=0) the autoscaling is owned by a keda-add-ons-http
+	// HTTPScaledObject (rendered + applied in Apply) — NOT the chart's CPU
+	// ScaledObject. Two ScaledObjects targeting one workload is invalid, so we
+	// DISABLE the chart ScaledObject for that app and route its HTTPRoute through the
+	// interceptor proxy (below) so an inbound request actually wakes it. Every other
+	// workload (worker / non-HTTP app, or an HTTP app with a non-zero floor) keeps
+	// the plain CPU-based ScaledObject.
+	httpWake := wantsHTTPWake(w, stateful)
 	keda := buildKeda(w.Scaling, stateful)
+	if httpWake {
+		// The HTTPScaledObject is the autoscaler for this app; disable the chart's
+		// own ScaledObject so they don't fight over the same target.
+		keda["enabled"] = false
+	}
 
 	// HTTPRoute attaching to the SHARED Gateway via parentRefs. Databases are
 	// internal-only (no public route); apps/services get the generated host plus
@@ -806,6 +877,14 @@ func (b *KubeBackend) buildValues(w Workload, h string) map[string]any {
 		}},
 		"hostnames":   hostnames,
 		"backendPort": port,
+	}
+	if httpWake {
+		// Point the HTTPRoute backendRef at the keda interceptor proxy Service (in its
+		// own namespace) instead of the app's Service, so a request to a zeroed app is
+		// buffered + replayed by the interceptor after it wakes the app 0->1. The
+		// chart's httproute.yaml renders gateway.rules verbatim, taking precedence over
+		// the default app-Service backendRef.
+		gateway["rules"] = b.interceptorRouteRules()
 	}
 
 	values := map[string]any{
@@ -860,6 +939,15 @@ func (b *KubeBackend) buildValues(w Workload, h string) map[string]any {
 		if len(toleration) > 0 {
 			deployment["tolerations"] = appendToleration(deployment["tolerations"], toleration)
 		}
+	}
+
+	// external-dns: when enabled, stamp the hostname + ttl annotations onto the
+	// rendered HTTPRoute (gateway) and Service for every workload host that falls
+	// under a zone the platform manages, so external-dns publishes the records
+	// automatically. Hosts outside every managed zone (an unmanaged custom domain)
+	// are skipped. A database (no gateway route) contributes no managed host here.
+	if !stateful {
+		b.addExternalDNSToValues(values, hostnames)
 	}
 
 	return values
@@ -977,9 +1065,17 @@ func BuildKedaForTest(sc Scaling, stateful bool) map[string]any { return buildKe
 //     during the cooldown. This is the platform's core cost lever.
 //   - A STATEFUL (database) workload is floored to a minimum of 1 — a database must
 //     never scale to zero (its single replica owns the data volume).
-//   - The CPU-utilization trigger is always present (needs no add-on). An
-//     HTTP-concurrency trigger is appended only when HTTPTrigger is set; true
-//     HTTP-wake additionally requires the keda-http-add-on installed in-cluster.
+//   - The CPU-utilization trigger is always present (needs no add-on). It is the
+//     autoscaler for worker / non-HTTP apps and for HTTP apps that do NOT scale to
+//     zero.
+//
+// NOTE on HTTP WAKE: an HTTP/web app that scales to zero (HTTPTrigger + MinReplicas
+// <=0) is autoscaled by a keda-add-ons-http HTTPScaledObject (httpwake.go), NOT by
+// this ScaledObject — buildValues disables the chart ScaledObject for that app
+// (keda.enabled=false). buildKeda therefore no longer emits the old INERT `http`
+// trigger (a plain ScaledObject `http` trigger does nothing without the add-on
+// routing the request through KEDA); real HTTP wake now flows through the
+// interceptor + HTTPScaledObject instead.
 func buildKeda(sc Scaling, stateful bool) map[string]any {
 	minReplicas := sc.MinReplicas
 	maxReplicas := sc.MaxReplicas
@@ -1013,20 +1109,14 @@ func buildKeda(sc Scaling, stateful bool) map[string]any {
 		minReplicas = 1
 	}
 
+	// The CPU-utilization trigger is the only trigger this plain ScaledObject
+	// carries. HTTP wake for a scale-to-zero web app is handled by a separate
+	// HTTPScaledObject (httpwake.go), not by an inert `http` trigger here.
 	triggers := []map[string]any{{
 		"type":       "cpu",
 		"metricType": "Utilization",
 		"metadata":   map[string]any{"value": fmt.Sprintf("%d", cpuUtil)},
 	}}
-	// HTTP-concurrency trigger (request-rate / true HTTP-wake). Gated behind a
-	// setting because it needs the keda-http-add-on; without the add-on the trigger
-	// is inert, so it is opt-in.
-	if sc.HTTPTrigger && !stateful {
-		triggers = append(triggers, map[string]any{
-			"type":     "http",
-			"metadata": map[string]any{"scaledObjectName": ""},
-		})
-	}
 
 	keda := map[string]any{
 		"enabled":         true,
@@ -1583,7 +1673,15 @@ func (b *KubeBackend) ensureGatewayListeners(ctx context.Context, specs []listen
 			}
 		}
 		added := false
+		dnsChanged := false
 		for _, spec := range specs {
+			// external-dns: accumulate each per-org/project wildcard host under a
+			// managed zone onto the Gateway's hostname annotation, so the controller
+			// publishes the matching (wildcard) record. Done even for a listener that
+			// is already present so re-provisioning backfills DNS for an existing org.
+			if b.addHostToGatewayDNS(gw, spec.hostname) {
+				dnsChanged = true
+			}
 			if existing[spec.name] {
 				continue // idempotent: this listener is already present
 			}
@@ -1595,11 +1693,13 @@ func (b *KubeBackend) ensureGatewayListeners(ctx context.Context, specs []listen
 			existing[spec.name] = true
 			added = true
 		}
-		if !added {
+		if !added && !dnsChanged {
 			return nil
 		}
-		if err := unstructured.SetNestedSlice(gw.Object, listeners, "spec", "listeners"); err != nil {
-			return err
+		if added {
+			if err := unstructured.SetNestedSlice(gw.Object, listeners, "spec", "listeners"); err != nil {
+				return err
+			}
 		}
 		_, err = b.dynamic.Resource(gatewayGVR).Namespace(ns).Update(ctx, gw, metav1.UpdateOptions{})
 		return err
