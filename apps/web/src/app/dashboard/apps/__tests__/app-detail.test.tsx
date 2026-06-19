@@ -30,6 +30,7 @@ vi.mock("@/lib/auth", () => ({
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push }),
+  useSearchParams: () => new URLSearchParams(),
 }));
 
 // Force production-shaped behavior (no demo fallbacks) so the empty/error

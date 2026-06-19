@@ -80,7 +80,9 @@ export function MetricsTimeseries({
 
     setSamples((prev) => {
       const next = [...prev, sample];
-      return next.length > MAX_SAMPLES ? next.slice(next.length - MAX_SAMPLES) : next;
+      return next.length > MAX_SAMPLES
+        ? next.slice(next.length - MAX_SAMPLES)
+        : next;
     });
   }, [snapshot]);
 
