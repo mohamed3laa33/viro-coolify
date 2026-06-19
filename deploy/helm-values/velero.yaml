@@ -1,0 +1,90 @@
+# velero — cluster backup/restore (resources + persistent volumes).
+#
+# WHY: tenant databases (StatefulSets + PVCs) and the control-plane Postgres hold
+# real customer data; a backup tool is required to recover from cluster/node loss.
+# Velero snapshots Kubernetes resources to object storage and (via a CSI/volume
+# plugin) backs up PVC data, on a schedule.
+#
+# This file carries the provider-agnostic pieces; the BackupStorageLocation
+# bucket/region/endpoint are env-driven (VORTEX_VELERO_*) and injected by a
+# second, TEMPLATED inline values block in the helmfile release (a plain .yaml
+# values file is NOT gotmpl-rendered, so the env values must come from there). On
+# DigitalOcean (Spaces is S3-compatible) the AWS plugin is pointed at the Spaces
+# endpoint. If no bucket is configured, the helmfile disables the velero release
+# entirely (no fake/half-installed backups — invariant #6) rather than installing a
+# Velero that silently backs up nowhere.
+#
+# Chart: vmware-tanzu/velero.
+
+# Install the Velero CRDs (Backup, Restore, Schedule, BackupStorageLocation, ...).
+upgradeCRDs: true
+
+# Object-store plugin. AWS plugin works against any S3-compatible store (incl.
+# DigitalOcean Spaces). Pinned, current tag.
+initContainers:
+  - name: velero-plugin-for-aws
+    image: velero/velero-plugin-for-aws:v1.11.0
+    imagePullPolicy: IfNotPresent
+    volumeMounts:
+      - mountPath: /target
+        name: plugins
+
+# Credentials for the object store come from a Secret that the operator pre-creates
+# (key `cloud`, AWS-style INI). We do NOT embed any secret here.
+credentials:
+  useSecret: true
+  existingSecret: velero-cloud-credentials
+
+# NOTE: configuration.backupStorageLocation / volumeSnapshotLocation (bucket,
+# region, S3-compatible endpoint such as https://nyc3.digitaloceanspaces.com) are
+# supplied by the helmfile release's templated inline values block from
+# VORTEX_VELERO_* env — they are intentionally NOT set here.
+
+# Use the File System Backup path (node-agent) so PVC data on any storage class is
+# backed up without relying on cloud volume-snapshot APIs. This is the portable,
+# always-works route for tenant database volumes.
+deployNodeAgent: true
+
+# A default daily backup schedule of all namespaces, retained 30 days. Backups are
+# infrastructure, not a tenant-billable "business value", so a schedule here does
+# not conflict with invariant #1 (no static business values in handlers/UI). Adjust
+# cadence via the observability/SRE owner if needed.
+schedules:
+  daily-all:
+    disabled: false
+    schedule: "0 2 * * *"
+    useOwnerReferencesInBackup: false
+    template:
+      ttl: "720h"
+      storageLocation: default
+      defaultVolumesToFsBackup: true
+
+# Overcommit philosophy (invariant #3): small requests, room to burst during a
+# backup run.
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+
+# The node-agent DaemonSet (file-system backup) — tiny per-node footprint.
+nodeAgent:
+  resources:
+    requests:
+      cpu: 25m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  tolerations:
+    - effect: NoSchedule
+      operator: Exists
+
+# Expose Velero metrics for the kube-prometheus-stack (monitor toggled by the
+# observability agent).
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: false

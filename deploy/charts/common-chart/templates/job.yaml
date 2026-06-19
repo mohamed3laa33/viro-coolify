@@ -30,10 +30,16 @@ spec:
         {{ toYaml .Values.job.podLabels | indent 8 }}
         {{- end }}
     spec:
+      {{- with .Values.job.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
       - name: {{ .Values.job.name | default (include "common-chart.fullname" .) }}-job
+        {{- with .Values.job.containerSecurityContext }}
         securityContext:
-          {{- toYaml .Values.job.containerSecurityContext | nindent 12 }}
+          {{- toYaml . | nindent 12 }}
+        {{- end }}
         image: "{{ .Values.deployment.image.repository }}:{{ .Values.deployment.image.tag | default .Chart.AppVersion }}"
         imagePullPolicy: {{ .Values.deployment.image.pullPolicy }}
         {{- with .Values.job.command }}

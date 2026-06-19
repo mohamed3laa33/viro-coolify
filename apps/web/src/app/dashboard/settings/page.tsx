@@ -799,6 +799,259 @@ function ChargeBreakdownCard({ billing }: { billing: BillingResponse }) {
   );
 }
 
+// Parse a user-entered dollar amount into whole cents. Returns null for any
+// invalid input (non-numeric, negative, NaN/Infinity, or finer than a cent).
+// An empty string maps to 0 — the sentinel that clears the per-org cap.
+function dollarsToCents(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (trimmed === "") return 0;
+  // Allow plain decimals only (no currency symbols / thousands separators), so we
+  // never silently misread "1,000" as "1".
+  if (!/^\d+(\.\d{1,2})?$/.test(trimmed)) return null;
+  const dollars = Number(trimmed);
+  if (!Number.isFinite(dollars) || dollars < 0) return null;
+  return Math.round(dollars * 100);
+}
+
+// The SPEND CAP control: a per-org hard ceiling on the current-period charge.
+// The cap is a real, admin/DB-driven business value (invariant #1) — we read the
+// current value from the org and the live charge it is checked against from the
+// billing summary, never inventing numbers. Setting it calls the API for real
+// (invariant #6: no fake-success) behind an explicit confirmation.
+function SpendCapCard({ billing }: { billing: BillingResponse }) {
+  const { orgs, activeOrgId, authedCall } = useAuth();
+  const activeOrg = orgs.find((o) => o.id === activeOrgId) ?? null;
+
+  // The persisted cap, in cents. Starts from the org and is updated locally only
+  // after a confirmed save succeeds (there is no org refetch hook here), so the
+  // displayed value always reflects what the backend actually accepted.
+  const [savedCapCents, setSavedCapCents] = useState<number | null>(null);
+  const currentCapCents = savedCapCents ?? activeOrg?.spendCapCents ?? 0;
+  const currency = billing.currency ?? billing.plan?.currency;
+
+  // The amount the cap is enforced against today: the projected current-period
+  // charge (base + overage) — exactly what the backend compares to the cap.
+  const projectedChargeCents =
+    typeof billing.chargeCents === "number" ? billing.chargeCents : null;
+
+  // Dollar-denominated input; null means "not yet edited" so we show the current
+  // cap (or blank when uncapped) without clobbering an in-progress edit.
+  const [draft, setDraft] = useState<string | null>(null);
+  const draftValue =
+    draft ?? (currentCapCents > 0 ? (currentCapCents / 100).toFixed(2) : "");
+  const [fieldError, setFieldError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<ActionNotice | null>(null);
+  // Holds the validated cents value awaiting confirmation (null = dialog closed).
+  const [pendingCapCents, setPendingCapCents] = useState<number | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  function onReview(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    setNotice(null);
+    if (!activeOrgId) {
+      setNotice({
+        variant: "error",
+        message: "No active organization to update.",
+      });
+      return;
+    }
+    const cents = dollarsToCents(draftValue);
+    if (cents === null) {
+      setFieldError(
+        "Enter a non-negative dollar amount (up to two decimal places).",
+      );
+      return;
+    }
+    setFieldError(null);
+    setPendingCapCents(cents);
+  }
+
+  async function onConfirm() {
+    if (!activeOrgId || pendingCapCents === null) return;
+    const cents = pendingCapCents;
+    setSaving(true);
+    setNotice(null);
+    try {
+      await authedCall((token, on) =>
+        api.setOrgSpendCap(activeOrgId, { spendCapCents: cents }, token, on),
+      );
+      setSavedCapCents(cents);
+      setDraft(null);
+      setPendingCapCents(null);
+      setNotice({
+        variant: "success",
+        message:
+          cents > 0
+            ? `Spend cap set to ${formatCents(cents, currency)} per billing period.`
+            : "Per-org spend cap cleared — the platform default now applies.",
+      });
+    } catch (err) {
+      setNotice(failureNotice(err, "Couldn't update the spend cap."));
+      setPendingCapCents(null);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // How close the projected charge is to the cap, for an at-a-glance bar.
+  const capPct =
+    currentCapCents > 0 && projectedChargeCents !== null
+      ? Math.min(
+          100,
+          Math.round((projectedChargeCents / currentCapCents) * 100),
+        )
+      : 0;
+  const overCap =
+    currentCapCents > 0 &&
+    projectedChargeCents !== null &&
+    projectedChargeCents >= currentCapCents;
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Spend cap</CardTitle>
+        <CardDescription>
+          A hard ceiling on this period&apos;s charges. When the projected
+          charge reaches the cap, new and oversized workloads are blocked — no
+          surprise bills. Set it to $0 to remove the per-org cap and fall back
+          to the platform default.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {notice && <Notice variant={notice.variant}>{notice.message}</Notice>}
+
+        <div className="grid gap-3 text-sm sm:grid-cols-2">
+          <div className="rounded-md border border-border bg-surface-2 px-4 py-3">
+            <p className="text-xs uppercase tracking-wide text-muted-foreground">
+              Current cap
+            </p>
+            <p className="mt-1 font-medium tabular-nums">
+              {currentCapCents > 0
+                ? `${formatCents(currentCapCents, currency)} / period`
+                : "No per-org cap (platform default applies)"}
+            </p>
+          </div>
+          <div className="rounded-md border border-border bg-surface-2 px-4 py-3">
+            <p className="text-xs uppercase tracking-wide text-muted-foreground">
+              Projected charge this period
+            </p>
+            <p className="mt-1 font-medium tabular-nums">
+              {projectedChargeCents !== null
+                ? formatCents(projectedChargeCents, currency)
+                : "Not available yet"}
+            </p>
+          </div>
+        </div>
+
+        {currentCapCents > 0 && projectedChargeCents !== null && (
+          <div className="space-y-1">
+            <div
+              className="h-2 w-full overflow-hidden rounded-full bg-muted"
+              role="progressbar"
+              aria-valuenow={capPct}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-label="Projected charge against spend cap"
+            >
+              <div
+                className={cn(
+                  "h-full rounded-full",
+                  overCap ? "bg-destructive" : "bg-brand-balloon",
+                )}
+                style={{ width: `${capPct}%` }}
+              />
+            </div>
+            <p
+              className={cn(
+                "text-xs",
+                overCap ? "text-destructive" : "text-muted-foreground",
+              )}
+            >
+              {overCap
+                ? "Cap reached — new and oversized workloads are blocked until usage drops or the cap is raised."
+                : `${capPct}% of the cap used this period.`}
+            </p>
+          </div>
+        )}
+
+        <form onSubmit={onReview} className="space-y-2">
+          <Label htmlFor="spend-cap">Spend cap (USD per billing period)</Label>
+          <div className="flex items-start gap-2">
+            <div className="relative w-48">
+              <span
+                aria-hidden
+                className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground"
+              >
+                $
+              </span>
+              <Input
+                id="spend-cap"
+                type="number"
+                inputMode="decimal"
+                min="0"
+                step="0.01"
+                placeholder="0.00"
+                className="pl-7 tabular-nums"
+                value={draftValue}
+                onChange={(e) => {
+                  setDraft(e.target.value);
+                  if (fieldError) setFieldError(null);
+                }}
+                aria-invalid={fieldError ? true : undefined}
+                aria-describedby={
+                  fieldError ? "spend-cap-error" : "spend-cap-hint"
+                }
+              />
+            </div>
+            <Button type="submit" disabled={!activeOrgId || saving}>
+              Set cap
+            </Button>
+          </div>
+          {fieldError ? (
+            <p id="spend-cap-error" className="text-xs text-destructive">
+              {fieldError}
+            </p>
+          ) : (
+            <p id="spend-cap-hint" className="text-xs text-muted-foreground">
+              Enter $0 to remove the per-org cap. The cap is enforced against
+              the projected charge above.
+            </p>
+          )}
+        </form>
+      </CardContent>
+
+      <ConfirmDialog
+        open={pendingCapCents !== null}
+        title={
+          pendingCapCents === 0 ? "Remove spend cap?" : "Update spend cap?"
+        }
+        description={
+          pendingCapCents === null
+            ? undefined
+            : pendingCapCents === 0
+              ? "This removes the per-org cap; the platform default spend cap will apply instead. Charges may rise to that default before workloads are blocked."
+              : projectedChargeCents !== null &&
+                  pendingCapCents <= projectedChargeCents
+                ? `Set the cap to ${formatCents(pendingCapCents, currency)}. This is at or below the current projected charge of ${formatCents(projectedChargeCents, currency)}, so new and oversized workloads will be blocked immediately.`
+                : `Set the cap to ${formatCents(pendingCapCents, currency)} per billing period. Workloads are blocked once the projected charge reaches this amount.`
+        }
+        confirmLabel={pendingCapCents === 0 ? "Remove cap" : "Set cap"}
+        destructive={
+          pendingCapCents !== null &&
+          projectedChargeCents !== null &&
+          pendingCapCents > 0 &&
+          pendingCapCents <= projectedChargeCents
+        }
+        loading={saving}
+        onConfirm={onConfirm}
+        onCancel={() => {
+          if (!saving) setPendingCapCents(null);
+        }}
+      />
+    </Card>
+  );
+}
+
 function BillingTab() {
   const { activeOrgId, authedCall } = useAuth();
   const [pendingPlan, setPendingPlan] = useState<string | null>(null);
@@ -937,6 +1190,8 @@ function BillingTab() {
       </Card>
 
       <ChargeBreakdownCard billing={billing} />
+
+      <SpendCapCard billing={billing} />
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {plans.map((plan) => {

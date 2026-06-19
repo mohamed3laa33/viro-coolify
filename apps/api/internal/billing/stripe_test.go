@@ -103,6 +103,61 @@ func TestStripePost_RetryOn429(t *testing.T) {
 	}
 }
 
+// TestStripeReportUsage_QuantityIsCents asserts the cents-vs-hours unit fix:
+// ReportUsage posts the quantity it is handed VERBATIM (the same whole-cents the
+// caller computes — never re-scaled into "hours"), with action=increment, against
+// the per-ITEM usage_records path. This pins the end-to-end unit so a cents value
+// produced by Service.ReportUsage lands on Stripe unchanged.
+func TestStripeReportUsage_QuantityIsCents(t *testing.T) {
+	var gotPath, gotQty, gotAction string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_ = r.ParseForm()
+		gotQty = r.PostFormValue("quantity")
+		gotAction = r.PostFormValue("action")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	s := newTestStripe(srv.URL)
+	// Caller passes 1234 CENTS of metered usage; the provider must forward it as-is.
+	if err := s.ReportUsage(context.Background(), "si_metered_1", 1234, time.Unix(1700000000, 0)); err != nil {
+		t.Fatalf("ReportUsage: %v", err)
+	}
+	if want := "/v1/subscription_items/si_metered_1/usage_records"; gotPath != want {
+		t.Fatalf("path = %q, want %q", gotPath, want)
+	}
+	if gotQty != "1234" {
+		t.Fatalf("posted quantity = %q, want %q (whole cents, not hours)", gotQty, "1234")
+	}
+	if gotAction != "increment" {
+		t.Fatalf("action = %q, want increment", gotAction)
+	}
+}
+
+// TestStripeReportUsage_NoopOnZero asserts a zero/negative quantity makes no HTTP
+// call at all (nothing to bill), so an empty metering tick never hits Stripe.
+func TestStripeReportUsage_NoopOnZero(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	s := newTestStripe(srv.URL)
+	if err := s.ReportUsage(context.Background(), "si_metered_1", 0, time.Now()); err != nil {
+		t.Fatalf("ReportUsage(0): %v", err)
+	}
+	if err := s.ReportUsage(context.Background(), "si_metered_1", -5, time.Now()); err != nil {
+		t.Fatalf("ReportUsage(-5): %v", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 0 {
+		t.Fatalf("zero/negative quantity must not call Stripe, got %d calls", got)
+	}
+}
+
 func TestStripePost_ContextCancelled(t *testing.T) {
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

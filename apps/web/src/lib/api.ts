@@ -58,6 +58,10 @@ export interface Org {
   id: string;
   name: string;
   slug: string;
+  // Per-org hard spend cap in whole cents (current-period charge ceiling). 0 (or
+  // omitted on older API builds) means no per-org cap — the platform default
+  // applies. Admin/DB-driven; set via setOrgSpendCap.
+  spendCapCents?: number;
   createdAt: string;
 }
 
@@ -65,6 +69,14 @@ export interface Org {
 export interface UpdateOrgInput {
   name?: string;
   billingEmail?: string;
+}
+
+// Payload for setting an org's hard spend cap. `spendCapCents` is the per-org
+// current-period charge ceiling in whole cents; 0 clears the per-org cap so the
+// platform default (PlatformSettings.DefaultSpendCapCents) applies instead. The
+// value is admin/DB-driven — never hardcoded in the UI (invariant #1).
+export interface SetOrgSpendCapInput {
+  spendCapCents: number;
 }
 
 // Status is an open string from the backend:
@@ -152,6 +164,26 @@ export interface DatabaseConnInfo {
 // plus its `connection` block.
 export interface DatabaseDetail extends Database {
   connection: DatabaseConnInfo;
+}
+
+// BackupStatus mirrors the backend lifecycle of a managed database snapshot:
+// pending (queued) → running → succeeded | failed. It is an open string so a
+// newer backend phase never breaks the client.
+export type BackupStatus = string;
+
+// A point-in-time snapshot of a managed database. Mirrors the backend backup
+// record. `sizeBytes`/`finishedAt` are populated once the snapshot completes;
+// `error` carries the failure reason when status is "failed" (honest failure,
+// never a fake success — invariant #6).
+export interface DatabaseBackup {
+  id: string;
+  orgId: string;
+  databaseId: string;
+  status: BackupStatus;
+  sizeBytes?: number;
+  error?: string;
+  createdAt: string;
+  finishedAt?: string;
 }
 
 export interface Plan {
@@ -568,6 +600,27 @@ export interface PodMetrics {
 }
 
 // ---------------------------------------------------------------------------
+// App rollout / health status (live deploy progress)
+// ---------------------------------------------------------------------------
+
+// A LIVE point-in-time view of an app's rollout and health from the deploy
+// backend. `status` is the reconciled workload status (running | deploying |
+// stopped | error | …, same open vocabulary as App.status). `phase` is the raw
+// controller phase reported by the backend (e.g. "Running", "Pending", "Scaled
+// to zero"). Replica counts come straight from the Deployment/StatefulSet:
+// `readyReplicas` of `replicas` are ready. When the backend cannot be reached
+// `available` is false (with an `unavailable` reason) and the data is honestly
+// absent — never synthesized (invariant #6).
+export interface AppStatusInfo {
+  status: AppStatus;
+  phase?: string;
+  replicas?: number;
+  readyReplicas?: number;
+  available?: boolean;
+  unavailable?: string;
+}
+
+// ---------------------------------------------------------------------------
 // Legacy time-series metrics (kept for the dashboard sparklines / demo)
 // ---------------------------------------------------------------------------
 
@@ -725,6 +778,16 @@ export function appLogStreamUrl(orgId: string, appId: string): string {
 }
 
 /**
+ * Absolute URL of the live SSE rollout/health stream for an app
+ * (`?follow=true`). Like the log stream it is consumed via a fetch reader rather
+ * than EventSource so the request carries the HttpOnly auth cookies
+ * (`credentials: "include"`). See {@link streamAppStatus}.
+ */
+export function appStatusStreamUrl(orgId: string, appId: string): string {
+  return buildUrl(`/v1/orgs/${orgId}/apps/${appId}/status?follow=true`);
+}
+
+/**
  * Open the live app log SSE stream and invoke `onLine` for each streamed log
  * line. Uses fetch + a streaming reader (not EventSource) so the HttpOnly auth
  * cookies are sent. Returns a disposer that aborts the underlying request; call
@@ -809,6 +872,82 @@ function parseSseFrame(
   const payload = dataParts.join("\n");
   if (isError) onError?.(payload);
   else onLine(payload);
+}
+
+/**
+ * Open the live app rollout/health SSE stream and invoke `onStatus` for each
+ * streamed {@link AppStatusInfo} snapshot. Uses fetch + a streaming reader (not
+ * EventSource) so the HttpOnly auth cookies are sent. Returns a disposer that
+ * aborts the underlying request; call it on unmount to close the stream and
+ * avoid a leak.
+ *
+ * Each SSE `data:` frame carries one JSON-encoded status snapshot; an
+ * `event: error` frame is surfaced via the optional `onError` callback. Frames
+ * that fail to parse as JSON are skipped (best-effort), and transport failures
+ * (including a deliberate abort) resolve quietly rather than throwing.
+ */
+export function streamAppStatus(
+  orgId: string,
+  appId: string,
+  onStatus: (status: AppStatusInfo) => void,
+  onError?: (message: string) => void,
+): () => void {
+  const controller = new AbortController();
+
+  void (async () => {
+    if (!API_BASE_URL_CONFIGURED) {
+      onError?.("The API base URL is not configured.");
+      return;
+    }
+    let res: Response;
+    try {
+      res = await fetch(appStatusStreamUrl(orgId, appId), {
+        headers: { Accept: "text/event-stream" },
+        credentials: "include",
+        signal: controller.signal,
+      });
+    } catch {
+      if (!controller.signal.aborted) onError?.("Status stream unavailable.");
+      return;
+    }
+    if (!res.ok || !res.body) {
+      onError?.(`Status stream failed (${res.status}).`);
+      return;
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    // Each non-error data frame is a JSON snapshot; decode it before dispatch.
+    const onLine = (line: string): void => {
+      let snapshot: AppStatusInfo;
+      try {
+        snapshot = JSON.parse(line) as AppStatusInfo;
+      } catch {
+        // Skip malformed frames rather than tearing down the whole stream.
+        return;
+      }
+      onStatus(snapshot);
+    };
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        // SSE frames are separated by a blank line.
+        let sep: number;
+        while ((sep = buf.indexOf("\n\n")) >= 0) {
+          const frame = buf.slice(0, sep);
+          buf = buf.slice(sep + 2);
+          parseSseFrame(frame, onLine, onError);
+        }
+      }
+    } catch {
+      // Aborted (unmount) or transport drop — both are normal stop conditions.
+    }
+  })();
+
+  return () => controller.abort();
 }
 
 async function request<T>(
@@ -977,6 +1116,25 @@ export const api = {
   ): Promise<Org> {
     return request<Org>(`/v1/orgs/${orgId}`, {
       method: "PATCH",
+      body: input,
+      token,
+      onUnauthorized,
+      signal: opts?.signal,
+    });
+  },
+
+  // PUT /orgs/{org}/spend-cap: set the org's hard spend cap (whole cents; 0
+  // clears the per-org cap so the platform default applies). Returns the updated
+  // org. The cap value is admin/DB-driven — the UI must not invent a default.
+  setOrgSpendCap(
+    orgId: string,
+    input: SetOrgSpendCapInput,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<Org> {
+    return request<Org>(`/v1/orgs/${orgId}/spend-cap`, {
+      method: "PUT",
       body: input,
       token,
       onUnauthorized,
@@ -1351,6 +1509,53 @@ export const api = {
     );
   },
 
+  // GET /databases/{id}/backups: the database's snapshot history (newest first).
+  listDatabaseBackups(
+    orgId: string,
+    databaseId: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<ListResponse<DatabaseBackup>> {
+    return request<ListResponse<DatabaseBackup>>(
+      `/v1/orgs/${orgId}/databases/${databaseId}/backups`,
+      { token, onUnauthorized, signal: opts?.signal },
+    );
+  },
+
+  // POST /databases/{id}/backups: trigger a new point-in-time snapshot. Returns
+  // the backup record (initially pending/running); poll listDatabaseBackups for
+  // completion.
+  createDatabaseBackup(
+    orgId: string,
+    databaseId: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<DatabaseBackup> {
+    return request<DatabaseBackup>(
+      `/v1/orgs/${orgId}/databases/${databaseId}/backups`,
+      { method: "POST", token, onUnauthorized, signal: opts?.signal },
+    );
+  },
+
+  // POST /databases/{id}/backups/{backupId}/restore: restore the database from a
+  // prior snapshot (destructive — overwrites current data). Returns the updated
+  // database.
+  restoreDatabase(
+    orgId: string,
+    databaseId: string,
+    backupId: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<Database> {
+    return request<Database>(
+      `/v1/orgs/${orgId}/databases/${databaseId}/backups/${backupId}/restore`,
+      { method: "POST", token, onUnauthorized, signal: opts?.signal },
+    );
+  },
+
   deployDatabase(
     orgId: string,
     databaseId: string,
@@ -1694,6 +1899,24 @@ export const api = {
     opts?: CallOpts,
   ): Promise<PodMetrics> {
     return request<PodMetrics>(`/v1/orgs/${orgId}/apps/${appId}/metrics`, {
+      token,
+      onUnauthorized,
+      signal: opts?.signal,
+    });
+  },
+
+  // GET /apps/{id}/status: a LIVE rollout/health snapshot (reconciled status,
+  // controller phase, ready/total replicas). `available: false` means the deploy
+  // backend was unreachable — the UI must render an honest unknown state, never
+  // fake it. For continuous updates use streamAppStatus.
+  getAppStatus(
+    orgId: string,
+    appId: string,
+    token: string,
+    onUnauthorized?: OnUnauthorized,
+    opts?: CallOpts,
+  ): Promise<AppStatusInfo> {
+    return request<AppStatusInfo>(`/v1/orgs/${orgId}/apps/${appId}/status`, {
       token,
       onUnauthorized,
       signal: opts?.signal,

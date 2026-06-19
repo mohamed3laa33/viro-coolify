@@ -2,6 +2,36 @@
 # Build context is the repo root:  docker build -f docker/Dockerfile.api .
 # syntax=docker/dockerfile:1
 
+# --- helm stage --------------------------------------------------------------
+# The API's KubeBackend deploys tenant workloads by exec'ing the `helm` binary
+# (see apps/api/internal/kube/helm.go — `helm` is resolved from PATH). The final
+# image is distroless/static (no shell, no package manager), so we vendor a
+# PINNED, CHECKSUM-VERIFIED static helm release here and COPY only the binary in.
+# helm's linux release is a static (CGO-free) binary, so it runs on distroless.
+# Only `helm` is exec'd by the API — kubectl is not invoked anywhere — so we do
+# not ship kubectl.
+FROM alpine:3.21 AS helm
+# Bump HELM_VERSION + both checksums together when upgrading helm.
+ARG HELM_VERSION=3.21.1
+ARG HELM_SHA256_AMD64=a349c62d6ab2d5d11f044fc0d3afa6deed7d27cc7d5c351f536b169d9fc2cc1a
+ARG HELM_SHA256_ARM64=9b3deeecb56c4795aa806858fa4d6388c049e3edfcd771723bd12c1cbef66893
+# TARGETARCH is provided automatically by BuildKit (amd64 / arm64).
+ARG TARGETARCH
+RUN apk add --no-cache curl tar
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      amd64) helm_sha="${HELM_SHA256_AMD64}" ;; \
+      arm64) helm_sha="${HELM_SHA256_ARM64}" ;; \
+      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    tarball="helm-v${HELM_VERSION}-linux-${TARGETARCH}.tar.gz"; \
+    curl -fsSL -o "/tmp/${tarball}" "https://get.helm.sh/${tarball}"; \
+    echo "${helm_sha}  /tmp/${tarball}" | sha256sum -c -; \
+    tar -xzf "/tmp/${tarball}" -C /tmp; \
+    install -m 0755 "/tmp/linux-${TARGETARCH}/helm" /usr/local/bin/helm; \
+    /usr/local/bin/helm version --client
+
+# --- go build stage ----------------------------------------------------------
 FROM golang:1.26-alpine AS build
 WORKDIR /src
 RUN apk add --no-cache ca-certificates
@@ -18,8 +48,12 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
       -X github.com/mohamed3laa33/viro-coolify/apps/api/internal/version.BuildTime=${BUILD_TIME}" \
     -o /out/viro-api ./cmd/api
 
+# --- final image -------------------------------------------------------------
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/viro-api /viro-api
+# Static helm binary on PATH (/usr/local/bin is on distroless' default PATH);
+# 0755 so the nonroot user can execute it. Required by KubeBackend in prod.
+COPY --from=helm /usr/local/bin/helm /usr/local/bin/helm
 EXPOSE 8080
 USER nonroot:nonroot
 ENTRYPOINT ["/viro-api"]

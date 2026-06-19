@@ -4,9 +4,12 @@ nameOverride: ""
 fullnameOverride: ""
 
 image:
-  # Images are published to the GitHub Container Registry by
-  # .github/workflows/images.yml. Override per-environment with --set if needed.
-  registry: ghcr.io/mohamed3laa33
+  # Container registry that hosts the vortex-api / vortex-web images. This is a
+  # platform value, not a personal account: override it per-environment with
+  # --set image.registry=... (the helmfile sources VORTEX_IMAGE_REGISTRY and the
+  # CD workflow sets ghcr.io/<repo-owner>). Default is the DigitalOcean Container
+  # Registry path used by deploy/scripts/02-build-and-push.sh.
+  registry: registry.digitalocean.com/vortex
   pullPolicy: IfNotPresent
   tag: "latest"
   # Name of a pre-created docker-registry Secret granting pull access to GHCR.
@@ -112,11 +115,18 @@ web_public_api_url: "https://api.viro.example.com"
 
 # Control-plane routing. The control plane normally runs on Docker; when run on
 # K8s it routes via the Gateway API (NOT the retired ingress-nginx), attaching to
-# the shared Vortex Gateway (deploy/k8s/gateway.yaml) — one LB for everything.
+# the shared Vortex Gateway — one LB for everything.
+#
+# CANONICAL NAMESPACE: the control plane, the in-cluster Postgres and the shared
+# Gateway all live in the "vortex" namespace (see deploy/helmfile.yaml). The
+# gatewayNamespace below MUST match where the shared Gateway is installed (the
+# vortex-bootstrap chart deploys it into its release namespace, "vortex"). Do NOT
+# confuse this with networkPolicy.gatewayNamespace above, which is the Envoy
+# data-plane namespace (envoy-gateway-system).
 ingress:
   enabled: false
   gatewayName: vortex
-  gatewayNamespace: vortex-system
+  gatewayNamespace: vortex
   apiHost: api.vortex.v60ai.com
   webHost: app.vortex.v60ai.com
 

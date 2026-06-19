@@ -29,12 +29,15 @@ dist/
 /apps/api/tmp/
 coverage.out
 coverage.html
+coverage/
 *.test
 
 # ---- Node / Next.js ----
 node_modules/
 .next/
+coverage/
 out/
+coverage/
 .turbo/
 .pnpm-store/
 npm-debug.log*

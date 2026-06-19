@@ -89,6 +89,19 @@ func (s *Service) ProcessEvent(ctx context.Context, evt StripeEvent) (processed 
 		if err := s.applySubscriptionEvent(ctx, evt); err != nil {
 			return false, err // do NOT mark processed; let Stripe retry
 		}
+	case "invoice.payment_failed":
+		// A failed charge moves the org into dunning (past_due). Stripe usually also
+		// fires customer.subscription.updated with status=past_due, but applying it
+		// here too is idempotent (AdvanceDunning is a no-op once already in dunning),
+		// so the dunning state lands even if the subscription event is missed.
+		if err := s.applyInvoicePaymentFailed(ctx, evt); err != nil {
+			return false, err
+		}
+	case "invoice.payment_succeeded":
+		// A successful charge clears dunning back to active. No-op when not in dunning.
+		if err := s.applyInvoicePaymentSucceeded(ctx, evt); err != nil {
+			return false, err
+		}
 	default:
 		// Unhandled event type: acknowledged, nothing to do (still mark it).
 	}
@@ -171,6 +184,39 @@ func (s *Service) applySubscriptionEvent(ctx context.Context, evt StripeEvent) e
 		sub.CurrentPeriodEnd = time.Unix(pe, 0).UTC()
 	}
 	return s.store.UpsertSubscription(ctx, sub)
+}
+
+// applyInvoicePaymentFailed moves the billed org into dunning (past_due) on a
+// failed charge. An invoice event's data.object is an Invoice carrying the customer
+// (cus_) and subscription (sub_) ids; we resolve the org from those (and any org
+// metadata) and record the first dunning step. A missing/unmappable org is a
+// successful no-op (nothing to dun). This does NOT escalate to unpaid — escalation
+// cadence is a separate (admin/scheduler) decision; the webhook only records that a
+// payment failed.
+func (s *Service) applyInvoicePaymentFailed(ctx context.Context, evt StripeEvent) error {
+	sub, err := s.resolveOrg(ctx, evt.MetadataOrgID, evt.ClientReference, evt.Customer, evt.Subscription)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	return s.AdvanceDunning(ctx, sub.OrgID, false)
+}
+
+// applyInvoicePaymentSucceeded clears the billed org's dunning state back to active
+// on a successful charge. Resolution mirrors applyInvoicePaymentFailed. A no-op when
+// the org is not in dunning, is canceled, or cannot be mapped.
+func (s *Service) applyInvoicePaymentSucceeded(ctx context.Context, evt StripeEvent) error {
+	sub, err := s.resolveOrg(ctx, evt.MetadataOrgID, evt.ClientReference, evt.Customer, evt.Subscription)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	_, err = s.ClearDunning(ctx, sub.OrgID)
+	return err
 }
 
 // resolveOrg finds the org's subscription by trying, in order: explicit org ids

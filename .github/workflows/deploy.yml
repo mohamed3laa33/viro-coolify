@@ -1,14 +1,30 @@
 name: Deploy to DigitalOcean
 
-# CD pipeline: deploys the Vortex API + web images (already built and pushed to
-# the GitHub Container Registry by images.yml) to the DOKS cluster via Helm.
+# CD pipeline: bootstraps the platform AND deploys the Vortex control plane to the
+# DOKS cluster.
+#
+# It first runs `helmfile apply --selector tier=platform` to stand up the platform
+# prerequisites (cert-manager, Envoy Gateway, KEDA, metrics-server) and the
+# vortex-bootstrap chart (in-cluster Postgres + shared Gateway + GatewayClass +
+# DNS-01 issuer + wildcard TLS), then runs a targeted `helm upgrade --install` of
+# the control-plane chart with the GHCR images that images.yml already built/pushed,
+# so the image tag / registry / pull-secret are driven by CD.
+#
+# CANONICAL NAMESPACE = "vortex" (matches deploy/helmfile.yaml, the chart and the
+# deploy/k8s manifests). The control plane, in-cluster Postgres and shared Gateway
+# all live there.
 #
 # Trigger: a version tag (v*) or a manual run. Requires these repo secrets:
 #   DIGITALOCEAN_ACCESS_TOKEN    - DO API token (kubernetes access)
 #   DO_CLUSTER_NAME              - DOKS cluster name (e.g. vortex)
 #   VORTEX_JWT_SECRET            - production JWT signing secret
 #   VORTEX_SECRET_ENCRYPTION_KEY - app-secret encryption key (API refuses to boot without it)
-#   VORTEX_DATABASE_URL          - managed Postgres connection string
+#   VORTEX_DATABASE_URL          - Postgres connection string (managed PG, or the
+#                                  in-cluster vortex-postgres the bootstrap installs)
+#   VORTEX_PG_PASSWORD           - password for the in-cluster bootstrap Postgres
+#   VORTEX_DO_TOKEN              - DO API token for cert-manager DNS-01 wildcard issuance
+#   VORTEX_BASE_DOMAIN           - (optional) platform base domain (default vortex.v60ai.com)
+#   VORTEX_ADMIN_EMAILS          - (optional) comma-separated admin emails
 #   VORTEX_STRIPE_SECRET_KEY     - Stripe key (optional)
 #   VORTEX_STRIPE_WEBHOOK_SECRET - Stripe webhook secret (optional)
 #   GHCR_PULL_TOKEN              - (optional) PAT with read:packages for a durable
@@ -35,6 +51,9 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
+  # Canonical control-plane namespace (see deploy/helmfile.yaml).
+  NAMESPACE: vortex
+  BASE_DOMAIN: ${{ vars.VORTEX_BASE_DOMAIN || 'vortex.v60ai.com' }}
 
 jobs:
   deploy:
@@ -66,29 +85,67 @@ jobs:
       - name: Configure kubectl for DOKS
         run: doctl kubernetes cluster kubeconfig save "${{ secrets.DO_CLUSTER_NAME }}"
 
+      # Install helm + helmfile on the runner so every subsequent step (helmfile,
+      # helm, kubectl) shares one environment.
+      - name: Install helm
+        uses: azure/setup-helm@v4
+        with:
+          version: "v3.16.3"
+
+      - name: Install helmfile
+        uses: mamezou-tech/setup-helmfile@v2.1.0
+        with:
+          helmfile-version: "v0.169.1"
+
+      # Stand up the platform prerequisites (cert-manager, Envoy Gateway, KEDA,
+      # metrics-server) and the vortex-bootstrap chart (Postgres + shared Gateway +
+      # GatewayClass + DNS-01 issuer + wildcard TLS) BEFORE the control-plane chart.
+      # The control-plane release (tier=controlplane) is excluded here so its image
+      # tag / registry / pull-secret are driven by the targeted helm upgrade below.
+      - name: Bootstrap platform (helmfile apply)
+        env:
+          VORTEX_BASE_DOMAIN: ${{ env.BASE_DOMAIN }}
+          VORTEX_JWT_SECRET: ${{ secrets.VORTEX_JWT_SECRET }}
+          VORTEX_SECRET_ENCRYPTION_KEY: ${{ secrets.VORTEX_SECRET_ENCRYPTION_KEY }}
+          VORTEX_DATABASE_URL: ${{ secrets.VORTEX_DATABASE_URL }}
+          VORTEX_PG_PASSWORD: ${{ secrets.VORTEX_PG_PASSWORD }}
+          VORTEX_DO_TOKEN: ${{ secrets.VORTEX_DO_TOKEN }}
+        run: |
+          helm plugin install https://github.com/databus23/helm-diff || true
+          helmfile -f deploy/helmfile.yaml --selector tier=platform apply --wait
+
       - name: Create / refresh GHCR pull secret
         env:
           GHCR_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OWNER: ${{ github.repository_owner }}
         run: |
-          kubectl create namespace viro --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
           TOKEN="${GHCR_TOKEN:-$GITHUB_TOKEN}"
-          kubectl -n viro create secret docker-registry ghcr-pull \
+          kubectl -n "$NAMESPACE" create secret docker-registry ghcr-pull \
             --docker-server="$REGISTRY" \
             --docker-username="$OWNER" \
             --docker-password="$TOKEN" \
             --dry-run=client -o yaml | kubectl apply -f -
 
-      - name: Helm deploy
+      # Targeted upgrade of just the control-plane chart with the CD-resolved GHCR
+      # images. Routing attaches to the shared Gateway the bootstrap step installed
+      # in the canonical "vortex" namespace.
+      - name: Helm deploy (control plane)
         env:
           OWNER: ${{ github.repository_owner }}
         run: |
           helm upgrade --install vortex deploy/helm/viro \
-            --namespace viro --create-namespace \
+            --namespace "$NAMESPACE" --create-namespace \
             --set image.registry="${REGISTRY}/${OWNER}" \
             --set image.tag="${{ steps.tag.outputs.tag }}" \
             --set image.pullSecret="ghcr-pull" \
+            --set ingress.enabled=true \
+            --set ingress.gatewayName=vortex \
+            --set ingress.gatewayNamespace="$NAMESPACE" \
+            --set ingress.apiHost="api.${BASE_DOMAIN}" \
+            --set ingress.webHost="app.${BASE_DOMAIN}" \
+            --set web_public_api_url="https://api.${BASE_DOMAIN}" \
             --set secrets.jwtSecret="${{ secrets.VORTEX_JWT_SECRET }}" \
             --set secrets.secretEncryptionKey="${{ secrets.VORTEX_SECRET_ENCRYPTION_KEY }}" \
             --set secrets.databaseUrl="${{ secrets.VORTEX_DATABASE_URL }}" \
@@ -96,7 +153,8 @@ jobs:
             --set secrets.stripeWebhookSecret="${{ secrets.VORTEX_STRIPE_WEBHOOK_SECRET }}" \
             --wait --timeout 5m
 
+      # Release name "vortex" + chart name "viro" => deployments vortex-viro-{api,web}.
       - name: Rollout status
         run: |
-          kubectl -n viro rollout status deploy/vortex-viro-api --timeout=3m
-          kubectl -n viro rollout status deploy/vortex-viro-web --timeout=3m
+          kubectl -n "$NAMESPACE" rollout status deploy/vortex-viro-api --timeout=3m
+          kubectl -n "$NAMESPACE" rollout status deploy/vortex-viro-web --timeout=3m

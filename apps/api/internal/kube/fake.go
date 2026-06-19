@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"time"
 )
 
 // FakeBackend is an in-memory Backend test double for unit tests in OTHER
@@ -46,11 +47,50 @@ type FakeBackend struct {
 	// cert Secret name so tests can assert the listener references the right cert.
 	GatewayListeners map[string]string
 
+	// OrgWildcards records each org slug an EnsureOrgWildcard was provisioned for,
+	// mapping org slug -> the project slugs included, so org-TLS tests can assert a
+	// new org got its per-org wildcard cert + listeners (and which projects were
+	// covered).
+	OrgWildcards map[string][]string
+
+	// GatewayShardOf records which Gateway SHARD each attached custom-domain host
+	// landed on (host -> Gateway name), mirroring the real backend's auto-sharding
+	// (gateway_shard.go). Shard 0 is the primary Gateway (FakeGatewayName); once a
+	// shard reaches FakeShardBudget custom-domain listeners, the next host overflows
+	// to a freshly-named "<primary>-shard-<n>" Gateway. Tests assert that the pool
+	// scales past one Gateway's listener ceiling without error.
+	GatewayShardOf map[string]string
+	// FakeGatewayName is the primary (shard 0) Gateway name used when simulating
+	// sharding. Defaults to "vortex" when empty.
+	FakeGatewayName string
+	// FakeShardBudget is the per-shard custom-domain listener capacity the fake
+	// simulates before overflowing to a new shard. Defaults to maxGatewayListeners
+	// (minus the primary's reserved base listeners on shard 0) when <= 0.
+	FakeShardBudget int
+
 	// PhaseOverride, when set for a "<namespace>/<release>" key, forces Status to
 	// report that Phase verbatim (e.g. "Failed") instead of deriving it from the
 	// replica count. It lets tests drive the reconciler down the failed/pending
 	// paths the replica-count derivation can't otherwise produce.
 	PhaseOverride map[string]string
+
+	// RolloutOverride, when set for a "<namespace>/<release>" key, forces
+	// AppRolloutStatus to return that RolloutStatus verbatim, letting tests drive
+	// the UI/handler down the progressing/degraded paths the replica-count
+	// derivation can't otherwise produce.
+	RolloutOverride map[string]RolloutStatus
+
+	// Backups records every database backup created via BackupDatabase, keyed by
+	// "<namespace>/<release>" (newest appended last). ListDatabaseBackups returns
+	// them newest first. It is an HONEST in-memory record, not a fake-success
+	// path: a backup only appears here because BackupDatabase was actually called.
+	Backups map[string][]DatabaseBackup
+	// BackupSchedules records the latest EnsureBackupSchedule schedule per
+	// "<namespace>/<release>" (empty schedule removes the entry).
+	BackupSchedules map[string]string
+	// Restores records every RestoreDatabase call as a "<namespace>/<release>" ->
+	// list of restored backup names, so tests can assert a restore was requested.
+	Restores map[string][]string
 
 	// MetricsAvailable controls whether Metrics reports live data. When false the
 	// fake mimics a cluster without a metrics-server (honest "unavailable").
@@ -75,7 +115,14 @@ func NewFakeBackend() *FakeBackend {
 		AppSecrets:       map[string]map[string]string{},
 		DomainCerts:      map[string]bool{},
 		GatewayListeners: map[string]string{},
+		OrgWildcards:     map[string][]string{},
+		GatewayShardOf:   map[string]string{},
+		FakeGatewayName:  "vortex",
 		PhaseOverride:    map[string]string{},
+		RolloutOverride:  map[string]RolloutStatus{},
+		Backups:          map[string][]DatabaseBackup{},
+		BackupSchedules:  map[string]string{},
+		Restores:         map[string][]string{},
 		LogLines:         "fake log line\n",
 		// Deterministic test values: a deployed workload reports a fixed live usage
 		// so platform/handler tests can assert REAL (non-synthetic) numbers.
@@ -247,8 +294,12 @@ func (f *FakeBackend) RemoveDomainCertificate(_ context.Context, host string) er
 	return nil
 }
 
-// EnsureGatewayListener records that host was attached to the shared Gateway with
-// the given cert Secret (defaulting to the derived per-domain Secret name).
+// EnsureGatewayListener records that host was attached to a Gateway in the shard
+// pool with the given cert Secret (defaulting to the derived per-domain Secret
+// name), simulating the real backend's auto-sharding: it places the host on the
+// first shard with capacity, overflowing to a new "<primary>-shard-<n>" Gateway
+// once each is full, so the fake NEVER errors at a 64-listener ceiling. Idempotent
+// per host (re-attaching keeps the existing placement).
 func (f *FakeBackend) EnsureGatewayListener(_ context.Context, host, certSecret string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -256,15 +307,106 @@ func (f *FakeBackend) EnsureGatewayListener(_ context.Context, host, certSecret 
 	if certSecret == "" {
 		certSecret = DomainCertSecret(host)
 	}
+	if _, ok := f.GatewayListeners[host]; !ok {
+		// New host: allocate it to a shard.
+		f.GatewayShardOf[host] = f.allocateFakeShard()
+	}
 	f.GatewayListeners[host] = certSecret
 	return nil
 }
 
-// RemoveGatewayListener clears the recorded shared-Gateway listener for host.
+// fakePrimaryGateway returns the configured primary (shard 0) Gateway name.
+func (f *FakeBackend) fakePrimaryGateway() string {
+	if f.FakeGatewayName == "" {
+		return "vortex"
+	}
+	return f.FakeGatewayName
+}
+
+// fakeShardBudget is the simulated per-shard custom-domain listener capacity.
+func (f *FakeBackend) fakeShardBudget() int {
+	if f.FakeShardBudget > 0 {
+		return f.FakeShardBudget
+	}
+	return maxGatewayListeners
+}
+
+// allocateFakeShard returns the Gateway name the next NEW custom-domain host
+// should land on, mirroring allocateListenerShard: the lowest-index shard with
+// remaining capacity, else a brand-new shard. The primary (shard 0) reserves
+// baseListenerReserve slots for its wildcard/http listeners. The fake counts only
+// custom-domain placements (it does not model the primary's wildcard listener
+// object), so its budget is approximate vs the real backend — it models the
+// BEHAVIOR (overflow without error, monotonic shard growth), not byte-exact
+// counts. Caller holds f.mu.
+func (f *FakeBackend) allocateFakeShard() string {
+	primary := f.fakePrimaryGateway()
+	budget := f.fakeShardBudget()
+
+	// Count current custom-domain listeners per shard.
+	counts := map[string]int{}
+	for _, gw := range f.GatewayShardOf {
+		counts[gw]++
+	}
+	// Highest existing shard index (to know where the next new shard goes).
+	maxIdx := 0
+	for gw := range counts {
+		if idx, ok := gatewayShardIndex(primary, gw); ok && idx > maxIdx {
+			maxIdx = idx
+		}
+	}
+	// Walk shards 0..maxIdx looking for free capacity.
+	for idx := 0; idx <= maxIdx; idx++ {
+		name := gatewayShardName(primary, idx)
+		shardCap := budget
+		if idx == 0 {
+			shardCap -= baseListenerReserve
+		}
+		if counts[name] < shardCap {
+			return name
+		}
+	}
+	// All full (or pool empty): the next shard. When the pool is empty this is the
+	// primary (idx 0); otherwise it is maxIdx+1.
+	if len(counts) == 0 {
+		return primary
+	}
+	return gatewayShardName(primary, maxIdx+1)
+}
+
+// RemoveGatewayListener clears the recorded shard-pool listener for host (and its
+// shard placement). Idempotent.
 func (f *FakeBackend) RemoveGatewayListener(_ context.Context, host string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	delete(f.GatewayListeners, strings.ToLower(strings.TrimSpace(host)))
+	host = strings.ToLower(strings.TrimSpace(host))
+	delete(f.GatewayListeners, host)
+	delete(f.GatewayShardOf, host)
+	return nil
+}
+
+// EnsureOrgWildcard records that a per-org wildcard cert + listeners were
+// provisioned for orgSlug (with the supplied project slugs). It is idempotent and
+// MERGES projects across calls so re-provisioning with more projects accumulates
+// coverage, mirroring the real backend re-issuing the cert with added SANs.
+func (f *FakeBackend) EnsureOrgWildcard(_ context.Context, orgSlug string, projectSlugs []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	orgSlug = strings.ToLower(strings.TrimSpace(orgSlug))
+	if orgSlug == "" {
+		return nil
+	}
+	seen := map[string]bool{}
+	merged := make([]string, 0, len(f.OrgWildcards[orgSlug])+len(projectSlugs))
+	for _, p := range append(append([]string{}, f.OrgWildcards[orgSlug]...), projectSlugs...) {
+		p = strings.ToLower(strings.TrimSpace(p))
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		merged = append(merged, p)
+	}
+	f.OrgWildcards[orgSlug] = merged
 	return nil
 }
 
@@ -284,4 +426,117 @@ func (f *FakeBackend) Status(_ context.Context, namespace, release string) (Stat
 		phase = "Scaled to zero"
 	}
 	return Status{Phase: phase, Replicas: n, ReadyReplicas: n}, nil
+}
+
+// AppRolloutStatus returns a deterministic rollout view for a deployed release
+// derived from its recorded replica count (every desired replica is ready/updated
+// — the fake double has no real rollout in flight), or a test-supplied override.
+func (f *FakeBackend) AppRolloutStatus(_ context.Context, namespace, release string) (RolloutStatus, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k := key(namespace, release)
+	if _, ok := f.Applied[k]; !ok {
+		return RolloutStatus{Health: healthUnknown, Phase: "Unknown"},
+			fmt.Errorf("kube(fake): no release %q in %q", release, namespace)
+	}
+	if rs, ok := f.RolloutOverride[k]; ok {
+		return rs, nil
+	}
+	n := f.Replicas[k]
+	rs := RolloutStatus{
+		Desired:            n,
+		Ready:              n,
+		Updated:            n,
+		Available:          n,
+		ObservedGeneration: 1,
+		Generation:         1,
+	}
+	rs.Phase = rolloutPhase(rs)
+	rs.Health = deriveHealth(rs)
+	return rs, nil
+}
+
+// BackupDatabase records an honest in-memory backup for the database and returns
+// its descriptor. It does not run a dump (no cluster) — it records that a backup
+// was requested, with phase "Succeeded" so platform/handler tests can assert the
+// backup history surface. A release that was never applied errors (no fake
+// success for a non-existent database).
+func (f *FakeBackend) BackupDatabase(_ context.Context, spec BackupSpec) (DatabaseBackup, error) {
+	if dbEngine(spec.Engine) == "" {
+		return DatabaseBackup{}, fmt.Errorf("kube(fake): unsupported backup engine %q", spec.Engine)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k := key(spec.Namespace, spec.Release)
+	if _, ok := f.Applied[k]; !ok {
+		return DatabaseBackup{}, fmt.Errorf("kube(fake): no release %q in %q", spec.Release, spec.Namespace)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	b := DatabaseBackup{
+		Name:        fmt.Sprintf("bkp-%s-%d", sanitize(spec.Release), len(f.Backups[k])+1),
+		Phase:       "Succeeded",
+		CreatedAt:   now,
+		CompletedAt: now,
+		Engine:      dbEngine(spec.Engine),
+	}
+	f.Backups[k] = append(f.Backups[k], b)
+	return b, nil
+}
+
+// EnsureBackupSchedule records (or, for an empty schedule, clears) the backup
+// schedule for the database.
+func (f *FakeBackend) EnsureBackupSchedule(_ context.Context, spec BackupSpec) error {
+	if dbEngine(spec.Engine) == "" {
+		return fmt.Errorf("kube(fake): unsupported backup engine %q", spec.Engine)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k := key(spec.Namespace, spec.Release)
+	if strings.TrimSpace(spec.Schedule) == "" {
+		delete(f.BackupSchedules, k)
+		return nil
+	}
+	f.BackupSchedules[k] = spec.Schedule
+	return nil
+}
+
+// ListDatabaseBackups returns the recorded backups for the database, newest
+// first. An unknown release returns an empty slice (no error) — the same
+// "no backups yet" shape the real backend returns.
+func (f *FakeBackend) ListDatabaseBackups(_ context.Context, namespace, release string) ([]DatabaseBackup, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	recorded := f.Backups[key(namespace, release)]
+	out := make([]DatabaseBackup, 0, len(recorded))
+	for i := len(recorded) - 1; i >= 0; i-- {
+		out = append(out, recorded[i])
+	}
+	return out, nil
+}
+
+// RestoreDatabase records a restore request for the named backup. It errors when
+// the backup name is unknown for the release (no fake-success restore of a
+// non-existent backup).
+func (f *FakeBackend) RestoreDatabase(_ context.Context, spec RestoreSpec) error {
+	if dbEngine(spec.Engine) == "" {
+		return fmt.Errorf("kube(fake): unsupported restore engine %q", spec.Engine)
+	}
+	if strings.TrimSpace(spec.BackupName) == "" {
+		return fmt.Errorf("kube(fake): restore requires a backup name")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k := key(spec.Namespace, spec.Release)
+	found := false
+	for _, b := range f.Backups[k] {
+		if b.Name == spec.BackupName {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("kube(fake): no backup %q for release %q in %q", spec.BackupName, spec.Release, spec.Namespace)
+	}
+	f.Restores[k] = append(f.Restores[k], spec.BackupName)
+	return nil
 }

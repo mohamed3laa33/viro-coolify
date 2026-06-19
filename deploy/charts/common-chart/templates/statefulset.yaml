@@ -50,6 +50,10 @@ spec:
         {{- toYaml .Values.deployment.podSecurityContext | nindent 8 }}
       containers:
         - name: {{ template "common-chart.fullname" . }}
+          {{- with .Values.deployment.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           image: "{{ .Values.deployment.image.repository }}:{{ .Values.deployment.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.deployment.image.pullPolicy }}
           {{- with .Values.deployment.command }}

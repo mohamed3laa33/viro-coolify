@@ -41,7 +41,7 @@ func (a *App) newServiceActionCmd(use, short string, fn func(cmd *cobra.Command,
 			if err := a.requireAuth(); err != nil {
 				return err
 			}
-			orgID, err := a.orgID()
+			orgID, err := a.resolveOrgID(cmd)
 			if err != nil {
 				return err
 			}
@@ -67,7 +67,7 @@ func (a *App) newServicesDestroyCmd() *cobra.Command {
 			if err := a.requireAuth(); err != nil {
 				return err
 			}
-			orgID, err := a.orgID()
+			orgID, err := a.resolveOrgID(cmd)
 			if err != nil {
 				return err
 			}
@@ -118,7 +118,7 @@ func (a *App) newServicesListCmd() *cobra.Command {
 			if err := a.requireAuth(); err != nil {
 				return err
 			}
-			orgID, err := a.orgID()
+			orgID, err := a.resolveOrgID(cmd)
 			if err != nil {
 				return err
 			}
@@ -151,11 +151,11 @@ func (a *App) newServicesCreateCmd() *cobra.Command {
 			if err := a.requireAuth(); err != nil {
 				return err
 			}
-			orgID, err := a.orgID()
+			orgID, err := a.resolveOrgID(cmd)
 			if err != nil {
 				return err
 			}
-			projID, err := a.projectID()
+			projID, err := a.resolveProjectID(cmd, orgID)
 			if err != nil {
 				return err
 			}

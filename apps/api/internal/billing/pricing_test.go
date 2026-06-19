@@ -21,19 +21,33 @@ func setPrices(t *testing.T, st store.Store, cpu, mem float64) {
 	}
 }
 
-func TestSeededPricesAreZero(t *testing.T) {
-	svc := NewService(store.NewMemoryStore(), nil)
-	// The platform never invents prices: seeded components exist but cost nothing
-	// until an admin sets a price.
-	if got, err := svc.HourlyCost(context.Background(), 4, 8192); err != nil || got != 0 {
-		t.Fatalf("expected zero cost before admin sets prices, got %v (err=%v)", got, err)
+func TestSeededPricesAreNonZero(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemoryStore()
+	svc := NewService(st, nil)
+	// Setup-cliff fix: a fresh deploy ships sensible NON-ZERO default rates so it
+	// bills something instead of silently running for free. The seed must price a
+	// non-trivial workload above zero.
+	got, err := svc.HourlyCost(ctx, 4, 8192)
+	if err != nil {
+		t.Fatalf("HourlyCost: %v", err)
 	}
-	comps, err := svc.PricingComponents(context.Background())
+	if got <= 0 {
+		t.Fatalf("expected non-zero seeded cost (setup-cliff fix), got %v", got)
+	}
+	comps, err := svc.PricingComponents(ctx)
 	if err != nil {
 		t.Fatalf("PricingComponents: %v", err)
 	}
 	if len(comps) == 0 {
 		t.Fatal("expected seeded pricing components (cpu/memory/storage)")
+	}
+
+	// Prices remain admin-driven (invariant #1): an admin can override any seeded
+	// rate, including back to zero (free).
+	setPrices(t, st, 0, 0)
+	if got, err := svc.HourlyCost(ctx, 4, 8192); err != nil || got != 0 {
+		t.Fatalf("admin zeroing prices should make cost free, got %v (err=%v)", got, err)
 	}
 }
 

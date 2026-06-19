@@ -27,9 +27,16 @@ spec:
               name: do-dns
               key: access-token
 ---
-# Platform wildcard (api., app., and <org>.<baseDomain>). Deeper per-tenant
-# subdomains (<app>.<project>.<org>.<baseDomain>) are covered by per-org wildcard
-# certs the control plane issues on org creation.
+# Platform wildcard. "*.<baseDomain>" matches exactly ONE label, so it covers the
+# apex services (api., app.) and the org-apex host <org>.<baseDomain> — but NOT the
+# deeper tenant hosts. A tenant app is <app>.<project>.<org>.<baseDomain> (THREE
+# labels below the apex), so it is covered only by a wildcard at the PROJECT label,
+# "*.<project>.<org>.<baseDomain>". The control plane issues those per-org
+# certificates on org creation (kube.Backend EnsureOrgWildcard): one Certificate
+# per org covering "*.<org>.<baseDomain>" (project-level hosts) plus
+# "*.<project>.<org>.<baseDomain>" (app-level hosts) for each known project, with a
+# matching shared-Gateway HTTPS listener. Operators may pre-seed known orgs below
+# via tls.extraOrgWildcards; the control plane otherwise creates them dynamically.
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
@@ -43,4 +50,24 @@ spec:
   dnsNames:
     - "{{ .Values.baseDomain }}"
     - "*.{{ .Values.baseDomain }}"
+{{- range .Values.tls.extraOrgWildcards }}
+---
+# Optional statically-pinned per-org wildcard certificate. dnsNames should cover
+# "*.<org>.<baseDomain>" AND each "*.<project>.<org>.<baseDomain>" so the 3-label
+# tenant app host terminates TLS.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .name }}
+  namespace: {{ $.Release.Namespace }}
+spec:
+  secretName: {{ .secretName }}
+  issuerRef:
+    name: vortex-letsencrypt
+    kind: ClusterIssuer
+  dnsNames:
+    {{- range .dnsNames }}
+    - {{ . | quote }}
+    {{- end }}
+{{- end }}
 {{- end }}

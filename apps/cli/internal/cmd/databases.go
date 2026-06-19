@@ -43,7 +43,7 @@ func (a *App) newDatabasesListCmd() *cobra.Command {
 			if err := a.requireAuth(); err != nil {
 				return err
 			}
-			orgID, err := a.orgID()
+			orgID, err := a.resolveOrgID(cmd)
 			if err != nil {
 				return err
 			}
@@ -78,7 +78,7 @@ func (a *App) newDatabasesCreateCmd() *cobra.Command {
 			if err := a.requireAuth(); err != nil {
 				return err
 			}
-			orgID, err := a.orgID()
+			orgID, err := a.resolveOrgID(cmd)
 			if err != nil {
 				return err
 			}
@@ -90,7 +90,9 @@ func (a *App) newDatabasesCreateCmd() *cobra.Command {
 				StorageGB: storageGB,
 			}
 			if a.projectFlag != "" || a.cfg.CurrentProj != "" {
-				in.ProjectID, _ = a.projectID()
+				if in.ProjectID, err = a.resolveProjectID(cmd, orgID); err != nil {
+					return err
+				}
 			}
 			db, err := a.client.CreateDatabase(ctx(cmd), orgID, in)
 			if err != nil {
@@ -120,7 +122,7 @@ func (a *App) newDatabasesGetCmd() *cobra.Command {
 			if err := a.requireAuth(); err != nil {
 				return err
 			}
-			orgID, err := a.orgID()
+			orgID, err := a.resolveOrgID(cmd)
 			if err != nil {
 				return err
 			}
@@ -157,7 +159,7 @@ func (a *App) newDatabaseActionCmd(use, short string, fn func(cmd *cobra.Command
 			if err := a.requireAuth(); err != nil {
 				return err
 			}
-			orgID, err := a.orgID()
+			orgID, err := a.resolveOrgID(cmd)
 			if err != nil {
 				return err
 			}
@@ -183,7 +185,7 @@ func (a *App) newDatabasesDeleteCmd() *cobra.Command {
 			if err := a.requireAuth(); err != nil {
 				return err
 			}
-			orgID, err := a.orgID()
+			orgID, err := a.resolveOrgID(cmd)
 			if err != nil {
 				return err
 			}

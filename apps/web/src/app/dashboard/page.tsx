@@ -15,6 +15,7 @@ import { useDemoData } from "@/lib/demo-data";
 import { errorMessage } from "@/lib/errors";
 import { useResource } from "@/lib/use-resource";
 import { PageHeader } from "@/components/page-header";
+import { OnboardingChecklist } from "@/components/onboarding-checklist";
 import { StatCard } from "@/components/stat-card";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -217,6 +218,15 @@ export default function DashboardOverview() {
           </>
         )}
       </div>
+
+      {/* First-run getting-started checklist. Derived from the apps already
+          loaded above (no extra fetches) and self-hides once the org has a
+          deployed app or the user dismisses it. Only render once apps have
+          loaded without error so completion is based on real data, not an
+          empty/loading state (invariant #6). */}
+      {!fetchFailed && !initialLoading ? (
+        <OnboardingChecklist apps={apps} orgId={activeOrgId} />
+      ) : null}
 
       <Card>
         <CardHeader className="flex-row items-center justify-between space-y-0">

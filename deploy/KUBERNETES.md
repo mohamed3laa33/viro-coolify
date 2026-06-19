@@ -73,6 +73,36 @@ The platform layer talks to a `DeployBackend` interface; the Kubernetes implemen
 - **TLS** via cert-manager **DNS-01** (DigitalOcean) wildcard certs — per-org
   `*.<org>.vortex.v60ai.com`, managed by the control plane as orgs are created.
 
+### Custom-domain listener sharding (scaling past 64 listeners)
+
+Tenant `*.vortex.v60ai.com` hosts ride the wildcard listener and need **no** per-tenant
+listener. A **verified custom domain** (e.g. `shop.acme.io`) is different: it needs its own
+HTTPS listener for SNI/TLS termination. A single Gateway has a hard ceiling of **64 listeners**.
+
+Past that ceiling the control plane (`apps/api/internal/kube`) **auto-shards**: custom-domain
+listeners are allocated across a **pool** of Gateways. The primary `vortex` Gateway is shard 0
+(wildcard + http + the first batch of custom listeners); when it fills, listeners overflow to
+`vortex-shard-1`, `vortex-shard-2`, … which the backend **creates on demand** (and garbage-
+collects when emptied). A custom domain's `HTTPRoute` gets the holding shard added to its
+`parentRefs`, so traffic routes regardless of which shard the listener landed on. **No manual
+"move the tenant by hand" step** — the old hard error at 64 is gone.
+
+**LoadBalancer cost tradeoff** (the single-LB philosophy is preserved by default):
+
+| Mode | `gateway.merge` | LBs | Tradeoff |
+|------|-----------------|-----|----------|
+| Merged (default) | `true` | **1** total | All shards share one Envoy fleet/LB via an `EnvoyProxy` with `mergeGateways: true`. Cheapest; one data plane = one blast radius. |
+| Unmerged | `false` | 1 per shard | Each overflow shard gets its own LB (a handful only at very large custom-domain counts). Honest extra cost; better isolation per shard. |
+
+Shards can be **pre-provisioned** statically (`gateway.shards.count > 0` in
+`charts/vortex-bootstrap`) or left to dynamic creation (default `0`). Per-shard listener budget
+is tunable via the control-plane `GatewayShardMaxListeners` config (defaults to the 64 hard
+ceiling, with the primary reserving 2 slots for its wildcard/http listeners).
+
+> Per-Gateway-listener **TLS isolation** still applies: each custom domain terminates with its
+> own cert Secret, so sharding changes only WHICH Gateway object holds the listener, not the
+> per-domain certificate model.
+
 Cluster prerequisites (install once, all current/non-deprecated): **Gateway API CRDs + Envoy
 Gateway**, cert-manager, **KEDA**, metrics-server, and optionally a Postgres operator
 (CloudNativePG) for managed DBs. Installed by `deploy/scripts/01-provision-doks.sh`.

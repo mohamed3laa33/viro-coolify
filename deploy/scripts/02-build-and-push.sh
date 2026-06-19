@@ -4,8 +4,8 @@
 #   ./deploy/scripts/02-build-and-push.sh [tag]
 set -euo pipefail
 
-REGISTRY_NAME="${VORTEX_REGISTRY_NAME:-viro}"
-REGISTRY="registry.digitalocean.com/${REGISTRY_NAME}"
+REGISTRY_NAME="${VORTEX_REGISTRY_NAME:-vortex}"
+REGISTRY="${VORTEX_IMAGE_REGISTRY:-registry.digitalocean.com/${REGISTRY_NAME}}"
 TAG="${1:-$(git rev-parse --short HEAD 2>/dev/null || echo latest)}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 

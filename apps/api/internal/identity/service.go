@@ -35,6 +35,28 @@ var (
 	ErrConflict = errors.New("identity: conflict")
 )
 
+// OrgProvisioner provisions the per-org wildcard TLS certificate and matching
+// shared-Gateway listener(s) for a newly created organization, so the generated
+// tenant host <app>.<project>.<org>.<baseDomain> terminates TLS and routes. It is
+// the seam onto the Kubernetes deploy backend (kube.Backend implements it); the
+// identity package depends on this small interface rather than the concrete
+// backend so it stays testable without a cluster.
+//
+// projectSlugs are the org's known project slugs at call time (the default project
+// always exists at org creation). Implementations MUST be idempotent and tolerate
+// the resources already existing (re-creating an org / re-running provisioning is
+// safe).
+type OrgProvisioner interface {
+	EnsureOrgWildcard(ctx context.Context, orgSlug string, projectSlugs []string) error
+}
+
+// noopOrgProvisioner is the default OrgProvisioner: it provisions nothing. It keeps
+// the service usable without a Kubernetes backend (unit tests, dev) — it is an
+// HONEST no-op (it does not pretend a cert was issued), not a fake-success path.
+type noopOrgProvisioner struct{}
+
+func (noopOrgProvisioner) EnsureOrgWildcard(context.Context, string, []string) error { return nil }
+
 // Service holds identity business logic.
 type Service struct {
 	store       store.Store
@@ -47,6 +69,11 @@ type Service struct {
 	// Never nil after NewService (defaults to a NoopMailer).
 	mailer notify.Mailer
 	logger *slog.Logger
+	// orgProvisioner provisions the per-org wildcard TLS certificate + shared-Gateway
+	// listeners so a new org's tenant hosts (<app>.<project>.<org>.<baseDomain>)
+	// terminate TLS on first use. Never nil after NewService (defaults to a no-op so
+	// the service is usable without a Kubernetes backend, e.g. in unit tests).
+	orgProvisioner OrgProvisioner
 	// baseDomain is the platform apex used to build accept/reset links.
 	baseDomain string
 	// refreshTTL bounds a stored refresh token's lifetime (mirrors the JWT exp);
@@ -84,6 +111,17 @@ func WithLogger(l *slog.Logger) Option {
 // WithBaseDomain sets the platform apex used to build accept/reset URLs.
 func WithBaseDomain(d string) Option {
 	return func(s *Service) { s.baseDomain = strings.TrimSpace(d) }
+}
+
+// WithOrgProvisioner injects the per-org wildcard TLS/Gateway provisioner (the
+// Kubernetes deploy backend). A nil provisioner is treated as a no-op so the
+// service is always safe to call.
+func WithOrgProvisioner(p OrgProvisioner) Option {
+	return func(s *Service) {
+		if p != nil {
+			s.orgProvisioner = p
+		}
+	}
 }
 
 // WithRefreshTTL sets the stored refresh-token lifetime used to stamp expires_at.
@@ -128,6 +166,7 @@ func NewService(s store.Store, tm *auth.TokenManager, adminEmails []string, opts
 		now:              time.Now,
 		mailer:           notify.NewNoopMailer(),
 		logger:           slog.Default(),
+		orgProvisioner:   noopOrgProvisioner{},
 		invitationTTL:    7 * 24 * time.Hour,
 		passwordResetTTL: time.Hour,
 	}
@@ -214,6 +253,7 @@ func (s *Service) Signup(ctx context.Context, email, name, password string) (*Au
 	// Create the user, their personal org, owner membership and default project
 	// ATOMICALLY: a mid-sequence failure must not orphan a user with no org (or an
 	// org with no owner). Postgres rolls back; the memory store serializes.
+	var defaultProjectSlug string
 	if err := s.store.WithTx(ctx, func(tx store.Store) error {
 		if err := tx.CreateUser(ctx, user); err != nil {
 			if errors.Is(err, store.ErrConflict) {
@@ -227,11 +267,20 @@ func (s *Service) Signup(ctx context.Context, email, name, password string) (*Au
 		if err := tx.AddMembership(ctx, domain.Membership{OrgID: org.ID, UserID: user.ID, Role: domain.RoleOwner}); err != nil {
 			return err
 		}
-		_, err := s.createDefaultProjectTx(ctx, tx, org.ID)
-		return err
+		p, err := s.createDefaultProjectTx(ctx, tx, org.ID)
+		if err != nil {
+			return err
+		}
+		defaultProjectSlug = p.Slug
+		return nil
 	}); err != nil {
 		return nil, err
 	}
+
+	// Provision the personal org's per-org wildcard TLS cert + Gateway listener
+	// (best-effort, post-commit — see provisionOrgWildcard) so its tenant hosts
+	// terminate TLS on first use.
+	s.provisionOrgWildcard(ctx, org.Slug, defaultProjectSlug)
 
 	// Welcome email is best-effort: it must never fail signup.
 	s.sendBestEffort(ctx, user.Email, notify.WelcomeEmail(user.Name))
@@ -489,6 +538,7 @@ func (s *Service) CreateOrganization(ctx context.Context, userID, name string) (
 	}
 	// Org + owner membership + default project are created atomically so a failure
 	// can never leave an ownerless org.
+	var defaultProjectSlug string
 	if err := s.store.WithTx(ctx, func(tx store.Store) error {
 		if err := tx.CreateOrganization(ctx, org); err != nil {
 			return err
@@ -496,12 +546,44 @@ func (s *Service) CreateOrganization(ctx context.Context, userID, name string) (
 		if err := tx.AddMembership(ctx, domain.Membership{OrgID: org.ID, UserID: userID, Role: domain.RoleOwner}); err != nil {
 			return err
 		}
-		_, err := s.createDefaultProjectTx(ctx, tx, org.ID)
-		return err
+		p, err := s.createDefaultProjectTx(ctx, tx, org.ID)
+		if err != nil {
+			return err
+		}
+		defaultProjectSlug = p.Slug
+		return nil
 	}); err != nil {
 		return nil, err
 	}
+	// Provision the per-org wildcard TLS cert + Gateway listener AFTER the org is
+	// durably committed. It is a best-effort external side effect: a failure is
+	// logged but must NOT orphan/roll back the org. Provisioning is idempotent, so
+	// re-running it (operator retry) safely reconciles. See provisionOrgWildcard.
+	s.provisionOrgWildcard(ctx, org.Slug, defaultProjectSlug)
 	return org, nil
+}
+
+// provisionOrgWildcard requests the per-org wildcard TLS certificate + matching
+// shared-Gateway listener(s) so the org's generated tenant hosts
+// (<app>.<project>.<org>.<baseDomain>) terminate TLS and route on first use.
+//
+// It is best-effort by design: the org has already been committed, so a transient
+// cluster/cert-manager failure here must never fail org creation or leave the org
+// half-provisioned. The error is LOGGED (the actionable signal); provisioning is
+// idempotent and is retried implicitly when the org's first app deploys. With no
+// backend wired (unit tests / dev) the default no-op provisioner makes this a
+// silent success.
+func (s *Service) provisionOrgWildcard(ctx context.Context, orgSlug string, projectSlugs ...string) {
+	slugs := make([]string, 0, len(projectSlugs))
+	for _, p := range projectSlugs {
+		if p = strings.TrimSpace(p); p != "" {
+			slugs = append(slugs, p)
+		}
+	}
+	if err := s.orgProvisioner.EnsureOrgWildcard(ctx, orgSlug, slugs); err != nil {
+		s.logger.Error("identity: provision per-org wildcard TLS/Gateway",
+			"org", orgSlug, "err", err)
+	}
 }
 
 // Authorize reports an error unless the user is a member of the organization with

@@ -35,10 +35,27 @@ type Config struct {
 	BaseDomain string
 	// ChartPath is the path to the team's common-chart, e.g. deploy/charts/common-chart.
 	ChartPath string
-	// GatewayName / GatewayNamespace identify the SHARED Gateway every per-app
-	// HTTPRoute attaches to via parentRefs.
+	// GatewayName / GatewayNamespace identify the PRIMARY shared Gateway every
+	// per-app HTTPRoute attaches to via parentRefs. It is also shard 0 of the
+	// custom-domain listener pool (see gateway_shard.go): it carries the wildcard
+	// + http listeners and the first batch of custom-domain listeners, then
+	// listeners overflow to additional "<GatewayName>-shard-<n>" Gateways.
 	GatewayName      string
 	GatewayNamespace string
+	// GatewayShardMaxListeners caps how many listeners the backend places on ONE
+	// Gateway shard before overflowing to the next (custom-domain auto-sharding).
+	// It is an admin/DB-tunable knob; zero (or a value above the Gateway API hard
+	// ceiling maxGatewayListeners) falls back to maxGatewayListeners. Lowering it
+	// is useful to leave headroom for operator-managed listeners or to spread load
+	// across more, smaller Gateways.
+	GatewayShardMaxListeners int
+	// GatewayShardLBSharing records the operator's intent that overflow shards
+	// SHARE the primary LoadBalancer (true) rather than each provisioning their
+	// own (false). It is informational for the backend (the actual merge is the
+	// Gateway controller's job — e.g. Envoy Gateway mergeGateways via a shared
+	// EnvoyProxy set in the bootstrap chart); the backend only uses it to decide
+	// whether to clone the primary's infrastructure block onto a new shard.
+	GatewayShardLBSharing bool
 	// ClusterIssuer is the cert-manager ClusterIssuer name that signs per-tenant
 	// custom-domain certificates (e.g. "vortex-letsencrypt"). Empty disables
 	// per-domain TLS issuance (EnsureDomainCertificate then no-ops).
@@ -97,11 +114,12 @@ var gatewayGVR = schema.GroupVersionResource{
 }
 
 // maxGatewayListeners is the Gateway API hard limit on listeners per Gateway
-// (spec: a Gateway may define at most 64 listeners). EnsureGatewayListener
-// refuses to add a per-domain HTTPS listener once this ceiling is reached rather
-// than producing an invalid Gateway the controller would reject wholesale. At
-// that scale the platform should move to a dedicated per-tenant Gateway; this
-// guard makes the limit explicit instead of silently corrupting the shared one.
+// (spec: a Gateway may define at most 64 listeners). It is now the PER-SHARD
+// ceiling: rather than erroring at this point and asking an operator to move a
+// tenant by hand, EnsureGatewayListener AUTO-SHARDS custom-domain listeners
+// across a pool of Gateways (gateway_shard.go), creating a new shard once every
+// existing one is full. The constant still pins the controller-enforced upper
+// bound so the backend never renders an invalid (65+ listener) Gateway.
 const maxGatewayListeners = 64
 
 // KubeBackend is the real Backend: a typed clientset for namespace/quota/status/logs
@@ -580,6 +598,12 @@ func (b *KubeBackend) Apply(ctx context.Context, w Workload) (string, string, er
 	h := host(w.Name, w.ProjectSlug, w.OrgSlug, b.cfg.BaseDomain)
 
 	values := b.buildValues(w, h)
+	// Custom-domain listeners may live on overflow Gateway SHARDS (gateway_shard.go),
+	// not just the primary Gateway. A Gateway listener only routes to HTTPRoutes that
+	// reference it as a parent, so the HTTPRoute must also list every shard that holds
+	// one of this workload's custom-domain listeners. Add those parentRefs now (Apply
+	// has the ctx for the cluster lookup, keeping buildValues pure).
+	b.addShardParentRefs(ctx, values, w.Domains)
 	out, err := yaml.Marshal(values)
 	if err != nil {
 		return "", "", fmt.Errorf("kube: marshal values: %w", err)
@@ -814,17 +838,39 @@ func (b *KubeBackend) buildValues(w Workload, h string) map[string]any {
 		values[k] = v
 	}
 
-	// Multi-region SEAM: stamp the (validated) region onto every rendered object via
-	// extraLabels (common-chart.labels), and onto the pods via podLabels + a pod
-	// annotation, so a FUTURE multi-cluster router can place/route by region. A single
-	// cluster ignores it (no scheduling effect today). Empty region => no label/annotation.
+	// Multi-region: stamp the (validated) region onto every rendered object via
+	// extraLabels (common-chart.labels) and onto the pods via podLabels + a pod
+	// annotation (observability / a future cross-cluster router), AND translate it
+	// into real scheduling so the workload lands on the matching node pool WITHIN
+	// this cluster. Empty region => no labels and no scheduling constraints.
 	if region := sanitize(w.Region); region != "" {
 		values["extraLabels"] = map[string]any{regionLabelKey: region}
 		mergeStringMap(deployment, "podLabels", map[string]any{regionLabelKey: region})
 		mergeStringMap(deployment, "additionalPodAnnotations", map[string]any{regionAnnotationKey: w.Region})
+
+		// In-cluster placement: region -> node affinity (+ a regional-pool
+		// toleration). The translation is centralized in regionScheduling
+		// (kube/values.go). Soft (preferred) affinity keeps a not-yet-region-labeled
+		// cluster schedulable while steering onto region-labeled pools when present.
+		affinity, toleration := regionScheduling(w.Region)
+		if len(affinity) > 0 {
+			// affinity is workload-specific (region-only today); set it directly.
+			deployment["affinity"] = affinity
+		}
+		if len(toleration) > 0 {
+			deployment["tolerations"] = appendToleration(deployment["tolerations"], toleration)
+		}
 	}
 
 	return values
+}
+
+// appendToleration appends one toleration map to the chart's
+// deployment.tolerations sequence, preserving any tolerations already present so
+// the region toleration never clobbers others a future recipe might add.
+func appendToleration(existing any, add map[string]any) []map[string]any {
+	cur, _ := existing.([]map[string]any)
+	return append(cur, add)
 }
 
 // regionLabelKey is the workload label carrying the placement region (the
@@ -1265,13 +1311,19 @@ func (b *KubeBackend) RemoveDomainCertificate(ctx context.Context, host string) 
 	return nil
 }
 
-// EnsureGatewayListener adds (idempotently) a dedicated HTTPS listener to the
-// SHARED Gateway terminating TLS for the custom host with the per-domain cert
-// Secret. It MERGES into the existing spec.listeners under RetryOnConflict so it
-// never clobbers other tenants' listeners (or the wildcard listener), and refuses
-// to exceed the Gateway API 64-listener limit (see maxGatewayListeners) — at that
-// scale a dedicated per-tenant Gateway is required. With no dynamic client it
-// no-ops (local/dev).
+// EnsureGatewayListener adds (idempotently) a dedicated HTTPS listener for the
+// custom host, terminating TLS with the per-domain cert Secret, to a Gateway in
+// the SHARD POOL (see gateway_shard.go). It picks the shard that already holds
+// the host's listener (idempotent), else the lowest-index existing shard with
+// capacity, else creates a new "<GatewayName>-shard-<n>" Gateway — so the
+// platform scales PAST the per-Gateway 64-listener ceiling without any manual
+// intervention. The merge never clobbers other tenants' listeners or the
+// wildcard listener. With no dynamic client it no-ops (local/dev).
+//
+// Note: the chosen shard is recoverable from cluster state (shardForHost), so
+// Apply can point the host's HTTPRoute parentRef at the right shard and
+// RemoveGatewayListener can find/remove it — the backend keeps no in-process
+// placement bookkeeping.
 func (b *KubeBackend) EnsureGatewayListener(ctx context.Context, host, certSecret string) error {
 	host = strings.ToLower(strings.TrimSpace(host))
 	if host == "" {
@@ -1283,57 +1335,73 @@ func (b *KubeBackend) EnsureGatewayListener(ctx context.Context, host, certSecre
 	if certSecret == "" {
 		certSecret = DomainCertSecret(host)
 	}
-	ns := b.cfg.GatewayNamespace
-	lname := DomainListenerName(host)
 
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		gw, err := b.dynamic.Resource(gatewayGVR).Namespace(ns).Get(ctx, b.cfg.GatewayName, metav1.GetOptions{})
+	// Re-allocate-and-merge with a bounded number of attempts: a chosen shard can
+	// fill up between allocation and merge if another control-plane replica (or a
+	// concurrent attach) grabbed the last slot. On errShardFull we re-allocate
+	// (which moves to / creates the next shard) and try again.
+	const maxAllocAttempts = 8
+	var lastErr error
+	for attempt := 0; attempt < maxAllocAttempts; attempt++ {
+		gwName, err := b.allocateListenerShard(ctx, host)
 		if err != nil {
-			return fmt.Errorf("kube: get gateway %s/%s: %w", ns, b.cfg.GatewayName, err)
-		}
-		listeners, _, _ := unstructured.NestedSlice(gw.Object, "spec", "listeners")
-		// Idempotent: if a listener for this host already exists, nothing to do.
-		for _, l := range listeners {
-			if m, ok := l.(map[string]any); ok {
-				if n, _ := m["name"].(string); n == lname {
-					return nil
-				}
-			}
-		}
-		if len(listeners) >= maxGatewayListeners {
-			return fmt.Errorf("kube: shared gateway %s/%s at the %d-listener limit; cannot attach %s (move tenant to a dedicated Gateway)",
-				ns, b.cfg.GatewayName, maxGatewayListeners, host)
-		}
-		listeners = append(listeners, domainListener(lname, host, certSecret))
-		if err := unstructured.SetNestedSlice(gw.Object, listeners, "spec", "listeners"); err != nil {
 			return err
 		}
-		_, err = b.dynamic.Resource(gatewayGVR).Namespace(ns).Update(ctx, gw, metav1.UpdateOptions{})
+		err = b.mergeListenerIntoGateway(ctx, gwName, host, certSecret)
+		if err == nil {
+			return nil
+		}
+		if isShardFull(err) {
+			lastErr = err
+			continue
+		}
 		return err
-	})
+	}
+	return fmt.Errorf("kube: could not allocate a gateway shard listener for %s after %d attempts: %w",
+		host, maxAllocAttempts, lastErr)
 }
 
-// RemoveGatewayListener removes the per-domain HTTPS listener from the shared
-// Gateway, preserving every other listener. A missing Gateway/listener (or no
-// dynamic client) is not an error (idempotent cleanup).
+// RemoveGatewayListener removes the per-domain HTTPS listener for host from
+// whichever shard in the pool holds it, preserving every other listener. A
+// missing Gateway/listener (or no dynamic client) is not an error (idempotent
+// cleanup). An emptied overflow shard is garbage-collected so the pool does not
+// accumulate dangling, listener-less Gateways (and their LoadBalancers).
 func (b *KubeBackend) RemoveGatewayListener(ctx context.Context, host string) error {
 	host = strings.ToLower(strings.TrimSpace(host))
 	if host == "" || b.dynamic == nil {
 		return nil
 	}
+	gwName, found, err := b.shardForHost(ctx, host)
+	if err != nil {
+		return err
+	}
+	if !found {
+		// Listener absent from every shard: nothing to remove (idempotent).
+		return nil
+	}
+	return b.removeListenerFromGateway(ctx, gwName, host)
+}
+
+// removeListenerFromGateway removes host's listener from the named Gateway under
+// RetryOnConflict, preserving all others. When that leaves a SECONDARY shard
+// (index > 0) with zero listeners, the shard Gateway is deleted to reclaim its
+// LoadBalancer; the primary shard (index 0) is never deleted — it owns the
+// wildcard/http listeners and is bootstrap-managed.
+func (b *KubeBackend) removeListenerFromGateway(ctx context.Context, gwName, host string) error {
 	ns := b.cfg.GatewayNamespace
 	lname := DomainListenerName(host)
 
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		gw, err := b.dynamic.Resource(gatewayGVR).Namespace(ns).Get(ctx, b.cfg.GatewayName, metav1.GetOptions{})
+	emptiedSecondary := false
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		gw, err := b.dynamic.Resource(gatewayGVR).Namespace(ns).Get(ctx, gwName, metav1.GetOptions{})
 		if err != nil {
 			if errors.IsNotFound(err) {
 				return nil
 			}
-			return fmt.Errorf("kube: get gateway %s/%s: %w", ns, b.cfg.GatewayName, err)
+			return fmt.Errorf("kube: get gateway %s/%s: %w", ns, gwName, err)
 		}
-		listeners, found, _ := unstructured.NestedSlice(gw.Object, "spec", "listeners")
-		if !found {
+		listeners, foundList, _ := unstructured.NestedSlice(gw.Object, "spec", "listeners")
+		if !foundList {
 			return nil
 		}
 		out := make([]any, 0, len(listeners))
@@ -1350,7 +1418,187 @@ func (b *KubeBackend) RemoveGatewayListener(ctx context.Context, host string) er
 		if !removed {
 			return nil
 		}
+		idx, _ := gatewayShardIndex(b.cfg.GatewayName, gwName)
+		emptiedSecondary = idx > 0 && len(out) == 0
 		if err := unstructured.SetNestedSlice(gw.Object, out, "spec", "listeners"); err != nil {
+			return err
+		}
+		_, err = b.dynamic.Resource(gatewayGVR).Namespace(ns).Update(ctx, gw, metav1.UpdateOptions{})
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	if emptiedSecondary {
+		// Best-effort GC of the now-empty overflow shard (reclaims its LB). A
+		// NotFound (already gone, or a racing delete) is not an error.
+		if derr := b.dynamic.Resource(gatewayGVR).Namespace(ns).Delete(ctx, gwName, metav1.DeleteOptions{}); derr != nil && !errors.IsNotFound(derr) {
+			return fmt.Errorf("kube: delete emptied gateway shard %s/%s: %w", ns, gwName, derr)
+		}
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Per-org wildcard TLS (cert-manager Certificate + shared-Gateway HTTPS listeners)
+// ---------------------------------------------------------------------------
+
+// EnsureOrgWildcard provisions (idempotently) the per-org wildcard certificate
+// and matching shared-Gateway HTTPS listeners that terminate TLS and route the
+// generated tenant host <app>.<project>.<org>.<baseDomain>.
+//
+// The bootstrap wildcard (*.<baseDomain>) covers only ONE label, so it matches
+// neither the project-level host (<project>.<org>.<baseDomain>) nor the app host
+// (<app>.<project>.<org>.<baseDomain>). This issues ONE Certificate whose dnsNames
+// cover the org subtree — *.<org>.<baseDomain> for project-level hosts and
+// *.<project>.<org>.<baseDomain> for each supplied project (a wildcard matches
+// exactly one label, so the deeper app host needs a wildcard at the project
+// label) — into a TLS Secret in the shared Gateway namespace, then adds an HTTPS
+// listener per wildcard to the shared Gateway.
+//
+// With no ClusterIssuer or no dynamic client configured (local/dev) it no-ops so
+// non-cluster flows keep working.
+func (b *KubeBackend) EnsureOrgWildcard(ctx context.Context, orgSlug string, projectSlugs []string) error {
+	orgSlug = sanitize(orgSlug)
+	if orgSlug == "" {
+		return fmt.Errorf("kube: empty org slug for wildcard provisioning")
+	}
+	if b.dynamic == nil || b.cfg.ClusterIssuer == "" {
+		return nil
+	}
+	base := b.cfg.BaseDomain
+	if base == "" {
+		return fmt.Errorf("kube: empty base domain for org %q wildcard", orgSlug)
+	}
+
+	// dnsNames: the org wildcard (project-level hosts) plus a project wildcard per
+	// known project (app-level hosts). De-duplicated, deterministically ordered.
+	orgWild := orgWildcardHost(orgSlug, base)
+	dnsNames := []string{orgWild}
+	listeners := []listenerSpec{{name: orgListenerName(orgSlug), hostname: orgWild}}
+	seen := map[string]bool{orgWild: true}
+	projSlugs := make([]string, 0, len(projectSlugs))
+	for _, p := range projectSlugs {
+		ps := sanitize(p)
+		if ps == "" {
+			continue
+		}
+		projSlugs = append(projSlugs, ps)
+	}
+	sort.Strings(projSlugs)
+	for _, ps := range projSlugs {
+		pw := projectWildcardHost(ps, orgSlug, base)
+		if seen[pw] {
+			continue
+		}
+		seen[pw] = true
+		dnsNames = append(dnsNames, pw)
+		listeners = append(listeners, listenerSpec{name: projectListenerName(orgSlug, ps), hostname: pw})
+	}
+
+	secretName := OrgCertSecret(orgSlug)
+	if err := b.ensureWildcardCertificate(ctx, orgCertName(orgSlug), secretName, dnsNames); err != nil {
+		return err
+	}
+	return b.ensureGatewayListeners(ctx, listeners, secretName)
+}
+
+// ensureWildcardCertificate upserts a cert-manager Certificate named "name" in the
+// shared Gateway namespace, signed by the configured ClusterIssuer, materialized
+// into TLS Secret "secretName" and covering all dnsNames.
+func (b *KubeBackend) ensureWildcardCertificate(ctx context.Context, name, secretName string, dnsNames []string) error {
+	ns := b.cfg.GatewayNamespace
+	names := make([]any, 0, len(dnsNames))
+	for _, d := range dnsNames {
+		names = append(names, d)
+	}
+	cert := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "cert-manager.io/v1",
+		"kind":       "Certificate",
+		"metadata": map[string]any{
+			"name":      name,
+			"namespace": ns,
+			"labels":    map[string]any{"app.kubernetes.io/managed-by": "vortex"},
+		},
+		"spec": map[string]any{
+			"secretName": secretName,
+			"dnsNames":   names,
+			"issuerRef": map[string]any{
+				"name": b.cfg.ClusterIssuer,
+				"kind": "ClusterIssuer",
+			},
+		},
+	}}
+	cert.SetGroupVersionKind(certificateGVR.GroupVersion().WithKind("Certificate"))
+
+	return upsert(ctx,
+		func() error {
+			_, err := b.dynamic.Resource(certificateGVR).Namespace(ns).Create(ctx, cert, metav1.CreateOptions{})
+			return err
+		},
+		func() error {
+			cur, err := b.dynamic.Resource(certificateGVR).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+			if err := unstructured.SetNestedMap(cur.Object, cert.Object["spec"].(map[string]any), "spec"); err != nil {
+				return err
+			}
+			_, err = b.dynamic.Resource(certificateGVR).Namespace(ns).Update(ctx, cur, metav1.UpdateOptions{})
+			return err
+		},
+	)
+}
+
+// listenerSpec names one HTTPS listener (name + hostname) to merge onto the shared
+// Gateway, all referencing the same per-org cert Secret.
+type listenerSpec struct {
+	name     string
+	hostname string
+}
+
+// ensureGatewayListeners merges the given HTTPS listeners onto the SHARED Gateway
+// in a single RetryOnConflict-guarded read-modify-write, so several per-org
+// wildcard listeners are added atomically without clobbering other tenants'
+// listeners (or the bootstrap wildcard). Listeners already present (by name) are
+// left untouched (idempotent). It refuses to exceed the Gateway API 64-listener
+// limit rather than producing an invalid Gateway the controller would reject.
+func (b *KubeBackend) ensureGatewayListeners(ctx context.Context, specs []listenerSpec, certSecret string) error {
+	if len(specs) == 0 {
+		return nil
+	}
+	ns := b.cfg.GatewayNamespace
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		gw, err := b.dynamic.Resource(gatewayGVR).Namespace(ns).Get(ctx, b.cfg.GatewayName, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("kube: get gateway %s/%s: %w", ns, b.cfg.GatewayName, err)
+		}
+		listeners, _, _ := unstructured.NestedSlice(gw.Object, "spec", "listeners")
+		existing := make(map[string]bool, len(listeners))
+		for _, l := range listeners {
+			if m, ok := l.(map[string]any); ok {
+				if n, _ := m["name"].(string); n != "" {
+					existing[n] = true
+				}
+			}
+		}
+		added := false
+		for _, spec := range specs {
+			if existing[spec.name] {
+				continue // idempotent: this listener is already present
+			}
+			if len(listeners) >= maxGatewayListeners {
+				return fmt.Errorf("kube: shared gateway %s/%s at the %d-listener limit; cannot attach %s (move tenant to a dedicated Gateway)",
+					ns, b.cfg.GatewayName, maxGatewayListeners, spec.hostname)
+			}
+			listeners = append(listeners, domainListener(spec.name, spec.hostname, certSecret))
+			existing[spec.name] = true
+			added = true
+		}
+		if !added {
+			return nil
+		}
+		if err := unstructured.SetNestedSlice(gw.Object, listeners, "spec", "listeners"); err != nil {
 			return err
 		}
 		_, err = b.dynamic.Resource(gatewayGVR).Namespace(ns).Update(ctx, gw, metav1.UpdateOptions{})
