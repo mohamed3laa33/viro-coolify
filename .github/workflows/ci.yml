@@ -109,8 +109,12 @@ jobs:
             --exit-code 1 --no-progress --skip-dirs _ref-volo,_ref-viro-app,_clone .
       - name: Trivy — IaC/K8s misconfig scan
         run: |
+          # .trivyignore.yaml carries path-scoped, justified exceptions (the
+          # control-plane RBAC must manage tenant resources; tenant workloads need
+          # a writable rootfs). Everything else in every dir is still scanned.
           trivy config --severity HIGH,CRITICAL --exit-code 1 --quiet \
-            --skip-dirs deploy/charts/common-chart,_ref-volo,_ref-viro-app,_clone .
+            --ignorefile .trivyignore.yaml \
+            --skip-dirs _ref-volo,_ref-viro-app,_clone .
       - name: Gitleaks — secret scan
         run: |
           mkdir -p "$RUNNER_TEMP/bin"
