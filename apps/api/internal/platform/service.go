@@ -16,6 +16,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
@@ -170,6 +171,20 @@ type Service struct {
 	// Wait() for them to drain (mirrors the metering/reconciler WaitGroup).
 	buildWG *sync.WaitGroup
 
+	// buildpacksBuilderImage is the admin/DB-driven Cloud Native Buildpacks builder
+	// image (VORTEX_BUILDPACKS_BUILDER, e.g. paketobuildpacks/builder-jammy-base)
+	// forwarded on a no-Dockerfile build so the builder uses the operator's chosen
+	// builder rather than a hardcoded default. Empty lets the builder fall back to
+	// its own configured default — never a value hardcoded here (invariant #1).
+	buildpacksBuilderImage string
+
+	// prober detects whether a git source contains a Dockerfile, selecting the
+	// build strategy (Dockerfile => Kaniko, none => Cloud Native Buildpacks). It is
+	// an injectable seam: tests inject a fake; production uses a shallow,
+	// no-clone HTTP probe of the raw Dockerfile (httpDockerfileProber). Never nil
+	// after NewService.
+	prober DockerfileProber
+
 	// cipher encrypts/decrypts SECRET app env values at rest. Defaults to a no-op
 	// pass-through (dev) when no key is configured, so the system never panics for
 	// a missing key.
@@ -194,6 +209,23 @@ type Service struct {
 // stdlib *net.Resolver satisfies it; tests inject a fake to avoid real DNS.
 type Resolver interface {
 	LookupTXT(ctx context.Context, name string) ([]string, error)
+}
+
+// DockerfileProber reports whether a git source (repo + ref + optional
+// context-dir) contains a Dockerfile. It is the single detection input the
+// platform resolves before a build so it can pick the strategy: a Dockerfile =>
+// the Kaniko path, none => Cloud Native Buildpacks. It is a seam (tests inject a
+// fake) so detection is exercised without real network access.
+//
+// Probe MUST be a SHALLOW probe — it must not clone the whole repository. The
+// default implementation does a single HTTPS HEAD/GET of the raw Dockerfile.
+//
+// The (found bool, err error) contract is deliberate: a definitive yes/no
+// returns found with a nil error; an INCONCLUSIVE probe (network error, private
+// repo, unsupported host) returns a non-nil error so the caller can fall back to
+// the builder's own in-cluster detection rather than mis-routing the strategy.
+type DockerfileProber interface {
+	Probe(ctx context.Context, gitRepo, gitRef, contextDir string) (found bool, err error)
 }
 
 // Option customizes Service construction.
@@ -234,6 +266,24 @@ func WithBuildTimeout(d time.Duration) Option {
 // shutdown.
 func WithBuildWaitGroup(wg *sync.WaitGroup) Option {
 	return func(s *Service) { s.buildWG = wg }
+}
+
+// WithBuildpacksBuilder sets the Cloud Native Buildpacks builder image forwarded
+// on no-Dockerfile builds (admin/DB-driven, VORTEX_BUILDPACKS_BUILDER). Empty is
+// ignored so the builder's own configured default stands — no value is hardcoded
+// here (invariant #1).
+func WithBuildpacksBuilder(image string) Option {
+	return func(s *Service) { s.buildpacksBuilderImage = strings.TrimSpace(image) }
+}
+
+// WithDockerfileProber injects the Dockerfile detection seam used to select the
+// build strategy. A nil prober is ignored (the default HTTP probe stands).
+func WithDockerfileProber(p DockerfileProber) Option {
+	return func(s *Service) {
+		if p != nil {
+			s.prober = p
+		}
+	}
 }
 
 // WithDBStorageDefault sets the default persistent-volume size (GiB) for managed
@@ -306,6 +356,7 @@ func NewService(s store.Store, backend kube.Backend, b *billing.Service, opts ..
 		buildTimeout: 10 * time.Minute,
 		cipher:       secrets.NoopCipher{},
 		resolver:     net.DefaultResolver,
+		prober:       newHTTPDockerfileProber(),
 	}
 	for _, opt := range opts {
 		opt(svc)
@@ -748,6 +799,12 @@ func (s *Service) startBuild(ctx context.Context, app *domain.App, orgSlug, proj
 		return err
 	}
 
+	// Select the build strategy from the source layout: a Dockerfile => the Kaniko
+	// path, none => Cloud Native Buildpacks. This is the wiring that makes
+	// no-Dockerfile builds work end-to-end — previously the path always set
+	// Dockerfile:"Dockerfile" and buildpacks never triggered.
+	strategy, hasDockerfile := s.resolveBuildStrategy(ctx, app)
+
 	// The image TAG includes the BUILD id so every build pushes a DISTINCT image
 	// ref the deploy then references — otherwise a rebuild would reuse a tag and the
 	// deploy could roll out a stale (cached) image.
@@ -760,16 +817,201 @@ func (s *Service) startBuild(ctx context.Context, app *domain.App, orgSlug, proj
 		AppName:     app.Name,
 		GitRepo:     app.GitRepository,
 		GitRef:      app.GitBranch,
-		Dockerfile:  "Dockerfile",
-		ImageRef:    s.imageRef(app.OrgID, app.ProjectID, app.ID, tag),
-		// SECURITY: runtime env/secrets are NOT forwarded as kaniko --build-args
-		// (they would be baked into image layers and exposed in the Job spec).
-		// Runtime env reaches pods only via the deploy Workload.Env path.
+		// Strategy is set explicitly from detection; HasDockerfile is forwarded too so
+		// the builder's own fallback detection routes identically if Strategy is ever
+		// cleared. The Dockerfile path is only meaningful for the Kaniko strategy.
+		Strategy:      strategy,
+		HasDockerfile: hasDockerfile,
+		ImageRef:      s.imageRef(app.OrgID, app.ProjectID, app.ID, tag),
+		// SECURITY: runtime env/secrets are NOT forwarded as kaniko --build-args /
+		// buildpacks env (they would be baked into image layers and exposed in the Job
+		// spec). Runtime env reaches pods only via the deploy Workload.Env path.
 		BuildArgs: nil,
+	}
+	if strategy == build.StrategyDockerfile {
+		// Default Dockerfile path for the Kaniko strategy; buildpacks ignores it.
+		req.Dockerfile = "Dockerfile"
+	} else {
+		// Forward the admin-configured CNB builder image (empty lets the builder use
+		// its own configured default — never hardcoded here).
+		req.Builder = s.buildpacksBuilderImage
 	}
 
 	s.runBuildAsync(app.ID, bld.ID, orgSlug, projSlug, req)
 	return nil
+}
+
+// resolveBuildStrategy picks the build strategy for an app's git source:
+//   - StrategyDockerfile when a Dockerfile is present (the Kaniko path);
+//   - StrategyBuildpacks when none is found (Cloud Native Buildpacks).
+//
+// Resolution order (all DB/admin or source-driven — nothing hardcoded as policy):
+//  1. An explicit per-app override via App.BuildPack: "dockerfile" forces the
+//     Dockerfile strategy; "buildpacks"/"buildpack"/"nixpacks"/"cnb"/"auto" forces
+//     buildpacks. This lets a user state intent and skip the probe.
+//  2. With a FakeBuilder (dev/no-cluster/tests) the executor echoes the image
+//     regardless of strategy, so the strategy is irrelevant and we skip the
+//     network probe entirely — keeping dev/tests offline and fast.
+//  3. Otherwise a SHALLOW probe of the source (s.prober) decides.
+//  4. If the probe is INCONCLUSIVE (network error / private repo / unsupported
+//     host) we preserve the platform's prior behavior and pick the Dockerfile
+//     strategy — a Dockerfile-based app keeps working as before, and kaniko fails
+//     loudly with "Dockerfile not found" if there genuinely isn't one (no
+//     fake-success). A user who wants buildpacks on an unprobeable repo states it
+//     via App.BuildPack.
+//
+// The second return reports the probe's Dockerfile finding (HasDockerfile),
+// forwarded on the build request so the builder's own fallback detection routes
+// identically.
+func (s *Service) resolveBuildStrategy(ctx context.Context, app *domain.App) (build.Strategy, bool) {
+	switch strings.ToLower(strings.TrimSpace(app.BuildPack)) {
+	case "dockerfile", "docker":
+		return build.StrategyDockerfile, true
+	case "buildpacks", "buildpack", "nixpacks", "cnb", "auto":
+		return build.StrategyBuildpacks, false
+	}
+
+	// In dev / no-cluster / tests the builder is a FakeBuilder that echoes the image
+	// regardless of strategy, so probing the network would only add latency. Skip it
+	// and keep the prior Dockerfile default.
+	if _, fake := s.builder.(*build.FakeBuilder); fake || s.prober == nil {
+		return build.StrategyDockerfile, true
+	}
+
+	// Bound the shallow probe so a slow/hanging git host can never stall a create.
+	pctx, cancel := context.WithTimeout(ctx, dockerfileProbeTimeout)
+	defer cancel()
+	found, err := s.prober.Probe(pctx, app.GitRepository, app.GitBranch, "")
+	if err != nil {
+		// Inconclusive: preserve prior behavior (Dockerfile/kaniko). Logged by app id
+		// only — never the repo contents.
+		log.Printf("platform: Dockerfile probe for app %s inconclusive (%v); defaulting to Dockerfile strategy", app.ID, err)
+		return build.StrategyDockerfile, true
+	}
+	return build.DetectStrategy(found), found
+}
+
+// dockerfileProbeTimeout bounds the shallow source probe so a create/deploy never
+// stalls on a slow or unreachable git host.
+const dockerfileProbeTimeout = 8 * time.Second
+
+// errProbeInconclusive marks a probe that could not definitively determine
+// whether a Dockerfile exists (unsupported host, private repo, or a transient
+// network error). The caller defers the decision to the in-cluster builder.
+var errProbeInconclusive = errors.New("platform: Dockerfile probe inconclusive")
+
+// httpDockerfileProber is the default DockerfileProber: a SHALLOW, no-clone probe
+// that fetches the raw Dockerfile over HTTPS from common hosted-git providers
+// (GitHub, GitLab, Bitbucket, and Gitea/Codeberg-style hosts). It never clones
+// the repository.
+//
+// It returns:
+//   - (true, nil)  when the raw Dockerfile responds 200,
+//   - (false, nil) when the host is supported and the file is definitively absent
+//     (404),
+//   - (_, error)   when the probe is inconclusive (unsupported host, auth
+//     required, or any non-200/404 response) — the caller then defers strategy
+//     selection to the in-cluster builder rather than guessing.
+//
+// Only PUBLIC repos on supported hosts can be probed this way; a private repo
+// returns 401/403/404 and is treated as inconclusive, so its strategy is decided
+// by the authenticated in-cluster clone. There is no fake-success path: an
+// inconclusive probe never claims a Dockerfile exists.
+type httpDockerfileProber struct {
+	client *http.Client
+}
+
+// newHTTPDockerfileProber returns the default prober with a bounded HTTP client.
+func newHTTPDockerfileProber() *httpDockerfileProber {
+	return &httpDockerfileProber{
+		client: &http.Client{Timeout: dockerfileProbeTimeout},
+	}
+}
+
+// Probe fetches the raw Dockerfile for the source. contextDir, when set, is the
+// sub-directory the Dockerfile is expected in.
+func (p *httpDockerfileProber) Probe(ctx context.Context, gitRepo, gitRef, contextDir string) (bool, error) {
+	ref := strings.TrimSpace(gitRef)
+	if ref == "" {
+		ref = "main"
+	}
+	rawURL, err := rawDockerfileURL(gitRepo, ref, contextDir)
+	if err != nil {
+		return false, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return false, fmt.Errorf("%w: %v", errProbeInconclusive, err)
+	}
+	// Ask for only the first byte: we care about existence, not contents.
+	req.Header.Set("Range", "bytes=0-0")
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("%w: %v", errProbeInconclusive, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	// Drain the (tiny) body so the connection can be reused.
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64))
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusPartialContent:
+		return true, nil
+	case http.StatusNotFound:
+		// Supported host, file definitively absent => buildpacks.
+		return false, nil
+	default:
+		// 401/403 (private) or any other status => can't tell; defer to the builder.
+		return false, fmt.Errorf("%w: status %d", errProbeInconclusive, resp.StatusCode)
+	}
+}
+
+// rawDockerfileURL maps a clone URL + ref (+ optional sub-dir) to the raw
+// Dockerfile URL for a supported hosted-git provider. Unsupported hosts return
+// errProbeInconclusive so the caller defers to the in-cluster builder. The clone
+// URL is parsed with net/url and the host/path are taken verbatim (no fragment or
+// query), so a tenant repo cannot smuggle a different URL.
+func rawDockerfileURL(gitRepo, ref, contextDir string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(gitRepo))
+	if err != nil || u.Host == "" {
+		return "", fmt.Errorf("%w: bad repo URL", errProbeInconclusive)
+	}
+	owner, repo, ok := ownerRepo(u.Path)
+	if !ok {
+		return "", fmt.Errorf("%w: unrecognized repo path", errProbeInconclusive)
+	}
+	path := "Dockerfile"
+	if cd := strings.Trim(strings.TrimSpace(contextDir), "/"); cd != "" {
+		path = cd + "/Dockerfile"
+	}
+	host := strings.ToLower(u.Host)
+	switch host {
+	case "github.com", "www.github.com":
+		return "https://raw.githubusercontent.com/" + owner + "/" + repo + "/" + ref + "/" + path, nil
+	case "gitlab.com":
+		return "https://gitlab.com/" + owner + "/" + repo + "/-/raw/" + ref + "/" + path, nil
+	case "bitbucket.org":
+		return "https://bitbucket.org/" + owner + "/" + repo + "/raw/" + ref + "/" + path, nil
+	case "codeberg.org":
+		// Gitea-style raw path.
+		return "https://codeberg.org/" + owner + "/" + repo + "/raw/branch/" + ref + "/" + path, nil
+	default:
+		return "", fmt.Errorf("%w: unsupported host %q", errProbeInconclusive, host)
+	}
+}
+
+// ownerRepo extracts the "<owner>/<repo>" pair from a clone-URL path, trimming a
+// leading slash and a trailing ".git". It requires at least two path segments
+// (owner + repo); deeper paths (e.g. GitLab subgroups) collapse to the first and
+// last segment, which covers the common case.
+func ownerRepo(p string) (owner, repo string, ok bool) {
+	p = strings.Trim(p, "/")
+	p = strings.TrimSuffix(p, ".git")
+	parts := strings.Split(p, "/")
+	if len(parts) < 2 || parts[0] == "" || parts[len(parts)-1] == "" {
+		return "", "", false
+	}
+	owner = strings.Join(parts[:len(parts)-1], "/")
+	repo = parts[len(parts)-1]
+	return owner, repo, true
 }
 
 // runBuildAsync executes one build on a detached, timeout-bound context in a

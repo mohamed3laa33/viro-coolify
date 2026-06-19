@@ -17,6 +17,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
+
+	"github.com/mohamed3laa33/viro-coolify/apps/api/internal/kube"
 )
 
 // Config holds the static settings KanikoBuilder needs. All values originate
@@ -49,6 +51,27 @@ type Config struct {
 	// Timeout bounds a single build (Job creation -> completion). Zero falls back
 	// to defaultBuildTimeout.
 	Timeout time.Duration
+
+	// --- Cloud Native Buildpacks (no-Dockerfile) strategy ---
+	// These configure the buildpacks executor used when a source has NO Dockerfile.
+	// The Dockerfile/Kaniko path above ignores them. All originate from the
+	// VORTEX_BUILDPACKS_* / VORTEX_BUILD_BUILDPACKS_IMAGE env (admin-tunable).
+
+	// BuildpacksBuilderImage is the default CNB builder image the lifecycle uses to
+	// auto-detect and assemble the app (e.g. paketobuildpacks/builder-jammy-base,
+	// from VORTEX_BUILDPACKS_BUILDER). A per-request Request.Builder overrides it.
+	// Empty lets the kube builder use its pinned default. When the whole field is
+	// empty the no-Dockerfile path still works (the kube default applies); this is
+	// the single image knob the wiring layer threads through.
+	BuildpacksBuilderImage string
+	// BuildpacksImage is the pinned CNB lifecycle executor image
+	// (VORTEX_BUILD_BUILDPACKS_IMAGE). Empty lets the kube builder use its pinned
+	// default.
+	BuildpacksImage string
+	// GitCloneImage is the small image the buildpacks path uses to clone source
+	// into the lifecycle workspace (the lifecycle does not clone git itself). Empty
+	// lets the kube builder use its pinned default.
+	GitCloneImage string
 }
 
 const (
@@ -74,18 +97,32 @@ const (
 	denyEgressPolicy = "vortex-builder-egress"
 )
 
-// KanikoBuilder is the real Builder: it submits a kaniko executor Job to the
-// build namespace, waits for completion, and returns the pushed image (or an
-// error with the build pod's tail logs on failure).
+// KanikoBuilder is the real Builder and the ONE coherent build entrypoint: it
+// dispatches on Request.Strategy. A Dockerfile source builds via the kaniko
+// executor Job in this package (submitted to the build namespace, polled to
+// completion, returning the pushed image or an error with the build pod's tail
+// logs). A no-Dockerfile source builds via Cloud Native Buildpacks, delegated to
+// the kube package's KubeBuilder (the Wave 2 buildpacks executor) so the
+// buildpacks Job logic lives in exactly one place. Both paths share the same
+// hardened build namespace (RBAC-less SA + default-deny egress).
 type KanikoBuilder struct {
 	cfg    Config
 	client kubernetes.Interface
+
+	// bp is the Cloud Native Buildpacks executor used for the no-Dockerfile
+	// strategy. It is the Wave 2 kube.KubeBuilder, configured from the same build
+	// namespace / push secret / git credentials so both strategies are isolated
+	// identically. Never nil after NewKanikoBuilder.
+	bp kube.Builder
 }
 
 var _ Builder = (*KanikoBuilder)(nil)
 
 // NewKanikoBuilder builds a KanikoBuilder from an existing clientset. Tests pass
-// client-go's fake clientset; production passes a real clientset.
+// client-go's fake clientset; production passes a real clientset. Despite the
+// name it is the dual-strategy entrypoint: it also constructs the Wave 2
+// buildpacks executor (kube.KubeBuilder) for no-Dockerfile sources, sharing the
+// same build namespace, push secret and git credentials.
 func NewKanikoBuilder(cfg Config, client kubernetes.Interface) *KanikoBuilder {
 	if cfg.Namespace == "" {
 		cfg.Namespace = "vortex-builds"
@@ -93,7 +130,27 @@ func NewKanikoBuilder(cfg Config, client kubernetes.Interface) *KanikoBuilder {
 	if cfg.KanikoImage == "" {
 		cfg.KanikoImage = defaultKanikoImage
 	}
-	return &KanikoBuilder{cfg: cfg, client: client}
+	return &KanikoBuilder{
+		cfg:    cfg,
+		client: client,
+		bp: kube.NewKubeBuilder(kube.BuilderConfig{
+			Namespace:            cfg.Namespace,
+			KanikoImage:          cfg.KanikoImage,
+			BuildpacksImage:      cfg.BuildpacksImage,
+			BuildpacksBuilder:    cfg.BuildpacksBuilderImage,
+			GitCloneImage:        cfg.GitCloneImage,
+			PushSecret:           cfg.PushSecret,
+			GitCredentialsSecret: cfg.GitCredentialsSecret,
+			Timeout:              cfg.Timeout,
+		}, client),
+	}
+}
+
+// NewBuilder is a clearer alias for NewKanikoBuilder: it constructs the
+// dual-strategy build entrypoint (Kaniko for Dockerfiles, Cloud Native
+// Buildpacks otherwise) from config and a clientset.
+func NewBuilder(cfg Config, client kubernetes.Interface) *KanikoBuilder {
+	return NewKanikoBuilder(cfg, client)
 }
 
 // gitHostPath restricts the host+path portion of a clone URL to a conservative
@@ -326,10 +383,52 @@ func (b *KanikoBuilder) gitCredentialsEnv() []corev1.EnvVar {
 
 func boolPtr(b bool) *bool { return &b }
 
-// Build submits the kaniko Job, polls to completion within the build timeout,
-// and returns the pushed image on success. On failure it collects the build
-// pod's tail logs and returns an error including them.
+// Build runs the image build for r, dispatching on the resolved strategy:
+//   - StrategyBuildpacks (no Dockerfile): delegated to the Wave 2 kube buildpacks
+//     executor (Cloud Native Buildpacks lifecycle Job), which honors
+//     Request.Builder / the configured CNB builder image.
+//   - StrategyDockerfile (default): the kaniko executor Job in this package.
+//
+// Both run in the same hardened build namespace. On failure each collects the
+// build pod's tail logs and returns an error including them — there is no
+// fake-success path.
 func (b *KanikoBuilder) Build(ctx context.Context, r Request) (Result, error) {
+	if r.resolveStrategy() == StrategyBuildpacks {
+		return b.buildWithBuildpacks(ctx, r)
+	}
+	return b.buildWithKaniko(ctx, r)
+}
+
+// buildWithBuildpacks delegates the no-Dockerfile strategy to the kube package's
+// KubeBuilder (the Wave 2 buildpacks executor), mapping the build.Request to a
+// kube.BuildRequest. The kube builder performs its own input validation + pod
+// hardening, so the buildpacks Job logic stays in exactly one place.
+func (b *KanikoBuilder) buildWithBuildpacks(ctx context.Context, r Request) (Result, error) {
+	res, err := b.bp.Build(ctx, kube.BuildRequest{
+		AppID:         r.AppID,
+		BuildID:       r.BuildID,
+		OrgSlug:       r.OrgSlug,
+		ProjectSlug:   r.ProjectSlug,
+		AppName:       r.AppName,
+		GitRepo:       r.GitRepo,
+		GitRef:        r.GitRef,
+		ContextDir:    r.ContextDir,
+		Strategy:      kube.StrategyBuildpacks,
+		HasDockerfile: false,
+		Builder:       r.Builder,
+		ImageRef:      r.ImageRef,
+		BuildArgs:     r.BuildArgs,
+	})
+	if err != nil {
+		return Result{}, err
+	}
+	return Result{Image: res.Image, Strategy: StrategyBuildpacks}, nil
+}
+
+// buildWithKaniko submits the kaniko Job, polls to completion within the build
+// timeout, and returns the pushed image on success. On failure it collects the
+// build pod's tail logs and returns an error including them.
+func (b *KanikoBuilder) buildWithKaniko(ctx context.Context, r Request) (Result, error) {
 	if err := r.validate(); err != nil {
 		return Result{}, err
 	}
@@ -361,7 +460,7 @@ func (b *KanikoBuilder) Build(ctx context.Context, r Request) (Result, error) {
 		}
 		return Result{}, err
 	}
-	return Result{Image: r.ImageRef}, nil
+	return Result{Image: r.ImageRef, Strategy: StrategyDockerfile}, nil
 }
 
 // ensureIsolation idempotently provisions the build namespace's isolation

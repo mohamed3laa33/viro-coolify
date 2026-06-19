@@ -364,6 +364,11 @@ func (b *KubeBackend) mergeListenerIntoGateway(ctx context.Context, gwName, host
 		if err := unstructured.SetNestedSlice(gw.Object, listeners, "spec", "listeners"); err != nil {
 			return err
 		}
+		// external-dns: when the custom domain falls under a managed zone, accumulate
+		// it on the Gateway's external-dns hostname annotation so the controller
+		// publishes a record for it pointing at the Gateway LB. No-op (and no spurious
+		// re-write) when external-dns is off or the zone is unmanaged.
+		b.addHostToGatewayDNS(gw, host)
 		_, err = b.dynamic.Resource(gatewayGVR).Namespace(ns).Update(ctx, gw, metav1.UpdateOptions{})
 		return err
 	})

@@ -32,7 +32,10 @@ var _ Builder = (*FakeBuilder)(nil)
 // NewFakeBuilder returns an initialized FakeBuilder that succeeds by default.
 func NewFakeBuilder() *FakeBuilder { return &FakeBuilder{} }
 
-// Build records r and returns the configured result/error.
+// Build records r and returns the configured result/error. The returned
+// Strategy reflects the resolved strategy (explicit or detected from
+// HasDockerfile), so a test can assert a no-Dockerfile request routed to
+// buildpacks without a real cluster.
 func (f *FakeBuilder) Build(_ context.Context, r Request) (Result, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -44,7 +47,7 @@ func (f *FakeBuilder) Build(_ context.Context, r Request) (Result, error) {
 	if f.ImageOverride != "" {
 		img = f.ImageOverride
 	}
-	return Result{Image: img}, nil
+	return Result{Image: img, Strategy: r.resolveStrategy()}, nil
 }
 
 // Calls returns a copy of the recorded requests (safe for concurrent readers).

@@ -1,0 +1,102 @@
+{{- if and .Values.serviceAccount.create .Values.rbac.enabled }}
+# Control-plane RBAC.
+#
+# When the Vortex control plane runs ON Kubernetes (ingress.enabled / the K8s
+# kube.Backend) it DOES talk to the API server: it provisions one namespace per
+# org-project, installs tenant workloads via `helm upgrade --install`
+# (common-chart: Deployments/StatefulSets/Services/ConfigMaps/Secrets/HTTPRoutes/
+# ScaledObjects/PVCs/PDBs/HPAs/ServiceAccounts), and manages routing/scaling CRDs
+# directly through the dynamic client (Gateways, HTTPRoutes, cert-manager
+# Certificates, KEDA ScaledObjects + HTTPScaledObjects). Because those objects live
+# across MANY tenant namespaces created at runtime, the grant is a ClusterRole
+# bound to the control-plane ServiceAccount.
+#
+# Scope note: this only grants the control plane (api pod). Tenant workloads run
+# under their own per-app ServiceAccount with automountServiceAccountToken disabled
+# and no RBAC — they never reach the API server.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "viro.fullname" . }}-control-plane
+  labels:
+    {{- include "viro.labels" . | nindent 4 }}
+rules:
+  # Namespaces: one per org-project, created on demand (create/get; list/watch for
+  # reconciliation). No delete — tenant teardown removes the workloads, not the
+  # shared namespace.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  # Core workload + Helm-release objects the control plane (and Helm under it)
+  # creates, reconciles and tears down in tenant namespaces. Helm's default storage
+  # driver persists release state as Secrets, so Secrets need the full lifecycle.
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps", "services", "serviceaccounts", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Pods/endpoints/events are read for status, logs and metrics surfacing.
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "endpoints", "events"]
+    verbs: ["get", "list", "watch"]
+  # Tenant compute: Deployments/StatefulSets (+ scale subresource for scale-to-zero
+  # / manual scaling) and ReplicaSets for rollout status.
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "replicasets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale", "statefulsets/scale"]
+    verbs: ["get", "update", "patch"]
+  # Autoscaling + disruption budgets rendered by common-chart.
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Tenant network isolation rendered per namespace.
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Gateway API: the control plane AUTO-SHARDS custom-domain listeners by creating
+  # and deleting "<gateway>-shard-<n>" Gateways (Wave 3 sharding) and merging
+  # listeners into the primary, and it creates/deletes per-app HTTPRoutes attaching
+  # to the shared Gateway via parentRefs. (Previously only get/update on gateways.)
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gateways"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # GatewayClass is read to resolve the class the shards must join.
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gatewayclasses"]
+    verbs: ["get", "list", "watch"]
+  # KEDA: ScaledObjects drive HPA-style autoscaling (the control plane also
+  # patches the paused-replicas annotation for scale-to-zero); HTTPScaledObjects
+  # (keda-http-add-on) provide HTTP scale-from-zero / wake-on-request.
+  - apiGroups: ["keda.sh"]
+    resources: ["scaledobjects"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["http.keda.sh"]
+    resources: ["httpscaledobjects"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # cert-manager: per-org wildcard Certificates issued imperatively
+  # (EnsureOrgWildcard) so the 3-label tenant host terminates TLS.
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "viro.fullname" . }}-control-plane
+  labels:
+    {{- include "viro.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "viro.fullname" . }}-control-plane
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "viro.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

@@ -262,6 +262,10 @@ func newBuilder(cfg *config.Config, logger *slog.Logger) build.Builder {
 		PushSecret:           pushSecret,
 		GitCredentialsSecret: cfg.BuildGitCreds,
 		Timeout:              time.Duration(cfg.BuildTimeoutSec) * time.Second,
+		// CNB buildpacks builder image: when set the builder can detect+build app
+		// source without a Dockerfile (consumed by the build package). Empty leaves
+		// the Dockerfile/kaniko path in force.
+		BuildpacksBuilderImage: cfg.BuildpacksBuilderImage,
 	}, cs)
 }
 
@@ -284,12 +288,20 @@ func newKubeBackend(cfg *config.Config, logger *slog.Logger, reg *registry) kube
 		ChartPath:                   cfg.KubeChartPath,
 		GatewayName:                 cfg.GatewayName,
 		GatewayNamespace:            cfg.GatewayNamespace,
+		GatewayShardMaxListeners:    cfg.GatewayShardMaxListeners,
+		GatewayShardLBSharing:       cfg.GatewayShardLBSharing,
 		ClusterIssuer:               cfg.ClusterIssuer,
 		CPUOvercommitFactor:         settings.CPUOvercommitFactor,
 		MemoryOvercommitFactor:      settings.MemoryOvercommitFactor,
 		HelmTimeout:                 time.Duration(cfg.HelmTimeoutSec) * time.Second,
 		RegistryPullSecret:          cfg.RegistryPullSecretSource,
 		RegistryPullSecretNamespace: cfg.RegistryPullSecretNamespace,
+		// ExternalDNS automation (consumed by the kube backend). When enabled the
+		// backend manages per-tenant DNS records within the configured zones at the
+		// configured TTL instead of emitting manual DNS instructions.
+		ExternalDNSEnabled: cfg.ExternalDNSEnabled,
+		ExternalDNSZones:   cfg.ExternalDNSZones,
+		DNSRecordTTL:       cfg.DNSRecordTTL,
 	}
 	// Count helm execs/failures into the metrics registry without coupling the
 	// kube package to the metrics layer (an observing decorator over the real runner).

@@ -76,12 +76,24 @@ web:
     seccompProfile:
       type: RuntimeDefault
 
-# Dedicated ServiceAccount for the control plane. Token automounting is disabled
-# because neither the api nor the web pod talks to the Kubernetes API.
+# Dedicated ServiceAccount for the control plane. Token automounting is disabled by
+# default (Docker-runtime mode, where neither pod talks to the Kubernetes API). When
+# rbac.enabled is true the api pod runs the K8s kube.Backend and DOES need its token
+# — see rbac below and api.yaml, which mounts the token only in that mode.
 serviceAccount:
   create: true
   name: ""                  # defaults to the release fullname when empty
   annotations: {}
+
+# Control-plane RBAC. Enable when the control plane runs the Kubernetes runtime
+# (kube.Backend / ingress.enabled): it then provisions namespaces, installs tenant
+# workloads via Helm, and manages Gateways/HTTPRoutes, KEDA ScaledObjects +
+# HTTPScaledObjects, and cert-manager Certificates across tenant namespaces. The
+# template binds a ClusterRole to the control-plane ServiceAccount; when enabled the
+# api pod also gets its ServiceAccount token mounted. Leave false for the
+# Docker-runtime control plane, which never reaches the API server.
+rbac:
+  enabled: true
 
 # Control-plane network isolation. Default-deny ingress plus an explicit allow for
 # the Gateway/proxy namespace to reach the web/api ports. Tenant namespaces are NOT

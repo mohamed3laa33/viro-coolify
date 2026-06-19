@@ -66,6 +66,9 @@ repositories:
     url: https://kedacore.github.io/charts
   - name: metrics-server
     url: https://kubernetes-sigs.github.io/metrics-server/
+  # Maintained community chart from the kubernetes-sigs/external-dns project.
+  - name: external-dns
+    url: https://kubernetes-sigs.github.io/external-dns/
   - name: prometheus-community
     url: https://prometheus-community.github.io/helm-charts
   - name: grafana
@@ -104,6 +107,14 @@ environments:
         veleroBucket: '{{ env "VORTEX_VELERO_BUCKET" | default "" }}'
         veleroRegion: '{{ env "VORTEX_VELERO_REGION" | default "" }}'
         veleroS3Url: '{{ env "VORTEX_VELERO_S3_URL" | default "" }}'
+        # external-dns: automated DNS for platform-owned zones. Gated by
+        # VORTEX_EXTERNAL_DNS_ENABLED — when false the release is NOT installed and
+        # DNS stays fully manual (no fake-success path, invariant #6). The zone list
+        # mirrors the control plane's kube.Config.ExternalDNSZones (both fed from
+        # VORTEX_EXTERNAL_DNS_ZONES) so they cannot drift; defaults to the base domain
+        # so the wildcard tenant domain is always covered when enabled.
+        externalDnsEnabled: '{{ env "VORTEX_EXTERNAL_DNS_ENABLED" | default "false" }}'
+        externalDnsZones: '{{ env "VORTEX_EXTERNAL_DNS_ZONES" | default (env "VORTEX_BASE_DOMAIN" | default "vortex.v60ai.com") }}'
 
 ---
 
@@ -243,6 +254,42 @@ releases:
         tls:
           digitalOceanToken: '{{ .Values.doToken }}'
 
+  # ---- Automated DNS for platform-owned zones (Gateway API + Service sources) ----
+  # Maintained kubernetes-sigs/external-dns chart. Ordered AFTER envoy-gateway /
+  # cert-manager AND vortex-bootstrap so the Gateway API CRDs exist and the shared
+  # Gateway has a LoadBalancer address to publish records against. Gated by
+  # VORTEX_EXTERNAL_DNS_ENABLED — when false the release is NOT installed and DNS
+  # stays fully manual (no fake-success path, invariant #6). domainFilters /
+  # txtOwnerId come from env so they mirror the control plane's kube.Config
+  # (record TTL is set per-route by the API via DNSRecordTTL, not here). The
+  # `external-dns-do` Secret (key `token`) is created by deploy/install.sh from
+  # VORTEX_EXTERNAL_DNS_DO_TOKEN (defaulting to VORTEX_DO_TOKEN).
+  - name: external-dns
+    namespace: external-dns
+    createNamespace: true
+    chart: external-dns/external-dns
+    version: 1.15.0
+    labels:
+      tier: platform
+    installed: '{{ eq .Values.externalDnsEnabled "true" }}'
+    needs:
+      - cert-manager/cert-manager
+      - envoy-gateway-system/envoy-gateway
+      - vortex/vortex-bootstrap
+    values:
+      - ./helm-values/external-dns.yaml
+      # Zones + ownership id come from env so they mirror the API's kube.Config
+      # (ExternalDNSZones). The record target is derived from the shared Gateway's
+      # status.addresses by the gateway-httproute source — no manual target needed.
+      - txtOwnerId: '{{ .Values.baseDomain }}'
+        domainFilters: '{{ .Values.externalDnsZones | splitList "," | toJson }}'
+        env:
+          - name: DO_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: external-dns-do
+                key: token
+
   # ---- Vortex control plane (api + web) wired to Postgres ----
   - name: vortex
     namespace: vortex
@@ -262,6 +309,11 @@ releases:
             VORTEX_HTTP_ADDR: ":8080"
             VORTEX_ADMIN_EMAILS: '{{ .Values.adminEmails }}'
             VORTEX_BILLING_ENABLED: '{{ if .Values.stripeSecretKey }}true{{ else }}false{{ end }}'
+            # Mirror the external-dns release gate so the control plane stamps the
+            # external-dns annotations on tenant Gateways/HTTPRoutes for the same
+            # zones the external-dns controller is allowed to write (kube.Config).
+            VORTEX_EXTERNAL_DNS_ENABLED: '{{ .Values.externalDnsEnabled }}'
+            VORTEX_EXTERNAL_DNS_ZONES: '{{ .Values.externalDnsZones }}'
         web_public_api_url: 'https://api.{{ .Values.baseDomain }}'
         ingress:
           enabled: true

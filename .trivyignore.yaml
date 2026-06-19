@@ -1,0 +1,28 @@
+# Trivy misconfiguration ignores — each entry is a deliberate, justified
+# exception scoped to a single file (not a blanket suppression). Reviewed as part
+# of the deploy-ready work. See https://avd.aquasec.com/misconfig/ for each ID.
+misconfigurations:
+  # The Vortex control plane IS the platform operator: it provisions tenant
+  # workloads cluster-wide via Helm (Deployments, Services, Secrets, ConfigMaps,
+  # PVCs, ServiceAccounts, NetworkPolicies, Gateways, HTTPRoutes, HTTPScaledObjects)
+  # into namespaces it creates on demand. A namespaced Role cannot bind to a
+  # not-yet-existing tenant namespace, so a ClusterRole with manage verbs is
+  # required by design; least-privilege here would break tenant provisioning.
+  - id: KSV-0041
+    paths:
+      - "deploy/helm/viro/templates/rbac.yaml"
+    statement: "Control plane must manage tenant Secrets via Helm — required by design."
+  - id: KSV-0056
+    paths:
+      - "deploy/helm/viro/templates/rbac.yaml"
+    statement: "Control plane must manage tenant Services/NetworkPolicies/HTTPRoutes via Helm — required by design."
+
+  # Tenant application workloads (this base template renders arbitrary user
+  # containers) require a writable root filesystem — most apps write to disk and
+  # forcing readOnlyRootFilesystem would break them. Isolation is enforced instead
+  # via namespace-per-org-project, NetworkPolicies, Pod Security Admission
+  # (restricted), runAsNonRoot, drop-ALL capabilities, and seccomp RuntimeDefault.
+  - id: KSV-0014
+    paths:
+      - "deploy/charts/common-chart/templates/deployment.yaml"
+    statement: "Tenant workloads need a writable rootfs; isolation enforced via PSA/NetworkPolicy/non-root/drop-caps/seccomp."

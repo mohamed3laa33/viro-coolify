@@ -45,6 +45,13 @@ web-build: ## Production-build the web app
 web-test: ## Run web unit tests
 	cd $(WEB_DIR) && npm test --silent
 
+## ----- Deploy -----
+.PHONY: install install-dry
+install: ## One-shot install the whole platform (env-driven; see deploy/install.sh --help)
+	deploy/install.sh $(INSTALL_ARGS)
+install-dry: ## Preview the install (terraform plan + helmfile template; nothing applied)
+	deploy/install.sh --dry-run $(INSTALL_ARGS)
+
 ## ----- Aggregate -----
 .PHONY: test build
 test: api-test ## Run all unit tests
