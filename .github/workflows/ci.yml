@@ -15,7 +15,7 @@ jobs:
       run:
         working-directory: apps/api
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
           go-version: "1.26"
@@ -41,7 +41,7 @@ jobs:
       run:
         working-directory: apps/web
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
           node-version: "22"
@@ -95,7 +95,7 @@ jobs:
     # Runs on push/PR. Mirrored locally by ./scripts/security-scan.sh.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Trivy
         run: |
           mkdir -p "$RUNNER_TEMP/bin"
@@ -124,7 +124,7 @@ jobs:
     container:
       image: semgrep/semgrep
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Semgrep scan
         run: semgrep ci
         env:
@@ -139,7 +139,7 @@ jobs:
     # tests and `next build` can't — e.g. the CSP/hydration regression.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
           go-version: "1.26"
