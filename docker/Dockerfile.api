@@ -10,7 +10,7 @@
 # helm's linux release is a static (CGO-free) binary, so it runs on distroless.
 # Only `helm` is exec'd by the API — kubectl is not invoked anywhere — so we do
 # not ship kubectl.
-FROM alpine:3.21 AS helm
+FROM alpine:3.24 AS helm
 # Bump HELM_VERSION + both checksums together when upgrading helm.
 ARG HELM_VERSION=3.21.1
 ARG HELM_SHA256_AMD64=a349c62d6ab2d5d11f044fc0d3afa6deed7d27cc7d5c351f536b169d9fc2cc1a
